@@ -32,9 +32,10 @@ AppData, temporary files, and cache folders are intentionally excluded.
 2. Starting the application
 ---------------------------
 
-Normally, double-click "Sicherung.lnk". The VBS and BAT launchers can also be
-used. The application automatically uses German on a German Windows display
-language and English on all other display languages.
+Normally, double-click "Bibliothekssicherung starten.vbs". It launches the
+application without a console window. The BAT launcher can be used for
+diagnostics. The application automatically uses German on a German Windows
+display language and English on all other display languages.
 
 
 3. Creating a backup
@@ -48,6 +49,13 @@ language and English on all other display languages.
   6. Wait for the successful completion message.
 
 The destination drive must remain connected while the operation is running.
+
+After a successful backup, the application stores the drive's unique volume
+identifier in the local Windows user profile. On the next launch, the drive is
+selected automatically and marked with a star even if Windows assigned a
+different drive letter. A warning is shown before backing up to another drive.
+If confirmed and completed successfully, that drive becomes the remembered
+backup drive.
 
 
 4. Backup behavior

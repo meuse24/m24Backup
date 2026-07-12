@@ -10,6 +10,9 @@ dokumentiert. Die Versionierung orientiert sich an
 
 - Backup-Ampel für das ausgewählte Laufwerk mit Abschlussstatus, Alter,
   Laufzeit und Anzahl der zuletzt erfolgreich gesicherten Ordner
+- Wiedererkennung und automatische Auswahl des zuletzt erfolgreich verwendeten
+  Sicherungslaufwerks über seine Datenträger-ID
+- Sicherheitsabfrage vor dem Wechsel auf ein anderes Sicherungslaufwerk
 
 ## [1.0.0] – 2026-07-12
 

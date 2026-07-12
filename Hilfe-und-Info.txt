@@ -36,11 +36,11 @@ gesichert.
 Die grafische Oberfläche kann über eine der vorhandenen Startdateien geöffnet
 werden:
 
-  - Sicherung.lnk
   - Bibliothekssicherung starten.vbs
   - Bibliothekssicherung starten.bat
 
-Normalerweise genügt ein Doppelklick auf „Sicherung.lnk“.
+Normalerweise genügt ein Doppelklick auf
+„Bibliothekssicherung starten.vbs“. Dabei erscheint kein Konsolenfenster.
 
 
 3. Eine Sicherung erstellen
@@ -58,6 +58,14 @@ Nach dem Abschluss können der Sicherungsordner und das technische Protokoll
 direkt über die entsprechenden Schaltflächen geöffnet werden.
 
 Während einer Sicherung darf das Ziellaufwerk nicht entfernt werden.
+
+Nach einer erfolgreichen Sicherung merkt sich die App die eindeutige
+Datenträger-ID dieses Laufwerks im lokalen Windows-Benutzerprofil. Beim
+nächsten Start wird es auch dann automatisch ausgewählt und mit einem Stern
+markiert, wenn Windows ihm einen anderen Laufwerksbuchstaben zugewiesen hat.
+Vor einer Sicherung auf ein anderes Laufwerk erscheint eine Warnung. Wird sie
+bestätigt und die Sicherung erfolgreich abgeschlossen, wird dieses Laufwerk
+künftig als bekanntes Sicherungslaufwerk verwendet.
 
 
 4. Verhalten der Sicherung
@@ -249,10 +257,10 @@ Bibliothekssicherung.ps1
   Worker für Backup und Restore. Er führt Preflight-Prüfungen durch, erstellt
   Transferpläne und startet Robocopy.
 
-Bibliothekssicherung starten.vbs / .bat und Sicherung.lnk
+Bibliothekssicherung starten.vbs / .bat
 
-  Komfortable Starter für die grafische Oberfläche ohne dauerhaft sichtbares
-  Konsolenfenster.
+  Der VBS-Starter öffnet die grafische Oberfläche ohne sichtbares
+  Konsolenfenster. Der BAT-Starter ist für Diagnosezwecke vorgesehen.
 
 
 14. Tech-Stack

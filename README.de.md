@@ -16,6 +16,8 @@ auf Englisch.
 - Zeigt Fortschritt und ein verständliches Ergebnis direkt im Fenster an.
 - Zeigt eine Backup-Ampel mit Alter, Dauer und Ordnerzahl der letzten Sicherung
   auf dem ausgewählten Laufwerk.
+- Erkennt das zuletzt erfolgreich verwendete Sicherungslaufwerk anhand seiner
+  Datenträger-ID wieder, auch wenn Windows den Laufwerksbuchstaben ändert.
 - Erstellt ein lesbares Protokoll und `_Sicherungsinfo.txt` auf dem Ziel.
 - Unterstützt kooperatives Abbrechen zwischen den Ordnern.
 - Bietet eine defensive Rücksicherung mit Metadatenprüfung, Vorschau und

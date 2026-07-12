@@ -53,6 +53,11 @@ $script:lastDestination = $null
 $script:backupStartedAt = $null
 $script:backupCancelled = $false
 $script:driveMap = @{}
+$script:activeDrive = $null
+$script:activeMode = $null
+$settingsDirectory = Join-Path $env:LOCALAPPDATA 'M24Backup'
+$settingsFile = Join-Path $settingsDirectory 'settings.json'
+$script:knownDrive = $null
 
 function Get-UserShellFolder {
     param(
@@ -93,6 +98,69 @@ function Get-NewestLogFile {
     return Get-ChildItem -LiteralPath $script:lastLogDir -Filter "*.log" -File -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
+}
+
+function Get-NormalizedVolumeSerial {
+    param($Disk)
+    if (-not $Disk -or -not $Disk.VolumeSerialNumber) { return '' }
+    return ([string]$Disk.VolumeSerialNumber).Trim().Replace('-', '').ToUpperInvariant()
+}
+
+function Get-KnownBackupDrive {
+    if (-not (Test-Path -LiteralPath $settingsFile -PathType Leaf)) { return $null }
+    try {
+        $settings = Get-Content -LiteralPath $settingsFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (-not $settings.KnownBackupDrive -or -not $settings.KnownBackupDrive.SerialNumber) { return $null }
+        return [pscustomobject]@{
+            SerialNumber = ([string]$settings.KnownBackupDrive.SerialNumber).Trim().Replace('-', '').ToUpperInvariant()
+            VolumeName = [string]$settings.KnownBackupDrive.VolumeName
+            LastDeviceId = [string]$settings.KnownBackupDrive.LastDeviceId
+            SavedAt = [string]$settings.KnownBackupDrive.SavedAt
+        }
+    } catch {
+        # Eine defekte Komforteinstellung darf Sicherung und Restore nie blockieren.
+        return $null
+    }
+}
+
+function Test-IsKnownBackupDrive {
+    param($Disk)
+    $serial = Get-NormalizedVolumeSerial -Disk $Disk
+    return $script:knownDrive -and $serial -and
+        $serial.Equals($script:knownDrive.SerialNumber, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Save-KnownBackupDrive {
+    param($Disk)
+
+    $serial = Get-NormalizedVolumeSerial -Disk $Disk
+    if (-not $serial) {
+        throw (L 'Die Datenträger-ID konnte nicht gelesen werden.' 'The drive identifier could not be read.')
+    }
+
+    $knownDrive = [pscustomobject]@{
+        SerialNumber = $serial
+        VolumeName = [string]$Disk.VolumeName
+        LastDeviceId = [string]$Disk.DeviceID
+        SavedAt = (Get-Date).ToString('o')
+    }
+    $settings = [ordered]@{ Version = 1; KnownBackupDrive = $knownDrive }
+    $json = $settings | ConvertTo-Json -Depth 4
+    New-Item -ItemType Directory -Path $settingsDirectory -Force | Out-Null
+    $temporaryFile = Join-Path $settingsDirectory ("settings.{0}.tmp" -f [guid]::NewGuid().ToString('N'))
+    $backupFile = Join-Path $settingsDirectory ("settings.{0}.bak" -f [guid]::NewGuid().ToString('N'))
+    try {
+        [System.IO.File]::WriteAllText($temporaryFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+        if ([System.IO.File]::Exists($settingsFile)) {
+            [System.IO.File]::Replace($temporaryFile, $settingsFile, $backupFile, $true)
+        } else {
+            [System.IO.File]::Move($temporaryFile, $settingsFile)
+        }
+        $script:knownDrive = $knownDrive
+    } finally {
+        Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-BackupHealth {
@@ -315,6 +383,8 @@ $driveCombo.Size = New-Object System.Drawing.Size(549, 27)
 $driveCombo.Anchor = "Top, Left, Right"
 $driveCombo.TabIndex = 3
 $form.Controls.Add($driveCombo)
+
+$driveToolTip = New-Object System.Windows.Forms.ToolTip
 
 $refreshButton = New-Object System.Windows.Forms.Button
 $refreshButton.Text = L "Aktualisieren" "Refresh"
@@ -685,17 +755,22 @@ function Update-DriveList {
             Where-Object { $_.DriveType -in 2, 3 -and $_.DeviceID -ne $systemDrive -and $_.Size -gt 0 } |
             Sort-Object DriveType, DeviceID)
 
+        $preferredIndex = -1
         foreach ($disk in $drives) {
             $label = if ($disk.VolumeName) { $disk.VolumeName } else { L "ohne Namen" "unnamed" }
             $type = if ($disk.DriveType -eq 2) { L "Wechseldatenträger" "Removable drive" } else { L "Lokaler Datenträger" "Local drive" }
             $freeGb = [math]::Round($disk.FreeSpace / 1GB, 1)
             $display = "{0}  -  {1}  ({2:N1} GB frei, {3})" -f $disk.DeviceID, $label, $freeGb, $type
+            if (Test-IsKnownBackupDrive -Disk $disk) {
+                $display = "★ {0}" -f $display
+                $preferredIndex = $driveCombo.Items.Count
+            }
             $script:driveMap[$display] = $disk
             [void]$driveCombo.Items.Add($display)
         }
 
         if ($driveCombo.Items.Count -gt 0) {
-            $driveCombo.SelectedIndex = 0
+            $driveCombo.SelectedIndex = if ($preferredIndex -ge 0) { $preferredIndex } else { 0 }
         } else {
             $driveInfoLabel.Text = L "Kein geeignetes Ziellaufwerk gefunden." "No suitable drive was found."
             $startButton.Enabled = $false
@@ -714,6 +789,11 @@ $driveCombo.Add_SelectedIndexChanged({
         $driveInfoLabel.Text = (L "{0:N1} GB gesamt · {1}" "{0:N1} GB total · {1}") -f $sizeGb, $fileSystem
         $fat32Label.Visible = $fileSystem -eq "FAT32"
         if ($restoreRadio.Checked) { $fat32Label.Visible = $false }
+        $driveToolTip.SetToolTip($driveCombo, $(if (Test-IsKnownBackupDrive -Disk $disk) {
+            L 'Bekanntes Sicherungslaufwerk – wird automatisch ausgewählt.' 'Known backup drive — selected automatically.'
+        } else {
+            L 'Dieses Laufwerk ist noch nicht als Sicherungslaufwerk gespeichert.' 'This drive is not currently remembered as the backup drive.'
+        }))
         Update-BackupHealth
         Update-LibraryList
         Update-SelectionState
@@ -744,6 +824,16 @@ $startButton.Add_Click({
     }
 
     $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+    if ($backupRadio.Checked -and $script:knownDrive -and -not (Test-IsKnownBackupDrive -Disk $disk)) {
+        $knownName = if ($script:knownDrive.VolumeName) { $script:knownDrive.VolumeName } else { $script:knownDrive.LastDeviceId }
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            ((L "Das ausgewählte Laufwerk ist nicht das bekannte Sicherungslaufwerk '{0}'.`r`n`r`nWenn die Sicherung erfolgreich ist, wird künftig dieses Laufwerk wiedererkannt. Trotzdem fortfahren?" "The selected drive is not the known backup drive '{0}'.`r`n`r`nIf the backup succeeds, this drive will be remembered instead. Continue anyway?") -f $knownName),
+            (L 'Anderes Sicherungslaufwerk' 'Different backup drive'),
+            'YesNo',
+            'Warning'
+        )
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    }
     if ($backupRadio.Checked -and $disk.DriveType -eq 3) {
         $answer = [System.Windows.Forms.MessageBox]::Show(
             (L "Das ausgewählte Ziel ist ein internes Laufwerk. Eine Sicherung auf einem externen USB-Laufwerk schützt besser vor Defekten und Schadsoftware.`r`n`r`nTrotzdem fortfahren?" "The selected destination is an internal drive. An external USB drive offers better protection against hardware failure and malware.`r`n`r`nContinue anyway?"),
@@ -766,6 +856,7 @@ $startButton.Add_Click({
     $script:lastDestination = Join-Path $drive ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
     $script:backupStartedAt = Get-Date
     $script:backupCancelled = $false
+    $script:activeDrive = $disk
     $script:restorePreviewShown = $false
     $script:scanWarningShown = $false
     $cancelButton.Text = if ($restoreRadio.Checked) { L "Wiederherstellung abbrechen" "Cancel restore" } else { L "Sicherung abbrechen" "Cancel backup" }
@@ -796,6 +887,7 @@ $startButton.Add_Click({
         $powershellExe = Join-Path $PSHOME "powershell.exe"
         $selectedArgument = $selectedFolders -join '|'
         $mode = if ($restoreRadio.Checked) { 'Restore' } else { 'Backup' }
+        $script:activeMode = $mode
         $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode "{1}" -ParentProcessId "{2}" -UsbDrive "{3}" -Silent -StatusFile "{4}" -ResultFile "{5}" -CancelFile "{6}" -PreviewFile "{7}" -ApprovalFile "{8}" -SelectedFolders "{9}"' -f $coreScript, $mode, $PID, $drive, $script:statusFile, $script:resultFile, $script:cancelFile, $script:previewFile, $script:approvalFile, $selectedArgument
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
         $startInfo.FileName = $powershellExe
@@ -833,6 +925,8 @@ $startButton.Add_Click({
         $script:cancelFile = $null
         $script:previewFile = $null
         $script:approvalFile = $null
+        $script:activeDrive = $null
+        $script:activeMode = $null
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, (L "Fehler" "Error"), "OK", "Error") | Out-Null
     }
 })
@@ -984,6 +1078,19 @@ $timer.Add_Tick({
                 } else {
                     $resultBox.Text = L "Vorgang erfolgreich abgeschlossen." "Operation completed successfully."
                 }
+                if ($script:activeMode -eq 'Backup' -and $script:activeDrive) {
+                    try {
+                        Save-KnownBackupDrive -Disk $script:activeDrive
+                        $driveToolTip.SetToolTip($driveCombo, (L 'Dieses Laufwerk ist jetzt als bekanntes Sicherungslaufwerk gespeichert.' 'This drive is now remembered as the backup drive.'))
+                    } catch {
+                        [System.Windows.Forms.MessageBox]::Show(
+                            ((L "Die Sicherung war erfolgreich, das Laufwerk konnte aber nicht für die automatische Wiedererkennung gespeichert werden:`r`n{0}" "The backup succeeded, but the drive could not be saved for automatic recognition:`r`n{0}") -f $_.Exception.Message),
+                            $form.Text,
+                            'OK',
+                            'Warning'
+                        ) | Out-Null
+                    }
+                }
             } else {
                 $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
                 $statusLabel.Text = (L "Vorgang mit Fehlern beendet (Exit-Code {0})." "Operation finished with errors (exit code {0}).") -f $exitCode
@@ -1002,6 +1109,8 @@ $timer.Add_Tick({
             $script:backupProcess.Dispose()
             $script:backupProcess = $null
             Update-BackupHealth
+            $script:activeDrive = $null
+            $script:activeMode = $null
             Update-ResultOverview
             if ($script:statusFile) {
                 Remove-Item -LiteralPath $script:statusFile -Force -ErrorAction SilentlyContinue
@@ -1085,6 +1194,7 @@ $form.Add_FormClosed({
     if ($logoBox.Image) { $logoBox.Image.Dispose() }
     if ($appIcon) { $appIcon.Dispose() }
     if ($healthToolTip) { $healthToolTip.Dispose() }
+    if ($driveToolTip) { $driveToolTip.Dispose() }
 })
 
 # Beim Start liegt der Fokus auf "Sicherung starten", damit die Sicherung
@@ -1100,6 +1210,7 @@ foreach ($surface in @($targetSurface, $folderSurface, $activitySurface, $footer
     $surface.SendToBack()
 }
 
+$script:knownDrive = Get-KnownBackupDrive
 Update-DriveList
 Update-SelectionState
 
