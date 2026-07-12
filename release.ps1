@@ -107,6 +107,49 @@ function Enable-TemporaryGitHubAuthentication {
     return $true
 }
 
+function Invoke-GitHubCommandWithRetry {
+    param(
+        [string[]]$Arguments,
+        [string]$Description,
+        [string]$ExpectedReleaseTag,
+        [int]$MaximumAttempts = 3
+    )
+
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        $previousPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = & $gh @Arguments 2>&1
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
+        if ($exitCode -eq 0) { return $output }
+
+        # A request may have reached GitHub even when its response timed out.
+        # In that case a retry of "release create" reports a duplicate although
+        # the desired end state has already been reached.
+        if ($ExpectedReleaseTag) {
+            $previousPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'SilentlyContinue'
+                $releaseUrl = & $gh release view $ExpectedReleaseTag --json url --jq '.url' 2>$null
+                $releaseExists = $LASTEXITCODE -eq 0 -and $releaseUrl
+            } finally {
+                $ErrorActionPreference = $previousPreference
+            }
+            if ($releaseExists) { return $releaseUrl }
+        }
+
+        if ($attempt -eq $MaximumAttempts) {
+            throw "$Description ist nach $MaximumAttempts Versuchen fehlgeschlagen:`r`n$($output -join [Environment]::NewLine)"
+        }
+        $delay = [int][math]::Pow(2, $attempt)
+        Write-Warning "$Description fehlgeschlagen. Neuer Versuch in $delay Sekunden ($attempt/$MaximumAttempts)."
+        Start-Sleep -Seconds $delay
+    }
+}
+
 if (-not (Test-Path -LiteralPath (Join-Path $root '.git') -PathType Container)) {
     throw "Kein Git-Repository: $root"
 }
@@ -240,13 +283,13 @@ try {
     $artifactPaths = @($artifactNames | ForEach-Object { Join-Path $distDirectory $_ })
     if ($releaseExists) {
         if (-not $PSCmdlet.ShouldProcess($existingReleaseUrl, 'Release-Dateien aktualisieren')) { return }
-        & $gh release upload $releaseTag @artifactPaths --clobber
-        if ($LASTEXITCODE -ne 0) { throw 'GitHub-Release-Dateien konnten nicht aktualisiert werden.' }
+        $uploadArguments = @('release', 'upload', $releaseTag) + $artifactPaths + @('--clobber')
+        Invoke-GitHubCommandWithRetry -Arguments $uploadArguments -Description 'GitHub-Release-Dateien aktualisieren' | Out-Null
         $releaseUrl = $existingReleaseUrl
     } else {
         if (-not $PSCmdlet.ShouldProcess($releaseTag, 'GitHub Release erstellen')) { return }
-        $releaseUrl = & $gh release create $releaseTag @artifactPaths --verify-tag --title "M24 Backup $releaseVersion" --generate-notes
-        if ($LASTEXITCODE -ne 0) { throw 'GitHub Release konnte nicht erstellt werden.' }
+        $createArguments = @('release', 'create', $releaseTag) + $artifactPaths + @('--verify-tag', '--title', "M24 Backup $releaseVersion", '--generate-notes')
+        $releaseUrl = Invoke-GitHubCommandWithRetry -Arguments $createArguments -Description 'GitHub Release erstellen' -ExpectedReleaseTag $releaseTag
     }
 } finally {
     if ($temporaryToken) { Remove-Item Env:\GH_TOKEN -ErrorAction SilentlyContinue }

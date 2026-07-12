@@ -15,6 +15,8 @@ dokumentiert. Die Versionierung orientiert sich an
 - Sicherheitsabfrage vor dem Wechsel auf ein anderes Sicherungslaufwerk
 - Release-Orchestrator mit automatischer SemVer-Erhöhung, Schutzprüfungen,
   Build, Git-Tag, Push und Veröffentlichung der Artefakte als GitHub-Release
+- Automatische Wiederholungsversuche bei vorübergehenden GitHub-API- und
+  Netzwerkfehlern während der Release-Veröffentlichung
 
 ### Geändert
 
