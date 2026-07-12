@@ -1,131 +1,131 @@
-# M24 Backup – Bibliothekssicherung
+# M24 Backup
 
-Eine kompakte Windows-Anwendung zum sicheren Sichern und Wiederherstellen der
-persönlichen Ordner des angemeldeten Benutzers. Die Oberfläche erscheint auf
-deutschsprachigen Windows-Systemen auf Deutsch und auf allen anderen Systemen
-auf Englisch.
+**English** | [Deutsch](README.de.md)
 
-## Funktionen
+A compact Windows application for safely backing up and restoring the personal
+folders of the current user. The interface is displayed in German on German
+Windows systems and in English on all other systems.
 
-- Sichert Desktop, Dokumente, Downloads, Bilder, Musik, Videos, Favoriten,
-  gespeicherte Spiele und weitere erkannte Benutzerordner.
-- Nutzt Robocopy und löscht keine Dateien aus dem Sicherungsziel.
-- Prüft Ziel, freien Speicherplatz und FAT32-Einschränkungen vor dem Start.
-- Zeigt Fortschritt und ein verständliches Ergebnis direkt im Fenster an.
-- Erstellt ein lesbares Protokoll und `_Sicherungsinfo.txt` auf dem Ziel.
-- Unterstützt kooperatives Abbrechen zwischen den Ordnern.
-- Bietet eine defensive Rücksicherung mit Metadatenprüfung, Vorschau und
-  ausdrücklicher Bestätigung.
-- Läuft ohne Administratorrechte und ohne zusätzliche Laufzeitinstallation.
+## Features
+
+- Backs up Desktop, Documents, Downloads, Pictures, Music, Videos, Favorites,
+  Saved Games, and other detected user folders.
+- Uses Robocopy and never deletes files from the backup destination.
+- Checks the destination, available disk space, and FAT32 limitations before
+  starting.
+- Shows progress and a clear result directly in the application window.
+- Writes a readable log and `_Sicherungsinfo.txt` metadata to the destination.
+- Supports cooperative cancellation between folders.
+- Provides defensive restore with metadata validation, conflict preview, and
+  explicit user confirmation.
+- Runs without administrator privileges or additional runtime installation.
 
 > [!IMPORTANT]
-> Eine Sicherung ist erst verlässlich, wenn eine Rücksicherung stichprobenartig
-> geprüft wurde. Während der Wiederherstellung werden neuere lokale Dateien
-> geschützt; die Vorschau sollte trotzdem aufmerksam kontrolliert werden.
+> A backup is only trustworthy after a sample restore has been tested. Newer
+> local files are protected during restore, but the preview should still be
+> reviewed carefully.
 
 ## Installation
 
-Die empfohlene Variante ist die Setup-Datei aus den
-[GitHub Releases](https://github.com/meuse24/m24Backup/releases). Der Installer
-installiert die Anwendung ohne Administratorrechte pro Benutzer unter
-`%LocalAppData%\Programs\Bibliothekssicherung`, legt einen Startmenüeintrag an
-und kann optional eine Desktop-Verknüpfung erstellen.
+The recommended option is the setup file from
+[GitHub Releases](https://github.com/meuse24/m24Backup/releases). The installer
+runs without administrator privileges, installs the application per user in
+`%LocalAppData%\Programs\Bibliothekssicherung`, creates a Start menu shortcut,
+and can optionally create a desktop shortcut.
 
-Alternativ kann das portable ZIP vollständig entpackt und
-`Bibliothekssicherung starten.vbs` ausgeführt werden. Die Anwendung darf auch
-direkt auf einem Sicherungslaufwerk liegen.
+Alternatively, extract the portable ZIP completely and run
+`Bibliothekssicherung starten.vbs`. The portable edition can also be kept
+directly on a backup drive.
 
-## Bedienung in Kürze
+## Quick start
 
-1. Sicherungslaufwerk anschließen und die Anwendung starten.
-2. Modus **Sichern** und das gewünschte Ziellaufwerk auswählen.
-3. Zu sichernde Ordner markieren und **Sicherung starten** wählen.
-4. Den Abschlussstatus prüfen und bei Bedarf das Protokoll öffnen.
+1. Connect the backup drive and start the application.
+2. Select **Backup** mode and choose the destination drive.
+3. Select the folders to include and click **Start backup**.
+4. Check the final status and open the log if necessary.
 
-Für eine Rücksicherung den Modus **Wiederherstellen** wählen. Die Anwendung
-akzeptiert nur eine Sicherung, deren Computer- und Benutzerinformationen zum
-aktuellen Profil passen. Vor Änderungen erscheint eine Konfliktvorschau.
+To restore files, select **Restore** mode. The application only accepts a
+backup whose computer and user metadata match the current profile. A conflict
+preview is shown before any changes are made.
 
-Die ausführliche Anleitung ist im Projekt und in jeder Distribution enthalten:
+Detailed instructions are included in the repository and every distribution:
 
-- [`Hilfe-und-Info.txt`](Hilfe-und-Info.txt) – Deutsch
 - [`Help-and-Info.txt`](Help-and-Info.txt) – English
+- [`Hilfe-und-Info.txt`](Hilfe-und-Info.txt) – Deutsch
 
-## Systemvoraussetzungen
+## System requirements
 
-- Windows 10 ab Version 1809 oder Windows 11
+- Windows 10 version 1809 or later, or Windows 11
 - Windows PowerShell 5.1
-- .NET Framework mit Windows Forms
+- .NET Framework with Windows Forms
 - Robocopy
 
-Diese Komponenten sind in unterstützten Windows-Versionen bereits enthalten.
+These components are already included with supported Windows versions.
 
-## Datenschutz und Sicherheitsmodell
+## Privacy and safety model
 
-Die Anwendung arbeitet lokal. Sie überträgt keine Dateien und keine
-Nutzungsdaten ins Internet. Sicherungen werden nach Computer und Benutzer
-getrennt abgelegt. Bei einer Rücksicherung werden die Sicherungsmetadaten
-validiert, bevor lokale Dateien verändert werden. Robocopy-Rückgabecodes werden
-ausgewertet; echte Kopierfehler führen nicht zu einem falschen Erfolgshinweis.
+The application operates locally. It does not upload files, telemetry, or usage
+data. Backups are separated by computer and user. During restore, backup
+metadata is validated before local files are changed. Robocopy return codes are
+evaluated so that actual copy failures cannot be reported as success.
 
-Die Skripte werden mit `ExecutionPolicy Bypass` in einem separaten
-PowerShell-Prozess gestartet, damit lokale Richtlinien den Start nicht unnötig
-verhindern. Das ändert keine systemweite Ausführungsrichtlinie. Release-Dateien
-sollten nur aus einer vertrauenswürdigen Quelle bezogen und anhand von
-`SHA256SUMS.txt` geprüft werden.
+The scripts are launched with `ExecutionPolicy Bypass` in a separate PowerShell
+process to avoid unnecessary failures caused by local execution policies. This
+does not modify the system-wide execution policy. Only obtain releases from a
+trusted source and verify them against `SHA256SUMS.txt`.
 
-## Entwicklung
+## Development
 
-Die Anwendung besteht aus Windows PowerShell 5.1, Windows Forms und Robocopy.
-Oberfläche und Sicherungs-Worker laufen in getrennten Prozessen und tauschen
-atomar geschriebene Status- und JSON-Ergebnisdateien aus.
+M24 Backup is built with Windows PowerShell 5.1, Windows Forms, and Robocopy.
+The interface and backup worker run in separate processes and communicate
+through atomically written status files and structured JSON results.
 
-Lokaler Start:
+Run from source:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass `
   -File ".\Bibliothekssicherung-GUI.ps1"
 ```
 
-Die relativen Starter sind ebenfalls nutzbar:
+Relative launchers are also included:
 
-- `Bibliothekssicherung starten.vbs` – normaler Start ohne Konsolenfenster
-- `Bibliothekssicherung starten.bat` – Start für Diagnosezwecke
+- `Bibliothekssicherung starten.vbs` – normal launch without a console window
+- `Bibliothekssicherung starten.bat` – launch for diagnostic purposes
 
-### Release bauen
+### Building a release
 
-Für den Installer wird [Inno Setup 6](https://jrsoftware.org/isinfo.php)
-benötigt:
+[Inno Setup 6](https://jrsoftware.org/isinfo.php) is required to build the
+installer:
 
 ```powershell
 winget install --id JRSoftware.InnoSetup -e --scope user
 ```
 
-Nach dem Erstellen eines Versions-Tags baut das Skript Installer, portables ZIP
-und SHA-256-Prüfsummen:
+After creating a version tag, the build script produces the installer, portable
+ZIP, and SHA-256 checksums:
 
 ```powershell
 git tag -a v1.0.0 -m "M24 Backup 1.0.0"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\build.ps1" -RequireInstaller
 ```
 
-Die Version wird aus `git describe --tags --always --dirty` abgeleitet. Ein
-Build aus einem veränderten Arbeitsbaum erhält daher bewusst den Zusatz
-`-dirty`. Die fertigen Artefakte liegen in `dist\`.
+The version is derived from `git describe --tags --always --dirty`. A build
+from a modified working tree therefore intentionally receives the `-dirty`
+suffix. Finished artifacts are written to `dist\`.
 
-Nur das portable Paket bauen:
+Build only the portable package:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\build.ps1" -SkipInstaller
 ```
 
-## Hinweise zur Veröffentlichung
+## Release notes
 
-Die erzeugten Pakete sind derzeit nicht digital signiert. Windows SmartScreen
-kann deshalb bei Downloads aus dem Internet warnen. Für eine breitere
-öffentliche Verteilung sollten Setup-Datei und Skripte mit einem
-vertrauenswürdigen Code-Signing-Zertifikat signiert werden.
+Generated packages are not digitally signed yet. Windows SmartScreen may
+therefore show a warning for files downloaded from the internet. For wider
+public distribution, the setup file and scripts should be signed with a trusted
+code-signing certificate.
 
-Dieses Repository enthält derzeit keine Open-Source-Lizenz. Eine öffentliche
-Lesbarkeit des Quellcodes erteilt daher nicht automatisch Nutzungs-, Änderungs-
-oder Weiterverteilungsrechte.
+This repository currently has no open-source license. Publicly readable source
+code does not automatically grant permission to use, modify, or redistribute
+it.
