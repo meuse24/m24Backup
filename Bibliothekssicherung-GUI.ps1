@@ -263,11 +263,15 @@ $form.Text = L "Bibliothekssicherung" "Library Backup"
 if ($appVersion) { $form.Text = "{0} {1}" -f $form.Text, $appVersion }
 $form.StartPosition = "CenterScreen"
 $form.ClientSize = New-Object System.Drawing.Size(720, 734)
+$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedSingle
+$form.MaximizeBox = $false
+$form.MinimizeBox = $true
+$form.SizeGripStyle = [System.Windows.Forms.SizeGripStyle]::Hide
 # Kleine Bildschirme (z. B. 1366x768): Das Fenster darf niedriger werden als
 # das Layout; der Inhalt wird dann gescrollt. Nach oben ist die Hoehe auf die
-# Layouthoehe begrenzt, damit unter der Fussleiste kein Leerraum entsteht.
+# Layouthoehe begrenzt. Die feste Rahmenart verhindert eine manuelle
+# Groessenaenderung, die automatische Anpassung bleibt aber moeglich.
 $form.MinimumSize = New-Object System.Drawing.Size(736, 600)
-$form.MaximumSize = New-Object System.Drawing.Size(10000, $form.Height)
 $form.AutoScroll = $true
 $form.Font = New-Object System.Drawing.Font($textFontName, 9.5)
 $form.BackColor = [System.Drawing.Color]::FromArgb(243, 246, 249)

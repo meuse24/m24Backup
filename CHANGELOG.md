@@ -19,6 +19,9 @@ dokumentiert. Die Versionierung orientiert sich an
 - Neues M24-Backup-Logo und daraus neu erzeugtes Mehrgrößen-App-/Installer-Icon
 - Icon-Hintergrundentfernung bewahrt eingeschlossene weiße Motivflächen und
   funktioniert dadurch auch auf dunklen Windows-Hintergründen korrekt
+- Fenstergröße gegen manuelles Verändern gesperrt und Maximieren entfernt;
+  automatische Höhenanpassung und Scrollen auf kleinen Bildschirmen bleiben
+  erhalten
 
 ## [1.0.0] – 2026-07-12
 
