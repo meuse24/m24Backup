@@ -1,0 +1,8 @@
+/build/
+/dist/
+/.agents/
+/.claude/
+*.user
+*.log
+Thumbs.db
+Desktop.ini

@@ -2,6 +2,7 @@
 =====================================
 
 Version date: 2026-07-12
+Version: development build
 
 
 PART 1 – USER GUIDE

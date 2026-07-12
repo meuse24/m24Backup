@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set "SCRIPT=C:\install\Bibliothekssicherung-GUI.ps1"
+set "SCRIPT=%~dp0Bibliothekssicherung-GUI.ps1"
 
 if not exist "%SCRIPT%" (
     echo FEHLER: Das PowerShell-Skript wurde nicht gefunden:

@@ -37,6 +37,9 @@ $displayFontName = if ($installedFontNames -contains 'Segoe UI Variable Display 
 
 $coreScript = Join-Path $PSScriptRoot "Bibliothekssicherung.ps1"
 $helpFile = Join-Path $PSScriptRoot $(if ($script:isGerman) { 'Hilfe-und-Info.txt' } else { 'Help-and-Info.txt' })
+$versionFile = Join-Path $PSScriptRoot 'version.txt'
+$appVersion = if (Test-Path -LiteralPath $versionFile -PathType Leaf) { (Get-Content -LiteralPath $versionFile -Raw).Trim() } else { '' }
+$appIcon = $null
 $script:backupProcess = $null
 $script:statusFile = $null
 $script:resultFile = $null
@@ -94,6 +97,7 @@ function Get-NewestLogFile {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = L "Bibliothekssicherung" "Library Backup"
+if ($appVersion) { $form.Text = "{0} {1}" -f $form.Text, $appVersion }
 $form.StartPosition = "CenterScreen"
 $form.ClientSize = New-Object System.Drawing.Size(720, 734)
 # Kleine Bildschirme (z. B. 1366x768): Das Fenster darf niedriger werden als
@@ -104,7 +108,17 @@ $form.MaximumSize = New-Object System.Drawing.Size(10000, $form.Height)
 $form.AutoScroll = $true
 $form.Font = New-Object System.Drawing.Font($textFontName, 9.5)
 $form.BackColor = [System.Drawing.Color]::FromArgb(243, 246, 249)
-$form.Icon = [System.Drawing.SystemIcons]::Shield
+$appIconFile = Join-Path $PSScriptRoot 'app.ico'
+if (Test-Path -LiteralPath $appIconFile -PathType Leaf) {
+    try {
+        $iconStream = [System.IO.File]::Open($appIconFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $sourceIcon = New-Object System.Drawing.Icon($iconStream)
+            try { $appIcon = [System.Drawing.Icon]$sourceIcon.Clone() } finally { $sourceIcon.Dispose() }
+        } finally { $iconStream.Dispose() }
+    } catch { $appIcon = $null }
+}
+$form.Icon = if ($appIcon) { $appIcon } else { [System.Drawing.SystemIcons]::Shield }
 
 $surfaceColor = [System.Drawing.Color]::FromArgb(255, 255, 255)
 $borderColor = [System.Drawing.Color]::FromArgb(222, 226, 230)
@@ -920,6 +934,7 @@ $form.Add_FormClosing({
 # Das Logo-Bitmap gehoert dem Formular und wird mit ihm entsorgt.
 $form.Add_FormClosed({
     if ($logoBox.Image) { $logoBox.Image.Dispose() }
+    if ($appIcon) { $appIcon.Dispose() }
 })
 
 # Beim Start liegt der Fokus auf "Sicherung starten", damit die Sicherung
