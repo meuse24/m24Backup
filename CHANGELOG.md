@@ -14,6 +14,12 @@ dokumentiert. Die Versionierung orientiert sich an
   Sicherungslaufwerks über seine Datenträger-ID
 - Sicherheitsabfrage vor dem Wechsel auf ein anderes Sicherungslaufwerk
 
+### Geändert
+
+- Neues M24-Backup-Logo und daraus neu erzeugtes Mehrgrößen-App-/Installer-Icon
+- Icon-Hintergrundentfernung bewahrt eingeschlossene weiße Motivflächen und
+  funktioniert dadurch auch auf dunklen Windows-Hintergründen korrekt
+
 ## [1.0.0] – 2026-07-12
 
 Erste öffentliche, releasefähige Version.

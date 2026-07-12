@@ -2,6 +2,10 @@
 
 **English** | [Deutsch](README.de.md)
 
+<p align="center">
+  <img src="logo.jpg" alt="M24 Backup logo" width="220">
+</p>
+
 A compact Windows application for safely backing up and restoring the personal
 folders of the current user. The interface is displayed in German on German
 Windows systems and in English on all other systems.

@@ -67,11 +67,14 @@ function New-AppIcon {
     try {
         $sourceImage = [System.Drawing.Image]::FromStream($sourceStream)
         try {
-            # logo.jpg contains a word mark below the symbol. Crop the upper,
-            # centered square so the icon remains recognizable at small sizes.
-            $cropSize = [math]::Min($sourceImage.Width, [int]($sourceImage.Height * 0.78))
+            # logo.jpg contains a word mark below the symbol. Crop the shield
+            # and USB symbol with a small safety margin so neither the word
+            # mark nor excess whitespace reduces legibility at icon sizes.
+            $cropSize = [math]::Min([int]($sourceImage.Width * 0.72), [int]($sourceImage.Height * 0.72))
             $sourceX = [int](($sourceImage.Width - $cropSize) / 2)
-            $sourceRectangle = New-Object System.Drawing.Rectangle($sourceX, 0, $cropSize, $cropSize)
+            $sourceY = [int]($sourceImage.Height * 0.09)
+            if ($sourceY + $cropSize -gt $sourceImage.Height) { $sourceY = $sourceImage.Height - $cropSize }
+            $sourceRectangle = New-Object System.Drawing.Rectangle($sourceX, $sourceY, $cropSize, $cropSize)
             $iconFrames = New-Object System.Collections.Generic.List[byte[]]
 
             foreach ($size in @(16, 24, 32, 48, 64, 128, 256)) {
@@ -87,19 +90,34 @@ function New-AppIcon {
                         $graphics.DrawImage($sourceImage, (New-Object System.Drawing.Rectangle(0, 0, $size, $size)), $sourceRectangle, [System.Drawing.GraphicsUnit]::Pixel)
                     } finally { $graphics.Dispose() }
 
-                    # JPEG has no alpha channel. Turn its near-white background
-                    # transparent while retaining antialiased edge pixels.
-                    for ($y = 0; $y -lt $size; $y++) {
-                        for ($x = 0; $x -lt $size; $x++) {
-                            $pixel = $bitmap.GetPixel($x, $y)
-                            $minimum = [math]::Min($pixel.R, [math]::Min($pixel.G, $pixel.B))
-                            if ($minimum -ge 246) {
-                                $bitmap.SetPixel($x, $y, [System.Drawing.Color]::Transparent)
-                            } elseif ($minimum -gt 225) {
-                                $alpha = [int](255 * (246 - $minimum) / 21)
-                                $bitmap.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($alpha, $pixel.R, $pixel.G, $pixel.B))
-                            }
-                        }
+                    # JPEG has no alpha channel. Remove only light, neutral
+                    # background pixels connected to the image edge. A global
+                    # brightness threshold would also erase enclosed white
+                    # artwork such as the folder and USB connector.
+                    $visited = New-Object bool[] ($size * $size)
+                    $queue = New-Object 'System.Collections.Generic.Queue[int]'
+                    for ($coordinate = 0; $coordinate -lt $size; $coordinate++) {
+                        $queue.Enqueue($coordinate)
+                        $queue.Enqueue((($size - 1) * $size) + $coordinate)
+                        $queue.Enqueue($coordinate * $size)
+                        $queue.Enqueue(($coordinate * $size) + $size - 1)
+                    }
+                    while ($queue.Count -gt 0) {
+                        $index = $queue.Dequeue()
+                        if ($visited[$index]) { continue }
+                        $visited[$index] = $true
+                        $x = $index % $size
+                        $y = [int][math]::Floor($index / $size)
+                        $pixel = $bitmap.GetPixel($x, $y)
+                        $minimum = [math]::Min($pixel.R, [math]::Min($pixel.G, $pixel.B))
+                        $maximum = [math]::Max($pixel.R, [math]::Max($pixel.G, $pixel.B))
+                        if ($minimum -lt 205 -or ($maximum - $minimum) -gt 32) { continue }
+
+                        $bitmap.SetPixel($x, $y, [System.Drawing.Color]::Transparent)
+                        if ($x -gt 0) { $queue.Enqueue($index - 1) }
+                        if ($x + 1 -lt $size) { $queue.Enqueue($index + 1) }
+                        if ($y -gt 0) { $queue.Enqueue($index - $size) }
+                        if ($y + 1 -lt $size) { $queue.Enqueue($index + $size) }
                     }
 
                     # Store classic 32-bit DIB frames rather than PNG-compressed

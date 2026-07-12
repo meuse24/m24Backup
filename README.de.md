@@ -2,6 +2,10 @@
 
 [English](README.md) | **Deutsch**
 
+<p align="center">
+  <img src="logo.jpg" alt="M24-Backup-Logo" width="220">
+</p>
+
 Eine kompakte Windows-Anwendung zum sicheren Sichern und Wiederherstellen der
 persönlichen Ordner des angemeldeten Benutzers. Die Oberfläche erscheint auf
 deutschsprachigen Windows-Systemen auf Deutsch und auf allen anderen Systemen
