@@ -797,6 +797,10 @@ $timer.Add_Tick({
                 [System.Windows.Forms.MessageBox]::Show($errorText, (L "Fehler" "Error"), "OK", "Error") | Out-Null
             }
 
+            # Nach dem Abschluss genuegt ein Enter zum Beenden: "Schliessen"
+            # erhaelt Default-Status und den Tastaturfokus.
+            if ($closeButton.Visible -and $closeButton.Enabled) { $closeButton.Select() }
+
             $script:backupProcess.Dispose()
             $script:backupProcess = $null
             if ($script:statusFile) {
@@ -878,6 +882,12 @@ $form.Add_FormClosing({
 
 $form.Add_FormClosed({
     if ($warningImage) { $warningImage.Dispose() }
+})
+
+# Beim Start liegt der Fokus auf "Sicherung starten", damit die Sicherung
+# direkt mit Enter beginnen kann.
+$form.Add_Shown({
+    if ($startButton.Enabled) { $startButton.Select() }
 })
 
 # WinForms kann die Z-Reihenfolge von Panels bei der ersten echten Anzeige
