@@ -1,0 +1,172 @@
+E-Mail-Konten in Outlook Classic 2024 einrichten
+=================================================
+
+Diese Anleitung gilt für "Outlook (classic)" aus Microsoft Office LTSC
+Professional Plus 2024. Das neue "Outlook für Windows" ist nicht gemeint.
+
+Allgemeine Sicherheitshinweise
+------------------------------
+
+- Kennwörter niemals an andere Personen weitergeben.
+- Für jedes E-Mail-Konto ein eigenes, starkes Kennwort verwenden.
+- Wenn verfügbar, Zwei-Faktor-Authentifizierung aktivieren.
+- Nur verschlüsselte Serververbindungen verwenden.
+- Bei GMX nach Möglichkeit ein anwendungsspezifisches Passwort verwenden.
+
+
+1. GMX-Konto einrichten
+=======================
+
+1.1 IMAP bei GMX freischalten
+-----------------------------
+
+1. Im Browser https://www.gmx.net/ öffnen und am GMX-Postfach anmelden.
+2. Oben auf die Namensinitialen klicken.
+3. "E-Mail-Einstellungen" öffnen.
+4. "POP3/IMAP Abruf" auswählen.
+5. "POP3 und IMAP Zugriff erlauben" aktivieren.
+6. Auf "Speichern" klicken.
+
+Falls GMX ein anwendungsspezifisches Passwort verlangt, dieses bei GMX
+erstellen. In Outlook wird dann dieses App-Passwort anstelle des normalen
+GMX-Kennworts verwendet.
+
+1.2 Konto in Outlook Classic hinzufügen
+----------------------------------------
+
+1. "Outlook (classic)" starten.
+2. "Datei" und danach "Konto hinzufügen" auswählen.
+3. Die vollständige GMX-E-Mail-Adresse eingeben.
+4. "Erweiterte Optionen" öffnen.
+5. "Ich möchte mein Konto manuell einrichten" aktivieren.
+6. Auf "Verbinden" klicken und "IMAP" auswählen.
+7. Die folgenden Einstellungen eintragen:
+
+  Kontotyp:                  IMAP
+  Posteingangsserver:        imap.gmx.net
+  IMAP-Port:                 993
+  IMAP-Verschlüsselung:      SSL/TLS
+
+  Postausgangsserver:        mail.gmx.net
+  SMTP-Port:                 587
+  SMTP-Verschlüsselung:      STARTTLS
+  SMTP-Authentifizierung:    erforderlich
+
+  Benutzername:              vollständige GMX-E-Mail-Adresse
+  Kennwort:                  GMX-Kennwort oder GMX-App-Passwort
+
+8. Unter den Einstellungen des Postausgangsservers sicherstellen:
+   - "Der Postausgangsserver (SMTP) erfordert Authentifizierung" ist aktiv.
+   - "Gleiche Einstellungen wie für Posteingangsserver verwenden" ist aktiv.
+9. Einrichtung abschließen und die Synchronisierung abwarten.
+10. Eine Testnachricht an die eigene GMX-Adresse senden und Empfang sowie
+    Versand kontrollieren.
+
+GMX-Hilfe:
+https://hilfe.gmx.net/pop-imap/imap/outlook.html
+
+
+2. AON-/A1-Konto einrichten
+===========================
+
+Diese Einstellungen gelten auch für bestehende E-Mail-Adressen mit der
+Endung @aon.at.
+
+2.1 Zugang vorher prüfen
+------------------------
+
+1. Im Browser https://www.a1.net/webmail öffnen.
+2. Mit der AON-/A1-Mailbox und dem zugehörigen E-Mail-Kennwort anmelden.
+3. Eine Testnachricht an die eigene Adresse senden.
+
+Hinweis: Das Kennwort des E-Mail-Postfachs kann vom allgemeinen
+"Mein A1"-Kennwort abweichen.
+
+2.2 Konto in Outlook Classic hinzufügen
+----------------------------------------
+
+1. "Outlook (classic)" starten.
+2. "Datei" und danach "Konto hinzufügen" auswählen.
+3. Die vollständige @aon.at-Adresse eingeben.
+4. "Erweiterte Optionen" öffnen.
+5. "Ich möchte mein Konto manuell einrichten" aktivieren.
+6. Auf "Verbinden" klicken und "IMAP" auswählen.
+7. Die folgenden Einstellungen eintragen:
+
+  Kontotyp:                  IMAP
+  Posteingangsserver:        securemail.a1.net
+  IMAP-Port:                 993
+  IMAP-Verschlüsselung:      SSL/TLS
+
+  Postausgangsserver:        securemail.a1.net
+  SMTP-Port:                 587
+  SMTP-Verschlüsselung:      STARTTLS
+  SMTP-Authentifizierung:    erforderlich
+
+  Benutzername:              vollständige AON-/A1-Mailboxadresse
+  Kennwort:                  Kennwort des A1-E-Mail-Postfachs
+
+8. Unter den Einstellungen des Postausgangsservers sicherstellen:
+   - "Der Postausgangsserver (SMTP) erfordert Authentifizierung" ist aktiv.
+   - "Gleiche Einstellungen wie für Posteingangsserver verwenden" ist aktiv.
+9. Einrichtung abschließen und die Synchronisierung abwarten.
+10. Eine Testnachricht an die eigene AON-Adresse senden und Empfang sowie
+    Versand kontrollieren.
+
+2.3 Besonderheit alter AON-Konten
+---------------------------------
+
+Bei älteren AON-Konten kann die öffentlich verwendete Wunschadresse nur eine
+Alias-Adresse sein. Die sichtbare Adresse kann zum Beispiel
+vorname.nachname@aon.at lauten, während der tatsächliche Mailbox-Benutzername
+wie aon.9...@aon.at aussieht.
+
+Wenn die Anmeldung mit der sichtbaren E-Mail-Adresse fehlschlägt:
+
+1. Im A1-Webmail oder unter https://www.a1.net/email-verwalten den
+   ursprünglichen Postfachnamen ermitteln.
+2. Diesen Postfachnamen als IMAP- und SMTP-Benutzernamen verwenden.
+3. Die gewünschte Alias-Adresse weiterhin als sichtbare E-Mail- und
+   Absenderadresse eintragen.
+
+A1-Servereinstellungen:
+https://www.a1.net/faq/webmail/e-mail-einrichten/a1-e-mail-servereinstellungen
+
+
+3. Fehlerbehebung
+=================
+
+Anmeldung schlägt fehl
+----------------------
+
+- E-Mail-Adresse und Kennwort zuerst im Webmail testen.
+- Prüfen, ob der vollständige Mailbox-Benutzername verwendet wird.
+- Bei GMX prüfen, ob IMAP freigeschaltet wurde.
+- Bei GMX mit Zwei-Faktor-Authentifizierung ein App-Passwort verwenden.
+- Bei einem alten AON-Konto den ursprünglichen Mailboxnamen statt eines
+  Alias als Benutzernamen testen.
+
+Empfang funktioniert, Versand aber nicht
+-----------------------------------------
+
+- SMTP-Authentifizierung aktivieren.
+- Für SMTP den Port 587 verwenden.
+- Als Verschlüsselung STARTTLS auswählen.
+- Für SMTP denselben Benutzernamen und dasselbe Kennwort wie für IMAP
+  verwenden.
+
+Keine oder nur manche Ordner sichtbar
+--------------------------------------
+
+- Outlook einige Minuten zur ersten Synchronisierung geben.
+- Outlook schließen und erneut öffnen.
+- Prüfen, ob das Konto wirklich als IMAP und nicht als POP3 eingerichtet ist.
+
+
+4. Wichtiger Hinweis zum neuen Outlook
+======================================
+
+Für diese Konten "Outlook (classic)" verwenden. Beim neuen "Outlook für
+Windows" können externe Konten über Microsofts Cloud synchronisiert werden.
+Outlook Classic verbindet sich bei der hier beschriebenen IMAP-Konfiguration
+direkt und verschlüsselt mit den Servern von GMX beziehungsweise A1.

@@ -1,0 +1,398 @@
+﻿BIBLIOTHEKSSICHERUNG – HILFE UND INFORMATIONEN
+================================================
+
+Stand: 12.07.2026
+
+
+TEIL 1 – BEDIENUNGSANLEITUNG
+============================
+
+1. Zweck des Programms
+----------------------
+
+Die Bibliothekssicherung kopiert persönliche Windows-Ordner auf einen
+USB-Stick, eine externe Festplatte oder ein anderes ausgewähltes Laufwerk.
+
+Unterstützte Ordner:
+
+  - Desktop
+  - Dokumente
+  - Downloads
+  - Bilder
+  - Musik
+  - Videos
+  - Favoriten
+  - Gespeicherte Spiele
+  - Kontakte
+
+AppData, temporäre Dateien und Cache-Verzeichnisse werden bewusst nicht
+gesichert.
+
+
+2. Programm starten
+-------------------
+
+Die grafische Oberfläche kann über eine der vorhandenen Startdateien geöffnet
+werden:
+
+  - Sicherung.lnk
+  - Bibliothekssicherung starten.vbs
+  - Bibliothekssicherung starten.bat
+
+Normalerweise genügt ein Doppelklick auf „Sicherung.lnk“.
+
+
+3. Eine Sicherung erstellen
+---------------------------
+
+  1. Im oberen Bereich den Modus „Sichern“ wählen.
+  2. USB-Stick oder externe Festplatte anschließen.
+  3. Bei Bedarf auf „Aktualisieren“ klicken.
+  4. Das gewünschte Ziellaufwerk auswählen.
+  5. Die zu sichernden Ordner markieren.
+  6. Auf „Sicherung starten“ klicken.
+  7. Warten, bis der Status den erfolgreichen Abschluss meldet.
+
+Nach dem Abschluss können der Sicherungsordner und das technische Protokoll
+direkt über die entsprechenden Schaltflächen geöffnet werden.
+
+Während einer Sicherung darf das Ziellaufwerk nicht entfernt werden.
+
+
+4. Verhalten der Sicherung
+--------------------------
+
+  - Neue und geänderte Dateien werden kopiert.
+  - Neuere Dateien im Sicherungsziel werden nicht durch ältere Quelldateien
+    ersetzt.
+  - Dateien werden im Sicherungsziel nicht automatisch gelöscht.
+  - Es werden weder Robocopy /MIR noch /PURGE verwendet.
+  - Bereits vorhandene unveränderte Dateien werden übersprungen.
+  - Geöffnete oder gesperrte Dateien können nicht immer kopiert werden.
+  - Hinweise und Fehler werden im Protokoll festgehalten.
+  - Vor der Bestätigung wird nichts auf das Ziellaufwerk geschrieben.
+
+Die Sicherung ist eine fortlaufende Sicherheitskopie. Sie ist kein
+versioniertes Archiv mit mehreren historischen Dateiständen.
+
+
+5. Speicherplatz und FAT32
+--------------------------
+
+Vor dem Kopieren prüft das Programm den voraussichtlich benötigten
+Speicherplatz. Reicht der freie Platz nicht aus, wird der Vorgang nicht
+gestartet.
+
+Kann die Vorprüfung einzelne Dateien oder Ordner nicht lesen (zum Beispiel
+weil sie gesperrt sind), zeigt das Programm eine Warnung mit Beispielen an.
+Die Sicherung wird erst nach ausdrücklicher Bestätigung fortgesetzt, weil
+die Speicherplatzschätzung dann zu niedrig ausfallen kann.
+
+FAT32 kann keine einzelne Datei ab 4 GB speichern. Erkennt das Programm auf
+einem FAT32-Ziel eine solche Datei, wird die Sicherung abgebrochen. Für ein
+Sicherungslaufwerk werden NTFS oder exFAT empfohlen.
+
+ACHTUNG: Beim Formatieren eines Laufwerks werden dessen vorhandene Daten
+gelöscht. Ein Laufwerk deshalb niemals ohne vorherige Prüfung formatieren.
+
+
+6. Dateien wiederherstellen
+---------------------------
+
+  1. Das Laufwerk mit der Sicherung anschließen.
+  2. Im oberen Bereich „Wiederherstellen“ wählen.
+  3. Das Sicherungslaufwerk auswählen.
+  4. Die gewünschten Backup-Ordner markieren.
+  5. Auf „Wiederherstellung prüfen“ klicken.
+  6. Die angezeigte Konfliktvorschau aufmerksam lesen.
+  7. Die Wiederherstellung nur bestätigen, wenn die Angaben plausibel sind.
+
+Die Konfliktvorschau zeigt:
+
+  - lokal fehlende Dateien, die ergänzt werden
+  - lokale Dateien, die durch eine neuere Backup-Datei ersetzt werden
+  - neuere lokale Dateien, die geschützt bleiben
+  - Anzahl und Datenmenge der geplanten Kopiervorgänge
+  - bis zu zehn Beispielpfade möglicher Überschreibungen
+
+Ohne ausdrückliche Bestätigung werden keine Dateien wiederhergestellt.
+
+
+7. Schutz bei der Wiederherstellung
+-----------------------------------
+
+  - Neuere lokale Dateien bleiben durch Robocopy /XO geschützt.
+  - Lokal vorhandene Dateien werden nicht gelöscht.
+  - Die Rücksicherung verwendet weder /MIR noch /PURGE.
+  - Das Backup muss anhand seiner Metadaten zum aktuellen Computer und
+    Benutzer passen.
+  - Eine fremde, unvollständige oder nicht eindeutig zuordenbare Sicherung
+    wird abgelehnt.
+  - Der freie Platz wird für jedes betroffene lokale Laufwerk separat geprüft.
+
+Wichtig: Eine ältere lokale Datei kann durch eine neuere Version aus dem
+Backup ersetzt werden. Genau dafür wird vorab die Konfliktvorschau angezeigt.
+
+
+8. Sicherung oder Wiederherstellung abbrechen
+---------------------------------------------
+
+Der laufende Vorgang kann über „Sicherung abbrechen“ beziehungsweise
+„Wiederherstellung abbrechen“ beendet werden.
+
+Der aktuell bearbeitete Ordner wird zunächst kontrolliert abgeschlossen.
+Anschließend stoppt der Worker. Dadurch wird vermieden, dass Robocopy mitten
+im Schreiben einer Datei hart beendet wird. Bereits vollständig kopierte
+Dateien bleiben erhalten.
+
+
+9. Speicherort der Sicherung
+----------------------------
+
+Die Daten werden nach diesem Schema abgelegt:
+
+  <Laufwerk>:\Bibliothekssicherung\<Computer>_<Benutzer>\
+
+Beispiel:
+
+  D:\Bibliothekssicherung\WALTERNOTEBOOK_walter\
+
+In diesem Ordner befinden sich die gesicherten Bibliotheksordner sowie:
+
+  - _Sicherungsinfo.txt    Zuordnung und Angaben zur Sicherung
+  - _logs\                 technische Backup- und Restore-Protokolle
+
+
+10. Protokolle und Status
+-------------------------
+
+Backup-Protokolle heißen:
+
+  robocopy_JJJJMMTT_HHMMSS.log
+
+Restore-Protokolle heißen:
+
+  restore_JJJJMMTT_HHMMSS.log
+
+Die Protokolle werden als Unicode-Dateien geschrieben und können mit dem
+Windows-Editor geöffnet werden. Robocopy-Codes von 0 bis 7 gelten als Erfolg
+oder Erfolg mit Hinweisen. Ab Code 8 liegt ein Kopierfehler vor.
+
+
+11. Häufige Probleme
+--------------------
+
+Kein Laufwerk sichtbar:
+
+  - Laufwerk anschließen und auf „Aktualisieren“ klicken.
+  - Im Windows-Explorer prüfen, ob es einen Laufwerksbuchstaben besitzt.
+
+Nicht genügend Speicherplatz:
+
+  - Nicht benötigte Daten auf dem Zielmedium entfernen oder ein größeres
+    Laufwerk verwenden.
+
+FAT32-Warnung oder Datei ab 4 GB:
+
+  - Ein mit NTFS oder exFAT formatiertes Sicherungslaufwerk verwenden.
+
+Warnung, dass die Vorprüfung Dateien nicht lesen konnte:
+
+  - Prüfen, ob die genannten Dateien in einem anderen Programm geöffnet sind.
+  - Die Sicherung kann trotzdem fortgesetzt werden; nicht lesbare Dateien
+    werden gegebenenfalls übersprungen und im Protokoll vermerkt.
+
+Meldung, dass ein Ordner umgeleitet ist und nicht unterstützt wird:
+
+  - Der betroffene Bibliotheksordner ist auf eine Netzwerkfreigabe ohne
+    Laufwerksbuchstaben umgeleitet. Solche Ordner können nicht geprüft und
+    deshalb nicht verarbeitet werden.
+
+Ein Ordner fehlt im Restore-Modus:
+
+  - Prüfen, ob dieser Ordner tatsächlich in der ausgewählten Sicherung liegt.
+  - Prüfen, ob die Sicherung zum aktuellen Computer und Benutzer gehört.
+
+Fehler oder Hinweise nach dem Vorgang:
+
+  - Über „Protokoll öffnen“ das neueste Log ansehen.
+  - Sicherstellen, dass Dateien nicht in anderen Programmen geöffnet sind.
+  - Laufwerk erneut verbinden und den Vorgang wiederholen.
+
+
+12. Empfehlungen für verlässliche Sicherungen
+----------------------------------------------
+
+  - Regelmäßig sichern, nicht erst bei einem erkennbaren Defekt.
+  - Das Sicherungslaufwerk nach Abschluss sicher entfernen.
+  - Das Laufwerk nicht dauerhaft am Computer angeschlossen lassen.
+  - Wichtige Daten zusätzlich auf einem zweiten Medium aufbewahren.
+  - Gelegentlich eine testweise Wiederherstellung einer unkritischen Datei
+    durchführen.
+  - Protokolle mit Fehlern nicht ignorieren.
+
+
+TEIL 2 – IMPLEMENTIERUNG UND TECH-STACK
+=======================================
+
+13. Komponenten
+---------------
+
+Bibliothekssicherung-GUI.ps1
+
+  Grafische WinForms-Oberfläche. Sie verwaltet Modus, Laufwerks- und
+  Ordnerauswahl, Status, Konfliktvorschau, Bestätigung und Abbruch.
+
+Bibliothekssicherung.ps1
+
+  Worker für Backup und Restore. Er führt Preflight-Prüfungen durch, erstellt
+  Transferpläne und startet Robocopy.
+
+Bibliothekssicherung starten.vbs / .bat und Sicherung.lnk
+
+  Komfortable Starter für die grafische Oberfläche ohne dauerhaft sichtbares
+  Konsolenfenster.
+
+
+14. Tech-Stack
+--------------
+
+  - Windows PowerShell 5.1
+  - .NET Framework
+  - System.Windows.Forms für die GUI
+  - System.Drawing für Größen, Farben, Schriftarten und Symbole
+  - Robocopy als native Windows-Kopierengine
+  - CIM/WMI-Klasse Win32_LogicalDisk für Laufwerksinformationen
+  - Windows Registry „User Shell Folders“ für umgeleitete Bibliotheken
+  - JSON für strukturierte Vorschau- und Ergebnisdaten
+  - temporäre Dateien für die Inter-Prozess-Kommunikation
+
+Die Skripte sind als UTF-8 mit BOM gespeichert, damit Windows PowerShell 5.1
+deutsche Umlaute zuverlässig interpretiert.
+
+
+15. Prozessarchitektur
+----------------------
+
+Die GUI und die Kopierarbeit laufen in getrennten PowerShell-Prozessen.
+Dadurch bleibt das Fenster während langer Dateioperationen bedienbar.
+
+Ablauf:
+
+  GUI
+   |
+   +-- startet Worker-Prozess
+   +-- liest atomare Statusdatei per Timer
+   +-- zeigt Restore-Vorschau aus JSON
+   +-- schreibt Freigabe- oder Abbruchsignal
+   +-- liest abschließendes JSON-Ergebnis
+
+  Worker
+   |
+   +-- validiert Parameter und Laufwerk
+   +-- ermittelt Quell- und Zielordner
+   +-- führt Preflight und Kapazitätsprüfung aus
+   +-- wartet beim Restore auf die Freigabe
+   +-- startet Robocopy je ausgewähltem Ordner
+   +-- schreibt Status, Log und Ergebnis
+
+
+16. Inter-Prozess-Kommunikation
+-------------------------------
+
+Die Prozesse kommunizieren über eindeutig benannte Dateien im temporären
+Windows-Verzeichnis:
+
+  - .status          aktueller strukturierter Status
+  - .result.json     abschließendes Ergebnis
+  - .preview.json    Restore-Konfliktvorschau bzw. Warnungen der Vorprüfung
+  - .approve         ausdrückliche Freigabe (Restore-Start oder Fortsetzen
+                     trotz Lesewarnungen der Vorprüfung)
+  - .cancel          kooperatives Abbruchsignal
+
+Statusdateien werden zunächst vollständig in eine temporäre Datei geschrieben
+und anschließend mit File.Replace atomar ausgetauscht. Die GUI sieht dadurch
+entweder den alten oder den neuen vollständigen Status, aber keinen teilweise
+geschriebenen Zwischenstand.
+
+Die Freigabedatei muss exakt das Wort „continue” enthalten. Die GUI
+übergibt außerdem ihre Prozess-ID. Wird die GUI extern beendet, beendet sich
+auch ein auf Freigabe wartender Worker kontrolliert.
+
+
+17. Preflight und Konflikterkennung
+-----------------------------------
+
+Der Preflight durchsucht die ausgewählten Quellordner und ermittelt:
+
+  - Gesamtzahl und Gesamtgröße der Quelldateien
+  - voraussichtlich zu kopierende Dateien und Bytes
+  - Dateien ab 4 GB
+  - fehlende Zieldateien
+  - Dateien, die ersetzt würden
+  - neuere Zieldateien, die geschützt bleiben
+  - benötigten Speicher nach Ziellaufwerk
+  - Lese- und Pfadfehler
+
+Die Zeitstempelprüfung verwendet dieselbe Zwei-Sekunden-Toleranz wie
+Robocopy /FFT. Dadurch stimmen Vorschau und späteres Kopierverhalten möglichst
+genau überein.
+
+Kann der Preflight bei einer Sicherung nicht alle Dateien lesen, werden die
+Warnungen angezeigt und der Benutzer entscheidet, ob fortgefahren wird. Die
+Speicherplatzschätzung kann in diesem Fall zu niedrig ausfallen. Bei einer
+Wiederherstellung führen Lesefehler auf dem Sicherungsdatenträger weiterhin
+zum Abbruch, weil sie auf einen defekten Datenträger hindeuten können.
+
+
+18. Wichtige Robocopy-Parameter
+-------------------------------
+
+  /E            kopiert Unterordner einschließlich leerer Ordner
+  /XJ           folgt keinen Junctions und verhindert Verzeichnisschleifen
+  /FFT          verwendet eine Zwei-Sekunden-Zeitstempeltoleranz
+  /XO           überspringt Quelldateien, die älter als das Ziel sind
+  /MT:8         verwendet standardmäßig acht Kopierthreads
+  /R:1 /W:3     begrenzt Wiederholungen und Wartezeit bei Fehlern
+  /COPY:DAT     kopiert Daten, Attribute und Zeitstempel
+  /DCOPY:DAT    übernimmt Verzeichnisdaten, Attribute und Zeitstempel
+  /NFL /NDL     reduziert die Protokollmenge
+  /NP           unterdrückt Prozent-Fortschritt im technischen Log
+  /UNILOG+      schreibt ein angehängtes Unicode-Protokoll
+
+Bewusst nicht verwendet:
+
+  /MIR und /PURGE
+
+Dadurch werden weder im Backup-Ziel noch bei einer Wiederherstellung lokale
+Dateien automatisch gelöscht.
+
+
+19. Sicherheitsgrenzen
+----------------------
+
+  - Es gibt keine Volume Shadow Copy. Geöffnete oder exklusiv gesperrte Dateien
+    können deshalb übersprungen werden.
+  - Die Sicherung enthält keine vollständige Windows-Systemabbildung.
+  - Programme, AppData, Windows-Einstellungen und installierte Anwendungen
+    werden nicht vollständig gesichert.
+  - Es gibt keine historische Versionierung einzelner Dateistände.
+  - Auf Netzwerkfreigaben (Pfade ohne Laufwerksbuchstaben) umgeleitete
+    Bibliotheksordner werden nicht unterstützt.
+  - Eine Bestätigung ersetzt nicht die Prüfung der Konfliktvorschau.
+  - Physisch beschädigte Datenträger können auch bei korrekter Software zu
+    Lese- oder Schreibfehlern führen.
+
+
+20. Exit-Codes
+--------------
+
+  0     Vorgang erfolgreich abgeschlossen
+  1     interaktiver Vorgang vom Benutzer vor dem Start abgelehnt
+  10    Validierungs-, Preflight-, Freigabe- oder allgemeiner Skriptfehler
+  20    kooperativer Abbruch beziehungsweise GUI beendet
+  >= 8  möglicher Robocopy-Kopierfehler, sofern direkt weitergegeben
+
+
+ENDE DER HILFE
+==============
