@@ -4,6 +4,13 @@ Alle wesentlichen Änderungen dieses Projekts werden in dieser Datei
 dokumentiert. Die Versionierung orientiert sich an
 [Semantic Versioning](https://semver.org/lang/de/).
 
+## [Unveröffentlicht]
+
+### Hinzugefügt
+
+- Backup-Ampel für das ausgewählte Laufwerk mit Abschlussstatus, Alter,
+  Laufzeit und Anzahl der zuletzt erfolgreich gesicherten Ordner
+
 ## [1.0.0] – 2026-07-12
 
 Erste öffentliche, releasefähige Version.

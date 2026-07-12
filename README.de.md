@@ -14,6 +14,8 @@ auf Englisch.
 - Nutzt Robocopy und löscht keine Dateien aus dem Sicherungsziel.
 - Prüft Ziel, freien Speicherplatz und FAT32-Einschränkungen vor dem Start.
 - Zeigt Fortschritt und ein verständliches Ergebnis direkt im Fenster an.
+- Zeigt eine Backup-Ampel mit Alter, Dauer und Ordnerzahl der letzten Sicherung
+  auf dem ausgewählten Laufwerk.
 - Erstellt ein lesbares Protokoll und `_Sicherungsinfo.txt` auf dem Ziel.
 - Unterstützt kooperatives Abbrechen zwischen den Ordnern.
 - Bietet eine defensive Rücksicherung mit Metadatenprüfung, Vorschau und

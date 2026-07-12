@@ -95,6 +95,101 @@ function Get-NewestLogFile {
         Select-Object -First 1
 }
 
+function Get-BackupHealth {
+    param([string]$Drive)
+
+    $backupDirectory = Join-Path $Drive ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
+    $metadataFile = Join-Path $backupDirectory '_Sicherungsinfo.txt'
+    if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) {
+        return [pscustomobject]@{
+            Level = 'Red'
+            Text = L 'Keine Sicherung für dieses Profil' 'No backup for this profile'
+            Details = L 'Auf diesem Laufwerk wurde noch keine Sicherung für diesen Computer und Benutzer gefunden.' 'No backup for this computer and user was found on this drive.'
+        }
+    }
+
+    try {
+        $lines = @(Get-Content -LiteralPath $metadataFile -ErrorAction Stop)
+        $computer = (($lines | Where-Object { $_ -like 'Computer:*' } | Select-Object -First 1) -replace '^Computer:\s*', '').Trim()
+        $user = (($lines | Where-Object { $_ -like 'Benutzer:*' } | Select-Object -First 1) -replace '^Benutzer:\s*', '').Trim()
+        if (-not $computer.Equals($env:COMPUTERNAME, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not $user.Equals($env:USERNAME, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw (L 'Die Sicherungsmetadaten gehören zu einem anderen Profil.' 'The backup metadata belongs to a different profile.')
+        }
+
+        $startLine = $lines | Where-Object { $_ -like 'Letzter Sicherungsversuch:*' } | Select-Object -First 1
+        $resultLine = $lines | Where-Object { $_ -like 'Ergebnis:*' } | Select-Object -Last 1
+        $folderLine = $lines | Where-Object { $_ -like 'Ordner:*' } | Select-Object -First 1
+        if (-not $resultLine -or $resultLine -notmatch '^Ergebnis:\s*(.+?)\s+am\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.?$') {
+            return [pscustomobject]@{
+                Level = 'Red'
+                Text = L 'Letzte Sicherung nicht vollständig' 'Last backup is incomplete'
+                Details = L 'Der letzte Sicherungsversuch enthält keinen gültigen Abschlussstatus.' 'The last backup attempt has no valid completion status.'
+            }
+        }
+
+        $outcome = $matches[1]
+        $finishedAt = [datetime]::MinValue
+        if (-not [datetime]::TryParseExact($matches[2], 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$finishedAt)) {
+            throw (L 'Der Abschlusszeitpunkt ist ungültig.' 'The completion time is invalid.')
+        }
+
+        $folders = @()
+        if ($folderLine) {
+            $folderText = ($folderLine -replace '^Ordner:\s*', '').Trim()
+            if ($folderText) { $folders = @($folderText -split '\s*,\s*' | Where-Object { $_ }) }
+        }
+
+        $durationText = $null
+        if ($startLine) {
+            $startedAt = [datetime]::MinValue
+            $startText = ($startLine -replace '^Letzter Sicherungsversuch:\s*', '').Trim()
+            if ([datetime]::TryParseExact($startText, 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$startedAt) -and $finishedAt -ge $startedAt) {
+                $elapsed = $finishedAt - $startedAt
+                $durationText = if ($elapsed.TotalHours -ge 1) { $elapsed.ToString('hh\:mm\:ss') } else { $elapsed.ToString('mm\:ss') }
+            }
+        }
+
+        $dateText = if ($finishedAt.Date -eq (Get-Date).Date) {
+            (L 'heute, {0:HH:mm}' 'today, {0:HH:mm}') -f $finishedAt
+        } else {
+            $finishedAt.ToString((L 'dd.MM.yyyy, HH:mm' 'yyyy-MM-dd, HH:mm'))
+        }
+        $folderText = if ($folders.Count -eq 1) { L '1 Ordner' '1 folder' } else { (L '{0} Ordner' '{0} folders') -f $folders.Count }
+        $detailsParts = @($dateText, $folderText)
+        if ($durationText) { $detailsParts += (L "Dauer $durationText" "duration $durationText") }
+        $details = $detailsParts -join ' · '
+
+        if ($outcome -eq 'Erfolgreich abgeschlossen') {
+            $ageDays = [math]::Floor(((Get-Date) - $finishedAt).TotalDays)
+            if ($ageDays -le 7) {
+                $level = 'Green'
+                $caption = L 'Aktuell' 'Up to date'
+            } elseif ($ageDays -le 14) {
+                $level = 'Yellow'
+                $caption = L 'Bald fällig' 'Due soon'
+            } else {
+                $level = 'Red'
+                $caption = L 'Veraltet' 'Out of date'
+            }
+            return [pscustomobject]@{ Level = $level; Text = "$caption · $details"; Details = $details }
+        }
+
+        $caption = if ($outcome -like 'Vom Benutzer abgebrochen*') {
+            L 'Letzte Sicherung abgebrochen' 'Last backup was cancelled'
+        } else {
+            L 'Letzte Sicherung fehlgeschlagen' 'Last backup failed'
+        }
+        return [pscustomobject]@{ Level = 'Red'; Text = "$caption · $dateText"; Details = "$caption · $details" }
+    } catch {
+        return [pscustomobject]@{
+            Level = 'Red'
+            Text = L 'Sicherungsstatus nicht lesbar' 'Backup status unavailable'
+            Details = $_.Exception.Message
+        }
+    }
+}
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = L "Bibliothekssicherung" "Library Backup"
 if ($appVersion) { $form.Text = "{0} {1}" -f $form.Text, $appVersion }
@@ -238,6 +333,58 @@ $driveInfoLabel.ForeColor = $secondaryTextColor
 $driveInfoLabel.Location = New-Object System.Drawing.Point(30, 167)
 $driveInfoLabel.BackColor = $surfaceColor
 $form.Controls.Add($driveInfoLabel)
+
+$healthPanel = New-Object System.Windows.Forms.Panel
+$healthPanel.Location = New-Object System.Drawing.Point(180, 163)
+$healthPanel.Size = New-Object System.Drawing.Size(510, 25)
+$healthPanel.Anchor = 'Top, Left, Right'
+$healthPanel.BackColor = $surfaceColor
+$form.Controls.Add($healthPanel)
+
+$healthDot = New-Object System.Windows.Forms.Panel
+$healthDot.Location = New-Object System.Drawing.Point(0, 6)
+$healthDot.Size = New-Object System.Drawing.Size(12, 12)
+$healthDot.BackColor = $surfaceColor
+$healthDot.Tag = [System.Drawing.Color]::FromArgb(196, 43, 28)
+$healthDot.Add_Paint({
+    param($sender, $eventArgs)
+    $eventArgs.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]$sender.Tag)
+    try { $eventArgs.Graphics.FillEllipse($brush, 0, 0, $sender.Width - 1, $sender.Height - 1) } finally { $brush.Dispose() }
+})
+$healthPanel.Controls.Add($healthDot)
+
+$healthLabel = New-Object System.Windows.Forms.Label
+$healthLabel.AutoEllipsis = $true
+$healthLabel.Location = New-Object System.Drawing.Point(20, 2)
+$healthLabel.Size = New-Object System.Drawing.Size(490, 21)
+$healthLabel.Anchor = 'Top, Left, Right'
+$healthLabel.Text = L 'Keine Sicherung für dieses Profil' 'No backup for this profile'
+$healthPanel.Controls.Add($healthLabel)
+
+$healthToolTip = New-Object System.Windows.Forms.ToolTip
+
+function Update-BackupHealth {
+    if (-not $driveCombo.SelectedItem) {
+        $healthPanel.Visible = $false
+        return
+    }
+
+    $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+    $health = Get-BackupHealth -Drive $disk.DeviceID
+    $healthDot.Tag = switch ($health.Level) {
+        'Green' { [System.Drawing.Color]::FromArgb(16, 124, 16) }
+        'Yellow' { [System.Drawing.Color]::FromArgb(202, 143, 0) }
+        default { [System.Drawing.Color]::FromArgb(196, 43, 28) }
+    }
+    $healthLabel.Text = $health.Text
+    $healthLabel.ForeColor = if ($health.Level -eq 'Red') { [System.Drawing.Color]::FromArgb(153, 27, 27) } else { $secondaryTextColor }
+    $healthToolTip.SetToolTip($healthPanel, $health.Details)
+    $healthToolTip.SetToolTip($healthLabel, $health.Details)
+    $healthToolTip.SetToolTip($healthDot, $health.Details)
+    $healthPanel.Visible = $true
+    $healthDot.Invalidate()
+}
 
 $fat32Label = New-Object System.Windows.Forms.Label
 $fat32Label.Text = L "Hinweis: FAT32 kann keine Dateien über 4 GB speichern. exFAT oder NTFS wird empfohlen." "FAT32 cannot store files of 4 GB or larger. exFAT or NTFS is recommended."
@@ -564,9 +711,10 @@ $driveCombo.Add_SelectedIndexChanged({
         $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
         $sizeGb = [math]::Round($disk.Size / 1GB, 1)
         $fileSystem = if ($disk.FileSystem) { $disk.FileSystem } else { L "unbekannt" "unknown" }
-        $driveInfoLabel.Text = (L "Gesamtgröße: {0:N1} GB    Dateisystem: {1}" "Total size: {0:N1} GB    File system: {1}") -f $sizeGb, $fileSystem
+        $driveInfoLabel.Text = (L "{0:N1} GB gesamt · {1}" "{0:N1} GB total · {1}") -f $sizeGb, $fileSystem
         $fat32Label.Visible = $fileSystem -eq "FAT32"
         if ($restoreRadio.Checked) { $fat32Label.Visible = $false }
+        Update-BackupHealth
         Update-LibraryList
         Update-SelectionState
     }
@@ -853,6 +1001,7 @@ $timer.Add_Tick({
             $script:resultSummary = $resultBox.Text
             $script:backupProcess.Dispose()
             $script:backupProcess = $null
+            Update-BackupHealth
             Update-ResultOverview
             if ($script:statusFile) {
                 Remove-Item -LiteralPath $script:statusFile -Force -ErrorAction SilentlyContinue
@@ -935,6 +1084,7 @@ $form.Add_FormClosing({
 $form.Add_FormClosed({
     if ($logoBox.Image) { $logoBox.Image.Dispose() }
     if ($appIcon) { $appIcon.Dispose() }
+    if ($healthToolTip) { $healthToolTip.Dispose() }
 })
 
 # Beim Start liegt der Fokus auf "Sicherung starten", damit die Sicherung

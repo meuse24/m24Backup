@@ -14,6 +14,8 @@ Windows systems and in English on all other systems.
 - Checks the destination, available disk space, and FAT32 limitations before
   starting.
 - Shows progress and a clear result directly in the application window.
+- Shows a traffic-light health indicator with the age, duration, and folder
+  count of the latest backup on the selected drive.
 - Writes a readable log and `_Sicherungsinfo.txt` metadata to the destination.
 - Supports cooperative cancellation between folders.
 - Provides defensive restore with metadata validation, conflict preview, and
