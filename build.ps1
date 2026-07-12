@@ -72,9 +72,7 @@ function New-AppIcon {
             # mark nor excess whitespace reduces legibility at icon sizes.
             $cropSize = [math]::Min([int]($sourceImage.Width * 0.72), [int]($sourceImage.Height * 0.72))
             $sourceX = [int](($sourceImage.Width - $cropSize) / 2)
-            $sourceY = [int]($sourceImage.Height * 0.09)
-            if ($sourceY + $cropSize -gt $sourceImage.Height) { $sourceY = $sourceImage.Height - $cropSize }
-            $sourceRectangle = New-Object System.Drawing.Rectangle($sourceX, $sourceY, $cropSize, $cropSize)
+            $sourceRectangle = New-Object System.Drawing.Rectangle($sourceX, 0, $cropSize, $cropSize)
             $iconFrames = New-Object System.Collections.Generic.List[byte[]]
 
             foreach ($size in @(16, 24, 32, 48, 64, 128, 256)) {
