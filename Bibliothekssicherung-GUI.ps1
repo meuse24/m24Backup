@@ -151,27 +151,38 @@ $helpButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb
 $helpButton.TabIndex = 2
 $form.Controls.Add($helpButton)
 
-$modeLabel = New-Object System.Windows.Forms.Label
-$modeLabel.Text = L "Modus:" "Mode:"
-$modeLabel.AutoSize = $true
-$modeLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$modeLabel.Location = New-Object System.Drawing.Point(472, 29)
-$form.Controls.Add($modeLabel)
+# Der Modus-Umschalter liegt auf einer eigenen umrahmten Flaeche, damit er
+# sich vom Formularhintergrund abhebt und nicht gedrungen wirkt. Breite und
+# Position ergeben sich aus der Textlaenge der jeweiligen Sprache.
+$modePanel = New-Object System.Windows.Forms.Panel
+$modePanel.BackColor = $surfaceColor
+$modePanel.Anchor = 'Top, Right'
+$modePanel.Add_Paint({
+    param($sender, $eventArgs)
+    $borderPen = New-Object System.Drawing.Pen($buttonBorderColor)
+    try {
+        $eventArgs.Graphics.DrawRectangle($borderPen, 0, 0, $sender.ClientSize.Width - 1, $sender.ClientSize.Height - 1)
+    } finally { $borderPen.Dispose() }
+})
+$form.Controls.Add($modePanel)
 
 $backupRadio = New-Object System.Windows.Forms.RadioButton
 $backupRadio.Text = L "Sichern" "Back up"
 $backupRadio.AutoSize = $true
-$backupRadio.Location = New-Object System.Drawing.Point(525, 26)
+$backupRadio.Location = New-Object System.Drawing.Point(14, 8)
 $backupRadio.Checked = $true
 $backupRadio.TabIndex = 0
-$form.Controls.Add($backupRadio)
+$modePanel.Controls.Add($backupRadio)
 
 $restoreRadio = New-Object System.Windows.Forms.RadioButton
 $restoreRadio.Text = L "Wiederherstellen" "Restore"
 $restoreRadio.AutoSize = $true
-$restoreRadio.Location = New-Object System.Drawing.Point(596, 26)
 $restoreRadio.TabIndex = 1
-$form.Controls.Add($restoreRadio)
+$modePanel.Controls.Add($restoreRadio)
+$restoreRadio.Location = New-Object System.Drawing.Point(($backupRadio.Left + $backupRadio.GetPreferredSize([System.Drawing.Size]::Empty).Width + 14), 8)
+
+$modePanel.Size = New-Object System.Drawing.Size(($restoreRadio.Left + $restoreRadio.GetPreferredSize([System.Drawing.Size]::Empty).Width + 14), 36)
+$modePanel.Location = New-Object System.Drawing.Point((706 - $modePanel.Width), 16)
 
 $targetSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 86)) -Size (New-Object System.Drawing.Size(692, 118))
 
