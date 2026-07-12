@@ -109,23 +109,37 @@ installer:
 winget install --id JRSoftware.InnoSetup -e --scope user
 ```
 
-After creating a version tag, the build script produces the installer, portable
-ZIP, and SHA-256 checksums:
+The release script derives the next semantic version, builds and verifies all
+artifacts, creates and pushes the Git tag, and publishes a GitHub Release:
 
 ```powershell
-git tag -a v1.0.0 -m "M24 Backup 1.0.0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\build.ps1" -RequireInstaller
+.\release.ps1
 ```
 
-The version is derived from `git describe --tags --always --dirty`. A build
-from a modified working tree therefore intentionally receives the `-dirty`
-suffix. Finished artifacts are written to `dist\`.
-
-Build only the portable package:
+Patch is the default (`1.0.0` → `1.0.1`). Select the release type explicitly
+for new features or breaking changes:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\build.ps1" -SkipInstaller
+.\release.ps1 -Bump Minor  # 1.0.0 -> 1.1.0
+.\release.ps1 -Bump Major  # 1.1.0 -> 2.0.0
 ```
+
+Preview the complete plan without building or changing GitHub:
+
+```powershell
+.\release.ps1 -Bump Minor -WhatIf
+```
+
+Build locally without creating a tag, pushing, or publishing a release:
+
+```powershell
+.\release.ps1 -Bump Minor -LocalOnly
+```
+
+An explicit version can be supplied with `-Version 1.2.3`. The script refuses
+dirty working trees, duplicate tags, detached commits, and releases from a
+branch behind its GitHub counterpart. Finished artifacts are written to
+`dist\`. `build.ps1` remains available for lower-level or portable-only builds.
 
 ## Release notes
 

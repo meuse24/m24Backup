@@ -111,23 +111,39 @@ benötigt:
 winget install --id JRSoftware.InnoSetup -e --scope user
 ```
 
-Nach dem Erstellen eines Versions-Tags baut das Skript Installer, portables ZIP
-und SHA-256-Prüfsummen:
+Das Release-Skript ermittelt die nächste semantische Version, baut und prüft
+alle Artefakte, erstellt und pusht den Git-Tag und veröffentlicht ein
+GitHub-Release:
 
 ```powershell
-git tag -a v1.0.0 -m "M24 Backup 1.0.0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\build.ps1" -RequireInstaller
+.\release.ps1
 ```
 
-Die Version wird aus `git describe --tags --always --dirty` abgeleitet. Ein
-Build aus einem veränderten Arbeitsbaum erhält daher bewusst den Zusatz
-`-dirty`. Die fertigen Artefakte liegen in `dist\`.
-
-Nur das portable Paket bauen:
+Standardmäßig wird die Patch-Version erhöht (`1.0.0` → `1.0.1`). Für neue
+Funktionen oder inkompatible Änderungen wird die Release-Art angegeben:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\build.ps1" -SkipInstaller
+.\release.ps1 -Bump Minor  # 1.0.0 -> 1.1.0
+.\release.ps1 -Bump Major  # 1.1.0 -> 2.0.0
 ```
+
+Den vollständigen Ablauf anzeigen, ohne zu bauen oder GitHub zu verändern:
+
+```powershell
+.\release.ps1 -Bump Minor -WhatIf
+```
+
+Nur lokal bauen, ohne Tag, Push oder GitHub-Release:
+
+```powershell
+.\release.ps1 -Bump Minor -LocalOnly
+```
+
+Mit `-Version 1.2.3` kann eine Version ausdrücklich vorgegeben werden. Das
+Skript verweigert unsaubere Arbeitsbäume, doppelte Tags, detached HEADs und
+Releases von einem Branch, der hinter GitHub liegt. Die fertigen Artefakte
+liegen in `dist\`. `build.ps1` bleibt für technische oder rein portable Builds
+verfügbar.
 
 ## Hinweise zur Veröffentlichung
 

@@ -13,6 +13,8 @@ dokumentiert. Die Versionierung orientiert sich an
 - Wiedererkennung und automatische Auswahl des zuletzt erfolgreich verwendeten
   Sicherungslaufwerks über seine Datenträger-ID
 - Sicherheitsabfrage vor dem Wechsel auf ein anderes Sicherungslaufwerk
+- Release-Orchestrator mit automatischer SemVer-Erhöhung, Schutzprüfungen,
+  Build, Git-Tag, Push und Veröffentlichung der Artefakte als GitHub-Release
 
 ### Geändert
 
