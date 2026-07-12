@@ -96,7 +96,12 @@ $form = New-Object System.Windows.Forms.Form
 $form.Text = L "Bibliothekssicherung" "Library Backup"
 $form.StartPosition = "CenterScreen"
 $form.ClientSize = New-Object System.Drawing.Size(720, 734)
-$form.MinimumSize = New-Object System.Drawing.Size(736, 773)
+# Kleine Bildschirme (z. B. 1366x768): Das Fenster darf niedriger werden als
+# das Layout; der Inhalt wird dann gescrollt. Nach oben ist die Hoehe auf die
+# Layouthoehe begrenzt, damit unter der Fussleiste kein Leerraum entsteht.
+$form.MinimumSize = New-Object System.Drawing.Size(736, 600)
+$form.MaximumSize = New-Object System.Drawing.Size(10000, $form.Height)
+$form.AutoScroll = $true
 $form.Font = New-Object System.Drawing.Font($textFontName, 9.5)
 $form.BackColor = [System.Drawing.Color]::FromArgb(243, 246, 249)
 $form.Icon = [System.Drawing.SystemIcons]::Shield
@@ -292,9 +297,20 @@ $logoBox.Location = New-Object System.Drawing.Point(503, 237)
 $logoBox.Size = New-Object System.Drawing.Size(187, 207)
 $logoBox.SizeMode = 'Zoom'
 $logoBox.BackColor = $surfaceColor
+$logoBox.Anchor = 'Top, Right'
 $logoFile = Join-Path $PSScriptRoot 'logo.jpg'
 if (Test-Path -LiteralPath $logoFile -PathType Leaf) {
-    try { $logoBox.Image = [System.Drawing.Image]::FromFile($logoFile) } catch {}
+    # Ueber einen Stream laden und in ein unabhaengiges Bitmap kopieren,
+    # damit die Datei nicht fuer die Prozesslaufzeit gesperrt bleibt.
+    try {
+        $logoStream = New-Object System.IO.FileStream($logoFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+        try {
+            $logoSource = [System.Drawing.Image]::FromStream($logoStream)
+            try {
+                $logoBox.Image = New-Object System.Drawing.Bitmap($logoSource)
+            } finally { $logoSource.Dispose() }
+        } finally { $logoStream.Dispose() }
+    } catch {}
 }
 $form.Controls.Add($logoBox)
 
@@ -344,7 +360,7 @@ $script:resultSummary = L "Noch keine Sicherung ausgeführt." "No backup has bee
 $resultBox.Text = $script:resultSummary
 $form.Controls.Add($resultBox)
 
-$footerSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(0, 632)) -Size (New-Object System.Drawing.Size(720, 102)) -Anchor 'Bottom, Left, Right'
+$footerSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(0, 632)) -Size (New-Object System.Drawing.Size(720, 102)) -Anchor 'Top, Left, Right'
 
 $startButton = New-Object System.Windows.Forms.Button
 $startButton.Text = L "Sicherung starten" "Start backup"
@@ -356,7 +372,7 @@ $startButton.FlatStyle = "Flat"
 $startButton.FlatAppearance.BorderSize = 0
 $startButton.FlatAppearance.MouseOverBackColor = $accentHoverColor
 $startButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
-$startButton.Anchor = "Bottom, Left"
+$startButton.Anchor = "Top, Left"
 $startButton.TabIndex = 8
 $form.Controls.Add($startButton)
 $form.AcceptButton = $startButton
@@ -372,7 +388,7 @@ $logButton.FlatAppearance.BorderColor = $buttonBorderColor
 $logButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
 $logButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $logButton.Enabled = $false
-$logButton.Anchor = "Bottom, Left"
+$logButton.Anchor = "Top, Left"
 $logButton.TabIndex = 9
 $form.Controls.Add($logButton)
 
@@ -388,7 +404,7 @@ $destinationButton.FlatAppearance.BorderColor = $buttonBorderColor
 $destinationButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
 $destinationButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $destinationButton.Enabled = $false
-$destinationButton.Anchor = "Bottom, Left"
+$destinationButton.Anchor = "Top, Left"
 $destinationButton.TabIndex = 10
 $form.Controls.Add($destinationButton)
 
@@ -402,7 +418,7 @@ $closeButton.FlatAppearance.BorderColor = $buttonBorderColor
 $closeButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
 $closeButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $closeButton.TabIndex = 11
-$closeButton.Anchor = "Bottom, Right"
+$closeButton.Anchor = "Top, Right"
 $form.Controls.Add($closeButton)
 
 $cancelButton = New-Object System.Windows.Forms.Button
@@ -416,7 +432,9 @@ $cancelButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(164,
 $cancelButton.FlatAppearance.BorderSize = 1
 $cancelButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(253, 239, 240)
 $cancelButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
-$cancelButton.Anchor = "Bottom, Right"
+# Der Abbrechen-Button ersetzt den Start-Button an derselben Position und
+# muss deshalb auch gleich verankert sein.
+$cancelButton.Anchor = "Top, Left"
 $cancelButton.TabIndex = 8
 $cancelButton.Visible = $false
 $form.Controls.Add($cancelButton)
@@ -899,6 +917,11 @@ $form.Add_FormClosing({
     }
 })
 
+# Das Logo-Bitmap gehoert dem Formular und wird mit ihm entsorgt.
+$form.Add_FormClosed({
+    if ($logoBox.Image) { $logoBox.Image.Dispose() }
+})
+
 # Beim Start liegt der Fokus auf "Sicherung starten", damit die Sicherung
 # direkt mit Enter beginnen kann.
 $form.Add_Shown({
@@ -914,4 +937,12 @@ foreach ($surface in @($targetSurface, $folderSurface, $activitySurface, $footer
 
 Update-DriveList
 Update-SelectionState
+
+# Auf Bildschirmen mit wenig Arbeitshoehe startet das Fenster verkleinert;
+# der Inhalt ist dann ueber die Bildlaufleiste erreichbar.
+$workingArea = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
+if ($form.Height -gt $workingArea.Height) {
+    $form.Height = $workingArea.Height
+}
+
 [void]$form.ShowDialog()
