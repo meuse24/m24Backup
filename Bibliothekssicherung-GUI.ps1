@@ -25,6 +25,34 @@ function L {
     return $English
 }
 
+function Open-HelpTopic {
+    param([string]$Anchor)
+
+    $htmlHelpPath = @($helpFile, $helpBuildFile) |
+        Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+        Select-Object -First 1
+
+    if ($htmlHelpPath) {
+        $helpPath = (Resolve-Path -LiteralPath $htmlHelpPath).Path
+        $uri = (New-Object System.Uri($helpPath)).AbsoluteUri
+        if ($Anchor) { $uri = "{0}#{1}" -f $uri, $Anchor }
+        Start-Process -FilePath $uri
+        return
+    }
+
+    if (Test-Path -LiteralPath $helpFallbackFile -PathType Leaf) {
+        Start-Process -FilePath $helpFallbackFile
+        return
+    }
+
+    [System.Windows.Forms.MessageBox]::Show(
+        ((L "Die Hilfedatei wurde nicht gefunden:`r`n{0}" "The help file was not found:`r`n{0}") -f $helpFile),
+        (L "Hilfe" "Help"),
+        "OK",
+        "Error"
+    ) | Out-Null
+}
+
 function Get-FolderDisplayName {
     param([string]$CanonicalName)
     if ($script:isGerman) { return $CanonicalName }
@@ -43,7 +71,9 @@ $semiboldFontName = if ($installedFontNames -contains 'Segoe UI Variable Text Se
 $displayFontName = if ($installedFontNames -contains 'Segoe UI Variable Display Semib') { 'Segoe UI Variable Display Semib' } else { 'Segoe UI Semibold' }
 
 $coreScript = Join-Path $PSScriptRoot "Bibliothekssicherung.ps1"
-$helpFile = Join-Path $PSScriptRoot $(if ($script:isGerman) { 'Hilfe-und-Info.txt' } else { 'Help-and-Info.txt' })
+$helpFile = Join-Path $PSScriptRoot $(if ($script:isGerman) { 'Hilfe\index.de.html' } else { 'Hilfe\index.en.html' })
+$helpBuildFile = Join-Path $PSScriptRoot $(if ($script:isGerman) { 'build\staging\Hilfe\index.de.html' } else { 'build\staging\Hilfe\index.en.html' })
+$helpFallbackFile = Join-Path $PSScriptRoot $(if ($script:isGerman) { 'docs\help.de.md' } else { 'docs\help.en.md' })
 $versionFile = Join-Path $PSScriptRoot 'version.txt'
 $appVersion = if (Test-Path -LiteralPath $versionFile -PathType Leaf) { (Get-Content -LiteralPath $versionFile -Raw).Trim() } else { '' }
 $appIcon = $null
@@ -531,6 +561,7 @@ if (Test-Path -LiteralPath $appIconFile -PathType Leaf) {
     } catch { $appIcon = $null }
 }
 $form.Icon = if ($appIcon) { $appIcon } else { [System.Drawing.SystemIcons]::Shield }
+$helpTopicToolTip = New-Object System.Windows.Forms.ToolTip
 
 $surfaceColor = [System.Drawing.Color]::FromArgb(255, 255, 255)
 $borderColor = [System.Drawing.Color]::FromArgb(222, 226, 230)
@@ -553,6 +584,70 @@ function New-SurfacePanel {
     $panel.BackColor = $surfaceColor
     $form.Controls.Add($panel)
     return $panel
+}
+
+function New-HelpTopicButton {
+    param(
+        [System.Drawing.Point]$Location,
+        [string]$Anchor,
+        [string]$ToolTipText,
+        [string]$ControlAnchor = 'Top, Left'
+    )
+
+    $button = New-Object System.Windows.Forms.Button
+    $button.Location = $Location
+    $button.Size = New-Object System.Drawing.Size(22, 22)
+    $button.FlatStyle = 'Flat'
+    $button.FlatAppearance.BorderSize = 0
+    $button.FlatAppearance.MouseOverBackColor = $surfaceColor
+    $button.FlatAppearance.MouseDownBackColor = $surfaceColor
+    $button.BackColor = $surfaceColor
+    $button.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $button.Anchor = $ControlAnchor
+    $button.TabStop = $false
+    $button.Tag = $Anchor
+    $normalPen = New-Object System.Drawing.Pen($accentColor, 1.6)
+    $hoverPen = New-Object System.Drawing.Pen($accentHoverColor, 1.6)
+    $normalBrush = New-Object System.Drawing.SolidBrush($accentColor)
+    $hoverBrush = New-Object System.Drawing.SolidBrush($accentHoverColor)
+    $helpFont = New-Object System.Drawing.Font($semiboldFontName, 9.5, [System.Drawing.FontStyle]::Bold)
+    $helpStringFormat = New-Object System.Drawing.StringFormat
+    $helpStringFormat.Alignment = [System.Drawing.StringAlignment]::Center
+    $helpStringFormat.LineAlignment = [System.Drawing.StringAlignment]::Center
+    $button.Add_Paint({
+        param($sender, $eventArgs)
+
+        $eventArgs.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $bounds = New-Object System.Drawing.Rectangle(3, 3, ($sender.Width - 7), ($sender.Height - 7))
+        $textBounds = New-Object System.Drawing.RectangleF(3, 3, ($sender.Width - 7), ($sender.Height - 7))
+        $isHover = $sender.ClientRectangle.Contains($sender.PointToClient([System.Windows.Forms.Cursor]::Position))
+        $pen = if ($isHover) {
+            $hoverPen
+        } else {
+            $normalPen
+        }
+        $brush = if ($isHover) {
+            $hoverBrush
+        } else {
+            $normalBrush
+        }
+        $eventArgs.Graphics.DrawEllipse($pen, $bounds)
+        $eventArgs.Graphics.DrawString('?', $helpFont, $brush, $textBounds, $helpStringFormat)
+    })
+    $button.Add_MouseEnter({ $this.Invalidate() })
+    $button.Add_MouseLeave({ $this.Invalidate() })
+    $button.Add_Disposed({
+        $normalPen.Dispose()
+        $hoverPen.Dispose()
+        $normalBrush.Dispose()
+        $hoverBrush.Dispose()
+        $helpFont.Dispose()
+        $helpStringFormat.Dispose()
+    })
+    $button.Add_Click({ Open-HelpTopic -Anchor ([string]$this.Tag) })
+    $helpTopicToolTip.SetToolTip($button, $ToolTipText)
+    $form.Controls.Add($button)
+    return $button
 }
 
 $titleLabel = New-Object System.Windows.Forms.Label
@@ -614,6 +709,10 @@ $restoreRadio.Location = New-Object System.Drawing.Point(($backupRadio.Left + $b
 
 $modePanel.Size = New-Object System.Drawing.Size(($restoreRadio.Left + $restoreRadio.GetPreferredSize([System.Drawing.Size]::Empty).Width + 14), 36)
 $modePanel.Location = New-Object System.Drawing.Point((690 - $modePanel.Width), 16)
+$restoreHelpButton = New-HelpTopicButton `
+    -Location (New-Object System.Drawing.Point(($modePanel.Left - 28), 22)) `
+    -Anchor 'restore' `
+    -ToolTipText (L 'Hilfe zur Wiederherstellung öffnen' 'Open restore help')
 
 $targetSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 100)) -Size (New-Object System.Drawing.Size(692, 118))
 
@@ -676,12 +775,17 @@ $healthPanel.Controls.Add($healthDot)
 $healthLabel = New-Object System.Windows.Forms.Label
 $healthLabel.AutoEllipsis = $true
 $healthLabel.Location = New-Object System.Drawing.Point(20, 2)
-$healthLabel.Size = New-Object System.Drawing.Size(490, 21)
+$healthLabel.Size = New-Object System.Drawing.Size(462, 21)
 $healthLabel.Anchor = 'Top, Left, Right'
 $healthLabel.Text = L 'Keine Sicherung für dieses Profil' 'No backup for this profile'
 $healthPanel.Controls.Add($healthLabel)
 
 $healthToolTip = New-Object System.Windows.Forms.ToolTip
+$healthHelpButton = New-HelpTopicButton `
+    -Location (New-Object System.Drawing.Point(668, 164)) `
+    -Anchor 'backup-health' `
+    -ToolTipText (L 'Hilfe zur Backup-Ampel öffnen' 'Open backup health help') `
+    -ControlAnchor 'Top, Right'
 
 function Update-BackupHealth {
     if (-not $driveCombo.SelectedItem) {
@@ -726,6 +830,10 @@ $libraryLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
 $libraryLabel.Location = New-Object System.Drawing.Point(30, 237)
 $libraryLabel.BackColor = $surfaceColor
 $form.Controls.Add($libraryLabel)
+$customFoldersHelpButton = New-HelpTopicButton `
+    -Location (New-Object System.Drawing.Point(225, 235)) `
+    -Anchor 'custom-folders' `
+    -ToolTipText (L 'Hilfe zu Zusatzordnern öffnen' 'Open custom folders help')
 
 $libraryList = New-Object System.Windows.Forms.CheckedListBox
 # Die Ordnernamen sind kurz; eine schmale, dafuer hoehere Liste zeigt alle
@@ -828,6 +936,10 @@ $dryRunCheckBox.Location = New-Object System.Drawing.Point(30, 476)
 $dryRunCheckBox.BackColor = $surfaceColor
 $dryRunCheckBox.TabIndex = 10
 $form.Controls.Add($dryRunCheckBox)
+$dryRunHelpButton = New-HelpTopicButton `
+    -Location (New-Object System.Drawing.Point(($dryRunCheckBox.Left + $dryRunCheckBox.GetPreferredSize([System.Drawing.Size]::Empty).Width + 6), 474)) `
+    -Anchor 'dry-run' `
+    -ToolTipText (L 'Hilfe zum Dry-Run öffnen' 'Open dry-run help')
 
 $ejectCheckBox = New-Object System.Windows.Forms.CheckBox
 $ejectCheckBox.Text = L "Laufwerk nach Erfolg sicher auswerfen" "Safely eject drive after success"
@@ -836,6 +948,10 @@ $ejectCheckBox.Location = New-Object System.Drawing.Point(285, 476)
 $ejectCheckBox.BackColor = $surfaceColor
 $ejectCheckBox.TabIndex = 11
 $form.Controls.Add($ejectCheckBox)
+$safeEjectHelpButton = New-HelpTopicButton `
+    -Location (New-Object System.Drawing.Point(($ejectCheckBox.Left + $ejectCheckBox.GetPreferredSize([System.Drawing.Size]::Empty).Width + 6), 474)) `
+    -Anchor 'safe-eject' `
+    -ToolTipText (L 'Hilfe zum sicheren Auswurf öffnen' 'Open safe eject help')
 
 $activitySurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 514)) -Size (New-Object System.Drawing.Size(692, 156))
 
@@ -1721,11 +1837,7 @@ $logButton.Add_Click({
 })
 
 $helpButton.Add_Click({
-    if (Test-Path -LiteralPath $helpFile -PathType Leaf) {
-        Start-Process -FilePath $helpFile
-    } else {
-        [System.Windows.Forms.MessageBox]::Show(((L "Die Hilfedatei wurde nicht gefunden:`r`n{0}" "The help file was not found:`r`n{0}") -f $helpFile), (L "Hilfe" "Help"), "OK", "Error") | Out-Null
-    }
+    Open-HelpTopic
 })
 
 $destinationButton.Add_Click({
@@ -1783,6 +1895,7 @@ $form.Add_FormClosed({
     if ($appIcon) { $appIcon.Dispose() }
     if ($healthToolTip) { $healthToolTip.Dispose() }
     if ($driveToolTip) { $driveToolTip.Dispose() }
+    if ($helpTopicToolTip) { $helpTopicToolTip.Dispose() }
     if ($ejectTimer) { $ejectTimer.Dispose() }
 })
 

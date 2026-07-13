@@ -1,309 +1,369 @@
-# Implementierungsplan: Backup-Komfortfunktionen
+# Implementierungsplan: Lokales HTML-Hilfesystem
 
 ## Ziel
 
-Drei Funktionen sollen in die bestehende Windows-Forms/PowerShell-Anwendung integriert werden:
+Die bisherige reine Textdatei-Hilfe (`Hilfe-und-Info.txt` / `Help-and-Info.txt`,
+geoeffnet per `Start-Process` ueber den Hilfe-Button) wird durch ein lokales,
+im Browser angezeigtes HTML-Hilfesystem ersetzt:
 
-1. Dry-Run-Modus fuer Backups per Robocopy `/L`
-2. Frei waehlbare Zusatzordner per `FolderBrowserDialog`
-3. Optionales sicheres Auswerfen des Sicherungslaufwerks nach erfolgreichem Backup
+1. Markdown als Pflegequelle (`docs/help.de.md`, `docs/help.en.md`).
+2. Ein selbstgebauter Build-Schritt erzeugt daraus je eine in sich
+   geschlossene HTML-Datei (`Hilfe/index.de.html`, `Hilfe/index.en.html`).
+3. Die GUI verlinkt kontextsensitiv auf einzelne Abschnitte per Anchor
+   (`#dry-run`, `#safe-eject`, `#custom-folders`, `#restore`,
+   `#backup-health`) zusaetzlich zum bestehenden globalen Hilfe-Button.
 
-Die Umsetzung betrifft vor allem `Bibliothekssicherung-GUI.ps1` fuer UI, Prozessargumente und Ergebnisbehandlung sowie `Bibliothekssicherung.ps1` fuer Worker-Parameter, Ordnerdefinitionen und Robocopy-Aufruf.
+Betroffen sind vor allem `build.ps1` (neuer HTML-Erzeugungsschritt),
+`Bibliothekssicherung-GUI.ps1` (Hilfe-Button-Logik, neue kontextsensitive
+Hilfe-Schaltflaechen), die beiden Markdown-Quellen (neu, ersetzen die
+`.txt`-Dateien inhaltlich) sowie `installer/Bibliothekssicherung.iss`
+(vermutlich keine Aenderung noetig, siehe unten).
 
 ## Vorabentscheidungen
 
-- Dry-Run gilt nur fuer `Mode = Backup`, nicht fuer Restore.
-- Ein Dry-Run erzeugt Logdateien, darf aber keine Metadaten als erfolgreiche echte Sicherung speichern und soll das bekannte Sicherungslaufwerk nicht neu merken.
-- Eigene Ordner werden zunaechst fuer die aktuelle Sitzung hinzugefuegt. Persistenz in `settings.json` ist optional und kann spaeter separat ergänzt werden.
-- Eigene Ordner werden im Backup-Ziel unter einem stabilen, eindeutigen Namen abgelegt, damit Namenskollisionen mit Standardordnern oder weiteren Zusatzordnern vermieden werden.
-- Auto-Auswurf wird nur nach erfolgreichem echtem Backup versucht, nicht nach Restore und nicht nach Dry-Run.
+- **Keine neue Laufzeitabhaengigkeit.** Kein WebView2, kein Pandoc-Zwang zur
+  Laufzeit. Die HTML-Erzeugung passiert ausschliesslich beim Build; die
+  ausgelieferte App enthaelt nur fertiges HTML plus die PowerShell-Skripte,
+  genau wie heute.
+- **Markdown-zu-HTML-Konvertierung als kleiner, selbstgeschriebener
+  PowerShell-Konverter**, kein Pandoc-Zwang. Begruendung: `build.ps1` schreibt
+  bereits einen eigenen ICO-Encoder in PowerShell, um keine externe
+  Abhaengigkeit zu brauchen (`New-AppIcon` in `build.ps1`). Ein Pandoc-Zwang
+  waere ein Bruch mit diesem etablierten Stil und macht den Build auf
+  Rechnern ohne Pandoc-Installation kaputt. Der benoetigte Markdown-Umfang ist
+  klein und stabil (Ueberschriften mit Ankern, Absaetze, nummerierte/
+  Aufzaehlungslisten, Fettschrift, einfache Tabellen, horizontale Trenner) und
+  laesst sich mit einem kleinen handgeschriebenen Parser zuverlaessig
+  abdecken. Pandoc bleibt als Alternative dokumentiert, falls spaeter mehr
+  Markdown-Funktionsumfang noetig wird.
+- **Ein Dokument pro Sprache, keine Trennung von Anwender- und
+  Technikteil.** Die heutige Datei enthaelt bewusst sowohl eine Anwender-
+  Anleitung (Teil 1) als auch technische Hintergrundinformation (Teil 2:
+  Komponenten, Tech-Stack, Prozessarchitektur, Robocopy-Parameter,
+  Exit-Codes). Diese Struktur bleibt erhalten (geringster Migrationsaufwand,
+  Teil 2 dient erkennbar auch der Fehlerdiagnose durch versierte Nutzer).
+  Alternative (spaeter moeglich, nicht Teil dieses Plans): Teil 2 in ein
+  separates `ARCHITECTURE.md` fuer Entwickler auslagern und die Hilfe rein
+  anwenderorientiert halten.
+- **CSS wird inline in jede generierte HTML-Datei eingebettet**, kein
+  separates `help.css` als eigene Datei. Die generierten Dateien sind damit
+  je in sich geschlossen (ein Artefakt pro Sprache) und robust gegen
+  Kopiervorgaenge (portables ZIP, Installer-Staging), ohne von einem korrekt
+  mitkopierten `assets`-Ordner abzuhaengen. Bilder sind fuer Version 1 nicht
+  vorgesehen; falls spaeter Screenshots noetig werden, werden sie beim Build
+  als Base64-Data-URIs eingebettet, damit die Selbstgeschlossenheit erhalten
+  bleibt.
+- **Kein separates `.txt`-Fallback-Duplikat.** Statt `Hilfe-und-Info.txt`
+  als eigenstaendig gepflegte dritte Kopie weiterzufuehren, dient die
+  Markdown-Quelldatei selbst als Laufzeit-Fallback, falls die generierte
+  HTML-Datei zur Laufzeit fehlt (z. B. bei einer beschaedigten Installation).
+  Rohes Markdown mit einfachen `#`-Ueberschriften ist in einem Texteditor gut
+  lesbar; eine dritte, staendig zu synchronisierende Textkopie entfaellt
+  damit vollstaendig. Wenn eine huebschere Fallback-Darstellung gewuenscht
+  ist, kann `Hilfe-und-Info.txt`/`Help-and-Info.txt` fuer eine
+  Uebergangszeit zusaetzlich weitergefuehrt werden (siehe Abschnitt
+  "Alternativen").
+- **Abschnittsparitaet zwischen Deutsch und Englisch ist Pflicht.**
+  Kontextsensitive Anchors muessen unabhaengig von der Anzeigesprache
+  funktionieren. Heute weicht die Struktur ab: `Hilfe-und-Info.txt` hat 20
+  nummerierte Abschnitte (u. a. eigene Abschnitte "Häufige Probleme",
+  "Inter-Prozess-Kommunikation", "Preflight und Konflikterkennung"),
+  `Help-and-Info.txt` nur 17. Beim Uebertragen nach Markdown werden beide
+  Sprachversionen auf dieselbe Abschnittsstruktur und dieselben (englischen,
+  sprachneutralen) Anchor-Slugs gebracht; fehlende Abschnitte werden in der
+  jeweils anderen Sprache ergaenzt, nicht stillschweigend weggelassen.
+- **Neuer Inhalt: Backup-Ampel/Health-Anzeige.** Diese bestehende Funktion
+  (siehe README, `Get-BackupHealth`/`Update-BackupHealth` in der GUI) ist in
+  der heutigen Hilfe ueberhaupt nicht dokumentiert. Ein kurzer neuer
+  Abschnitt (Anchor `backup-health`) wird beim Migrieren ergaenzt, nicht nur
+  verlinkt.
 
-## 0. Voraussetzung: UI-Layout und Fensterhoehe
+## 1. Markdown-Quellstruktur
 
-Das Fenster wurde erst kuerzlich bewusst fixiert (`Bibliothekssicherung-GUI.ps1:265-274`: `ClientSize = 720x734`, `FormBorderStyle = FixedSingle`, `MaximizeBox = $false`, `MinimumSize = 736x600`). Alle Controls sind auf feste Pixelkoordinaten gesetzt, und zwischen den vorhandenen Flaechen ist praktisch kein Platz mehr frei:
+```
+docs/
+  help.de.md
+  help.en.md
+```
 
-- `targetSurface` 100-218, `folderSurface` 226-456 (Luecke dazwischen: 8 px)
-- `folderSurface` 226-456, `activitySurface` 466-622 (Luecke: 10 px)
-- `footerSurface` 632-734 ist bereits vollstaendig mit vier Buttons in einer Reihe belegt (30-690 horizontal)
+- Beide Dateien uebernehmen die heutige Zweiteilung (Anwenderteil /
+  Technikteil) als Markdown-Ueberschriften (`#`, `##`).
+- Jede Ueberschrift, die als Sprungziel fuer kontextsensitive Hilfe dient,
+  bekommt einen expliziten, sprachneutralen HTML-Anker direkt vor der
+  Ueberschrift, z. B. `<a id="dry-run"></a>`. Diese Syntax funktioniert auch
+  in normalen Markdown-Viewern wie GitHub oder VS Code und bleibt im
+  Markdown-Fallback sichtbar nachvollziehbar. Ohne expliziten Anker erzeugt
+  der Konverter automatisch einen Slug aus dem Ueberschriftentext
+  (Kleinschreibung, Leerzeichen zu `-`).
+- Feste Anchor-Slugs fuer die fuenf angefragten Themen (identisch in beiden
+  Sprachdateien):
+  - `dry-run`
+  - `safe-eject`
+  - `custom-folders`
+  - `restore`
+  - `backup-health`
+- Versionsplatzhalter: ein einzelnes `{{VERSION}}` in jeder Markdown-Datei
+  (ersetzt die heutigen drei verschiedenen Ersetzungen in `build.ps1`, siehe
+  Abschnitt 3), sowie ein `{{BUILD_DATE}}` fuer das Versionsdatum, falls
+  weiterhin gewuenscht.
+- Die Robocopy-Parameterliste (heute eine feste Textausrichtung mit
+  Leerzeichen) wird als Markdown-Tabelle abgebildet, damit der Konverter sie
+  sauber in eine `<table>` uebersetzen kann.
 
-Fuer die drei neuen Funktionen muss deshalb vor der eigentlichen Umsetzung ein Platz geschaffen werden:
+## 2. Markdown-zu-HTML-Konverter
 
-- **Zusatzordner-Button**: passt ohne Fensteraenderung neben `allButton`/`noneButton` (`Location 384,260` bzw. `384,297`), z. B. bei `384,334` mit Breite ~140-180 px – dort ist innerhalb von `folderSurface` bis y=456 noch Platz.
-- **Dry-Run- und Auto-Auswurf-Checkbox**: dafuer gibt es keinen freien Platz. Empfehlung: eine neue, kompakte `optionsSurface`-Flaeche zwischen `folderSurface` und `activitySurface` einfuegen (z. B. bei y=466, Hoehe ~40 px, beide Checkboxen nebeneinander oder als kompakte Zeile). Anschliessend `activitySurface` (bisher y=466) und `footerSurface` (bisher y=632) um denselben Betrag nach unten verschieben und `$form.ClientSize.Height` sowie `$form.MinimumSize.Height` um denselben Betrag erhoehen (z. B. je +48 px). Die automatische Verkleinerung bei kleinen Bildschirmen (`$form.Height`-Anpassung ans `WorkingArea` am Skriptende) bleibt davon unberuehrt, weil sie bereits nach der finalen Hoehe rechnet.
-- Alternative, falls eine Fensteraenderung vermieden werden soll: Checkboxen sehr kompakt in die bestehende `targetSurface`- oder `activitySurface`-Zeile integrieren (z. B. rechts neben `driveInfoLabel`/`healthPanel`). Das ist enger und sollte nur gewaehlt werden, wenn eine Vergroesserung explizit unerwuenscht ist.
+Neue Funktion in `build.ps1` (oder eine ausgelagerte `ConvertTo-HelpHtml.ps1`,
+falls das uebersichtlicher ist), die den unterstuetzten Markdown-Ausschnitt in
+HTML uebersetzt:
 
-Diese Entscheidung sollte vor Beginn der Detailarbeiten getroffen werden, da sie mehrere feste Y-Koordinaten im Skript verkettet.
+- Unterstuetzt: `#`/`##`/`###`-Ueberschriften, explizite
+  `<a id="..."></a>`-Anker,
+  Absaetze, nummerierte und Aufzaehlungslisten, `**fett**`, `` `code` ``,
+  einfache Tabellen (`| a | b |`), horizontale Trenner (`---`).
+- Nicht unterstuetzt (bewusst, weil im aktuellen Inhalt nicht benoetigt):
+  verschachtelte Listen ueber zwei Ebenen, Bilder, Links auf externe
+  Zwischenueberschriften-Ebenen jenseits `###`.
+- Erzeugt eine vollstaendige, in sich geschlossene HTML-Seite: `<html>`,
+  eingebettetes `<style>` (siehe Abschnitt 4), ein Inhaltsverzeichnis am
+  Seitenanfang (automatisch aus den `##`-Ueberschriften erzeugt, mit Links
+  auf die jeweiligen Anchors), danach der eigentliche Inhalt.
+- Wird analog zu `New-AppIcon` als eigene Funktion mit klarem Vertrag
+  geschrieben (Eingabe: Markdown-Text und Zielsprache; Ausgabe: HTML-String),
+  damit sie unabhaengig getestet werden kann (siehe Testabschnitt).
 
-### Gemeinsame Codestellen fuer alle drei Funktionen
+## 3. Build-Integration (`build.ps1`)
 
-Neue Controls (Dry-Run-Checkbox, Zusatzordner-Button, Auto-Auswurf-Checkbox) muessen an zwei bereits bestehenden Stellen konsistent ein- und ausgeblendet werden, sonst bleiben sie waehrend eines laufenden Vorgangs bedienbar:
-- Sperren beim Start: `startButton.Add_Click`, Block ab `Bibliothekssicherung-GUI.ps1:876` (`$driveCombo.Enabled = $false` usw.) sowie der Fehlerpfad ab Zeile 909.
-- Freigeben nach Abschluss: Timer-Tick-Handler, Block ab Zeile 1036.
+- Der bestehende Block, der `{{VERSION}}` und die beiden hartcodierten
+  Versions-Ersetzungen in `Hilfe-und-Info.txt`/`Help-and-Info.txt` durchfuehrt,
+  wird ersetzt durch:
+  1. `docs/help.de.md` und `docs/help.en.md` einlesen.
+  2. `{{VERSION}}` (und ggf. `{{BUILD_DATE}}`) ersetzen.
+  3. Beide Male den neuen Markdown-zu-HTML-Konverter aufrufen.
+  4. Ergebnis nach `$stageDir\Hilfe\index.de.html` bzw.
+     `$stageDir\Hilfe\index.en.html` schreiben.
+- Wie bei den bestehenden Pruefungen (`if (-not (Test-Path ... )) { throw ... }`
+  fuer `logo.jpg`/das Installer-Skript) bricht der Build hart ab, wenn eine
+  Markdown-Quelldatei fehlt oder der Konverter einen Fehler wirft. Eine
+  fehlerhafte Hilfe wird nicht stillschweigend ausgeliefert.
+- Die Markdown-Quellen werden als `docs/help.de.md` und `docs/help.en.md`
+  mit in das Staging-Verzeichnis kopiert. Das weicht von der ersten
+  Skizze ab, ist aber fuer den geplanten Laufzeit-Fallback notwendig:
+  Fehlt die generierte HTML-Datei in einer beschaedigten Installation, kann
+  die App dieselbe Markdown-Quelle direkt oeffnen, statt eine dritte
+  `.txt`-Kopie pflegen zu muessen.
+- Kein Aenderungsbedarf in `installer/Bibliothekssicherung.iss`: Die
+  `[Files]`-Sektion kopiert bereits `{#SourceDir}\*` mit
+  `recursesubdirs createallsubdirs` (Zeile 51) — ein neuer `Hilfe`-Unterordner
+  in `$stageDir` wird automatisch mit ausgeliefert, sowohl im Installer als
+  auch im portablen ZIP (`Compress-Archive -Path $portableRoot ...`).
+- `Hilfe-und-Info.txt`/`Help-and-Info.txt` als eigenstaendig gepflegte
+  Dateien entfallen (siehe Vorabentscheidung); die bisherigen
+  Versions-Ersetzungen fuer diese beiden Dateien werden aus `build.ps1`
+  entfernt.
 
-Ebenso muss die neue temporaere `SelectedFoldersFile`-Datei an beiden Stellen behandelt werden, an denen bereits `statusFile`/`resultFile`/`cancelFile`/`previewFile`/`approvalFile` aufgeraeumt werden:
-- Fehlerpfad direkt nach dem fehlgeschlagenen Prozessstart (Zeile 924).
-- Regulaerer Abschluss im Timer-Tick (Zeile 1119-1135).
+## 4. Aussehen / CSS
 
-## 1. Dry-Run-Modus
+- Schlichtes, gut lesbares Stylesheet inline im `<style>`-Tag: proportionale
+  Schrift, maximale Textbreite (~760px) fuer Lesbarkeit, sichtbare
+  Ueberschriften-Hierarchie, dezente Trennlinien, druckfreundliche Faerbung
+  (schwarz auf weiss, keine dunklen Flaechen, die beim Ausdrucken viel Tinte
+  verbrauchen), da eine gedruckte Kopie fuer eine Backup-Anleitung ein
+  realistischer Anwendungsfall ist.
+- Kein Dark-Mode-Zwang noetig (lokale Hilfeseite, kein Web-Artefakt mit
+  Erwartungshaltung); optional per `@media (prefers-color-scheme: dark)`,
+  aber nicht Teil des Kernumfangs.
+- Anchor-Ziele bekommen etwas `scroll-margin-top`, damit die feste
+  Inhaltsverzeichnis-Kopfzeile (falls als sticky Header umgesetzt) die
+  Ueberschrift beim Anspringen nicht verdeckt.
 
-### UI
+## 5. GUI-Integration
 
-- In `Bibliothekssicherung-GUI.ps1` eine Checkbox im Optionsbereich oder nahe dem Startbutton ergaenzen:
-  - Deutsch: `Nur simulieren (Dry-Run)`
-  - Englisch: `Simulate only (dry run)`
-- Checkbox nur im Backup-Modus anzeigen bzw. aktivieren.
-- Beim Wechsel auf Restore deaktivieren und abwaehlen.
-- Waehrend eines laufenden Vorgangs zusammen mit den anderen Eingaben sperren und danach wieder freigeben.
-- Start- und Status-Texte im Dry-Run unterscheidbar machen, z. B. `Simulation wird gestartet ...`.
+### Hilfe-Button (bestehend)
 
-### Worker-Parameter
+- `$helpFile` (`Bibliothekssicherung-GUI.ps1:46`) zeigt kuenftig auf
+  `Hilfe\index.de.html` bzw. `Hilfe\index.en.html` statt auf die `.txt`-Datei.
+- Fuer lokale Entwicklung prueft die GUI zusaetzlich
+  `build\staging\Hilfe\index.*.html`, wenn die ausgelieferte
+  `Hilfe\index.*.html` im Projektordner noch nicht existiert. Dadurch oeffnet
+  ein Quellbaum nach einem Build ebenfalls die formatierte HTML-Hilfe statt
+  direkt auf den Markdown-Fallback zu fallen.
+- `$helpButton.Add_Click` (Zeile 1723) bleibt inhaltlich fast gleich
+  (`Test-Path` + `Start-Process`), oeffnet aber eine HTML-Datei, die vom
+  Standardbrowser dargestellt wird.
+- Fallback: Existiert die HTML-Datei nicht (z. B. defekte Installation),
+  faellt der Button auf `docs\help.de.md`/`docs\help.en.md` zurueck, sofern
+  diese mit ausgeliefert werden (siehe Entscheidung: als Fallback im
+  Installationsverzeichnis behalten, nicht nur im Repo). Nur wenn auch das
+  fehlt, erscheint die heutige Fehlermeldung.
 
-- In `Bibliothekssicherung.ps1` einen Switch ergaenzen:
-  - `[switch]$DryRun`
-- Validieren:
-  - Wenn `$DryRun` und `$Mode -ne 'Backup'`, abbrechen oder ignorieren. Besser: mit klarer Meldung abbrechen, weil Restore-Simulation bereits ueber die vorhandene Konfliktvorschau abgedeckt ist.
+### Kontextsensitive Hilfe
 
-### Prozessargumente
+- Neue Hilfsfunktion `Open-HelpTopic -Anchor '<slug>'` in
+  `Bibliothekssicherung-GUI.ps1`:
+  - Ermittelt die aktuell passende Sprachdatei wie `$helpFile`.
+  - Baut daraus eine korrekte `file://`-URI **mit Fragment**, statt den
+    Pfad naiv mit `#anchor` zu verketten. Wichtig: `Start-Process` uebergibt
+    den Dateinamen an ShellExecute; ein simples
+    `"$helpFile#$anchor"` wird von Windows als (nicht existierender)
+    Dateiname interpretiert und schlaegt fehl, weil lokale Pfade technisch
+    `#` enthalten duerfen. Stattdessen: `[System.Uri]`-Konstruktion aus dem
+    absoluten Pfad (kuemmert sich um Leerzeichen/Sonderzeichen im Pfad,
+    z. B. `C:\Program Files\...`) plus manuell angehaengtem `#anchor`, und
+    das Ergebnis als `-FilePath` an `Start-Process` uebergeben.
+  - Faellt wie der Haupt-Hilfe-Button auf die Markdown-Datei zurueck, wenn
+    die HTML-Datei fehlt (dann ohne Anchor-Sprung, da einfache Texteditoren
+    keine Fragmente unterstuetzen; das ist ein akzeptabler Komfortverlust
+    im Fallback-Fall).
+- Neue kleine Hilfe-Schaltflaechen ("?", z. B. 18x18px, flach, wie die
+  uebrigen Buttons gestylt) neben:
+  - `dryRunCheckBox` (Anchor `dry-run`)
+  - `ejectCheckBox` (Anchor `safe-eject`)
+  - `addFolderButton`/`removeFolderButton`-Bereich (Anchor `custom-folders`)
+  - `restoreRadio` oder dem "Wiederherstellung pruefen"-Startbutton im
+    Restore-Modus (Anchor `restore`)
+  - `healthPanel`/`healthDot` (Anchor `backup-health`)
+- Platzierung: Das Fenster ist bewusst fixiert (`FormBorderStyle =
+  FixedSingle`, siehe `$form.ClientSize`/`MinimumSize`, bereits einmal bei
+  den Dry-Run/Zusatzordner/Auswurf-Funktionen als enger Platz identifiziert).
+  Die "?"-Buttons sind aber deutlich kleiner als die vorherigen Checkboxen/
+  Buttons und werden **dynamisch** direkt hinter der jeweils tatsaechlich
+  gerenderten Breite des Nachbar-Controls positioniert (z. B.
+  `$dryRunCheckBox.Left + $dryRunCheckBox.GetPreferredSize([System.Drawing.Size]::Empty).Width + 6`),
+  genau wie es `$restoreRadio`/`$modePanel` heute schon fuer variable
+  Textbreiten macht (`Bibliothekssicherung-GUI.ps1:613,615`). Das vermeidet
+  hartcodierte Pixel-Offsets, die bei Sprachwechsel (unterschiedliche
+  Textlaenge von "Nur simulieren (Dry-Run)" vs. "Simulate only (dry run)")
+  kollidieren wuerden. Freier Platz in der bestehenden `optionsSurface`-Zeile
+  (`$dryRunCheckBox`/`$ejectCheckBox`, Breite 692px insgesamt) reicht nach
+  grober Schaetzung fuer die zwei "?"-Buttons dort aus; fuer
+  `addFolderButton`/`healthPanel`/`restoreRadio` ist die tatsaechlich freie
+  Breite bei der Umsetzung nachzumessen, bevor final positioniert wird.
+- Ergaenzend, nicht ersetzend: Die bestehenden `ToolTip`-Komponenten
+  (`$driveToolTip`, `$healthToolTip`) bleiben fuer kurze Hover-Hinweise
+  erhalten. Die neuen "?"-Buttons sind fuer den Sprung zur ausfuehrlichen
+  Dokumentation gedacht (kurzer Hover-Hinweis plus Klick-Option = etabliertes,
+  professionelles Muster), nicht als Ersatz fuer die Tooltips.
 
-- In `Bibliothekssicherung-GUI.ps1` beim Zusammenbau von `$arguments` (aktuell ein einzelner `-f`-Formatstring, `Bibliothekssicherung-GUI.ps1:895`) den Schalter `-DryRun` nur anhaengen, wenn die Checkbox aktiv ist und Backup ausgewaehlt ist.
-- Wichtige technische Einschraenkung: Die App laeuft unter Windows PowerShell 5.1 / .NET Framework (siehe Kommentar in `build.ps1:122`), nicht unter PowerShell 7/.NET. `System.Diagnostics.ProcessStartInfo.ArgumentList` existiert dort nicht; `StartInfo.Arguments` bleibt ein einzelner String. Ein "Array" kann also nur intern zur Konstruktion dienen und muss am Ende wieder zu einem korrekt gequoteten String zusammengefuegt werden (z. B. ueber eine kleine Hilfsfunktion `ConvertTo-QuotedArgument`, die jedes Element in `"..."` einschliesst). Windows-Pfade duerfen ohnehin kein `"` enthalten, wodurch das Escaping einfach bleibt; die bestehende Praxis, jeden Wert einzeln in Anfuehrungszeichen zu setzen, ist bereits sicher genug fuer Pfade mit Leerzeichen.
-- Die eigentliche Antwort auf "quoting-anfaellige Zusatzordner" ist ohnehin die JSON-Datei aus Abschnitt 2 (`-SelectedFoldersFile`), nicht die Kommandozeile – dorthin gehoeren beliebige Pfade, nicht in den Argumentstring.
+## 6. Migration der bestehenden Inhalte
 
-### Robocopy
+- Inhalte aus `Help-and-Info.txt`/`Hilfe-und-Info.txt` werden inhaltlich nach
+  `docs/help.en.md`/`docs/help.de.md` uebertragen und fuer das neue
+  Hilfesystem verdichtet (nummerierte Abschnitte zu `##`-Ueberschriften,
+  Bindestrich-Listen zu Markdown-Listen, die Robocopy-Parameter zu einer
+  Markdown-Tabelle).
+- Fehlende Abschnitte werden ergaenzt, damit beide Sprachen dieselbe
+  Abschnittsstruktur haben (siehe Vorabentscheidung zur Abschnittsparitaet):
+  mindestens "Häufige Probleme"/"Common issues",
+  "Inter-Prozess-Kommunikation"/"Inter-process communication",
+  "Preflight und Konflikterkennung"/"Preflight and conflict detection" fehlen
+  heute in der englischen Datei und muessen uebersetzt ergaenzt werden.
+- Neuer Abschnitt "Backup-Ampel/Backup health indicator" (Anchor
+  `backup-health`) wird in beiden Sprachen neu geschrieben (Ampelfarben Rot/
+  Gelb/Gruen, Aktualitaetsgrenzen 7/14 Tage aus `Get-BackupHealth`,
+  Tooltip-Details).
+- Die alten `.txt`-Dateien werden aus dem Repository-Root geloescht, sobald
+  die Migration abgeschlossen und geprueft ist (nicht vorher, um einen
+  Vergleich waehrend der Migration zu erleichtern).
 
-- In `Bibliothekssicherung.ps1` beim Aufbau von `$robocopyArgs` (bereits ein Array, `Bibliothekssicherung.ps1:656-673`) fuer Backup und `$DryRun` den Schalter `"/L"` anhaengen.
-- Wichtig: Die aktuellen Robocopy-Argumente enthalten `/NFL` (No File List) und `/NDL` (No Directory List, `Bibliothekssicherung.ps1:668-669`). Mit `/L` kombiniert wuerde das Log dann nur eine Zusammenfassung ohne Dateinamen zeigen – der eigentliche Zweck einer Simulation (sehen, was kopiert wuerde) ginge verloren. Bei `$DryRun` sollten `/NFL` und `/NDL` deshalb weggelassen werden, damit das Log die betroffenen Dateien/Ordner tatsaechlich auflistet.
-- Im Logkopf explizit festhalten:
-  - `Dry-Run: Ja/Nein`
-  - bei Dry-Run: Hinweis, dass keine Dateien kopiert wurden.
-- Ergebnis-JSON um `DryRun = $DryRun.IsPresent` ergaenzen.
-- Ergebnis- und GUI-Texte anpassen:
-  - Deutsch: `Simulation erfolgreich abgeschlossen`
-  - Englisch: `Simulation completed successfully`
+## Alternativen (bewusst nicht gewaehlt)
 
-### Metadaten und Health
-
-- Aktuell wird `_Sicherungsinfo.txt` vor dem Robocopy-Lauf geschrieben und am Ende als erfolgreich markiert. Fuer Dry-Run sollte keine echte Sicherung als erfolgreich markiert werden.
-- Umsetzung:
-  - Logordner darf angelegt werden.
-  - `_Sicherungsinfo.txt` im Dry-Run nicht anlegen oder nicht veraendern.
-  - `Save-KnownBackupDrive` in der GUI bei Dry-Run nicht ausfuehren (Bedingung ergaenzen bei `Bibliothekssicherung-GUI.ps1:1085`, wo aktuell nur `$script:activeMode -eq 'Backup'` geprueft wird).
-  - `Update-BackupHealth` kann nach einem Dry-Run unveraendert aufgerufen werden: Solange `_Sicherungsinfo.txt` im Dry-Run nicht angefasst wird, liest die Funktion ohnehin nur den Stand der letzten echten Sicherung neu ein. Es ist also keine zusaetzliche Sonderbehandlung noetig, wenn der erste Punkt korrekt umgesetzt ist.
-
-## 2. Eigene Ordner Hinzufuegen
-
-### Datenmodell in der GUI
-
-- Statt nur `CanonicalName` und `DisplayName` sollte jedes Listenelement folgende Felder tragen:
-  - `Name`: stabiler Zielordnername
-  - `DisplayName`: Anzeige in der Liste
-  - `Path`: Quellpfad, bei Standardbibliotheken optional oder gesetzt
-  - `IsCustom`: Boolean
-- Fuer Standardbibliotheken kann `Path` aus derselben Logik wie `Get-LibraryNames` kommen oder leer bleiben, solange der Worker sie anhand des Namens aufloesen kann.
-- Fuer Zusatzordner wird `Path` immer gesetzt.
-
-### Kritisch: Persistenz der Zusatzordner ueber `Update-LibraryList` hinweg
-
-`Update-LibraryList` (`Bibliothekssicherung-GUI.ps1:699-732`) leert `$libraryList.Items` bei **jedem** Aufruf vollstaendig und baut die Liste ausschliesslich aus `Get-LibraryNames` neu auf. Aufgerufen wird die Funktion bei jedem Laufwerkswechsel (`driveCombo.Add_SelectedIndexChanged`, Zeile 788-805) und bei jedem Wechsel zwischen Sichern/Wiederherstellen (Zeilen 809-814). Ohne Gegenmassnahme wuerden vom Benutzer hinzugefuegte Zusatzordner beim naechsten Laufwerks- oder Moduswechsel kommentarlos verschwinden – ein leicht ausloesbarer Datenverlust mitten in der Auswahl.
-
-Notwendige Aenderung:
-- Zusatzordner in einer eigenen, von `Update-LibraryList` unabhaengigen Liste halten, z. B. `$script:customFolders` (Array der oben definierten Objekte inkl. Checked-Zustand).
-- `Update-LibraryList` so anpassen, dass sie im Backup-Modus nach dem Befuellen mit den Standardordnern zusaetzlich die Eintraege aus `$script:customFolders` anhaengt (inkl. ihres zuletzt bekannten Checked-Zustands) und im Restore-Modus die aus dem Sicherungsziel gelesenen Zusatzordner (siehe unten, `_Ordner.json`) anzeigt.
-- Der `Add_ItemCheck`-Handler (Zeile 744-750) oder das Auslesen beim Start (`startButton.Add_Click`, Zeile 851-853) muss den Checked-Zustand von Zusatzordnern nach `$script:customFolders` zurueckschreiben, damit er einen Rebuild uebersteht.
-- Die Objekterzeugung an den zwei bestehenden Stellen (Zeilen 497-501 fuer die Erstbefuellung und 726-730 innerhalb von `Update-LibraryList`) muss auf das neue Feldschema (`Name` statt `CanonicalName`) umgestellt werden; ebenso die Auswertung in `startButton.Add_Click` (Zeile 851-853, aktuell `$_.CanonicalName`).
-
-### UI
-
-- Unter `allButton`/`noneButton` einen weiteren Button einfuegen, z. B. bei `Location 384,334` (in `folderSurface` ist bis y=456 noch Platz frei, siehe Abschnitt 0):
-  - Deutsch: `Weiteren Ordner hinzufuegen...`
-  - Englisch: `Add folder...`
-- Button nur im Backup-Modus aktivieren. Im Restore-Modus ausblenden oder deaktivieren, weil Restore nur aus vorhandenen Backup-Ordnern erfolgen sollte.
-- Eine Moeglichkeit zum Entfernen eines versehentlich hinzugefuegten Zusatzordners ergaenzen (z. B. Entf-Taste auf dem markierten Zusatzordner-Eintrag oder ein kleines Kontextmenü), da Abwaehlen den Eintrag nur aus der Sicherung ausschliesst, ihn aber dauerhaft in der Liste belaesst.
-- Bei Klick:
-  - `System.Windows.Forms.FolderBrowserDialog` oeffnen.
-  - `Description` lokalisieren.
-  - `ShowNewFolderButton = $false`, da ein existierender Quellordner ausgewaehlt werden soll.
-  - Ausgewaehlten Pfad normalisieren.
-  - Duplikate gegen bestehende Standard- und Zusatzordner verhindern.
-  - Den Benutzerprofilordner selbst weiterhin ablehnen, analog zur Worker-Logik.
-  - Ziel innerhalb Quelle bzw. Quelle innerhalb Ziel spaeter weiterhin vom Worker pruefen lassen.
-
-### Zielnamen fuer Zusatzordner
-
-- Eigene Ordner brauchen einen eindeutigen Backup-Zielnamen. Vorschlag:
-  - Basis: letzter Pfadbestandteil, z. B. `Projekte`
-  - Kollisionen: `Projekte`, `Projekte (2)`, `Projekte (3)`
-  - Alternativ robuster: Prefix `Benutzerordner - Projekte`
-- Der gewaehlte Name wird als `Name` an den Worker uebergeben und im Ziel unter `$destination\<Name>` verwendet.
-- Zusaetzlich zu Kollisionen mit Standard- und weiteren Zusatzordnern muessen auch die vom Tool selbst genutzten Namen reserviert bleiben, da sie nicht Teil von `$folderDefinitions` sind und deshalb von der bestehenden Kollisionspruefung nicht erfasst wuerden: `_logs`, `_Sicherungsinfo.txt`, ein kuenftiges `_Ordner.json` sowie generell jeder mit `_` beginnende Name. Diese Pruefung gehoert sowohl in die GUI (beim Hinzufuegen) als auch in den Worker (`Bibliothekssicherung.ps1`, siehe unten) als zweite Absicherung.
-
-### Uebergabe an den Worker
-
-- Die aktuelle Pipe-Liste `-SelectedFolders "Desktop|Dokumente"` reicht fuer Pfade nicht aus.
-- Neuer Parameter in `Bibliothekssicherung.ps1`: `[string]$SelectedFoldersFile` (Pfad zu einer temporaeren JSON-Datei, siehe unten – kein Roh-JSON als Kommandozeilenargument, damit Pfade und Sonderzeichen nicht ueber die Kommandozeile escaped werden muessen).
-  - GUI erzeugt `$script:selectedFoldersFile`
-  - Inhalt: Array aus Objekten `{ Name, Path, IsCustom }`
-  - Worker-Parameter: `-SelectedFoldersFile "<tempfile>"`
-  - Cleanup zusammen mit Status-, Result-, Preview- und Approval-Dateien.
-- Rueckwaertskompatibilitaet:
-  - `-SelectedFolders` fuer CLI/alte Aufrufe behalten.
-  - Wenn `-SelectedFoldersFile` gesetzt ist, hat es Vorrang.
-
-### Worker-Ordnerdefinitionen
-
-- In `Bibliothekssicherung.ps1` die Standardordner weiterhin in `$folderDefinitions` (Zeile 399-412) aufbauen.
-- Danach Zusatzordner aus `SelectedFoldersFile` hinzufuegen:
-  - Nur bei Backup.
-  - Pfad muss existierender Container sein.
-  - Pfad darf nicht direkt dem Benutzerprofil entsprechen.
-  - Name muss gueltig als Ordnername sein, keine ungueltigen Dateinamenszeichen.
-  - Name darf keinem reservierten internen Namen entsprechen (siehe oben: `_logs`, `_Sicherungsinfo.txt`, `_Ordner.json`, `_`-Praefix).
-  - Namenskollisionen mit vorhandenen Definitionen verhindern oder eindeutig aufloesen.
-  - Zusaetzlich pruefen, ob der gewaehlte Pfad identisch mit, uebergeordnet zu oder untergeordnet von einem bereits ausgewaehlten Ordner (Standard oder Zusatz) ist. Das verursacht keinen Fehler in Robocopy, fuehrt aber zu redundantem Kopieren und verwirrenden Ergebnissen; im Zweifel ablehnen oder den Unterordner automatisch abwaehlen.
-- Die bestehende Pruefung "Ziel liegt innerhalb der Quelle" (Zeile 452-460) laeuft bereits ueber alle `$backupFolders`, also automatisch auch ueber Zusatzordner – hier ist keine Aenderung noetig.
-
-### Restore-Unterstuetzung fuer Zusatzordner (Teil dieses Plans, nicht "spaeter")
-
-Ohne gespeicherten Originalpfad kann ein Zusatzordner beim Restore nicht wiederhergestellt werden, weil `$folderDefinitions` im Restore-Zweig (Zeile 433-438) nur die neun fest bekannten Namen durchsucht. Damit die Funktion "Zusatzordner" nicht nur sichern, aber nie wiederherstellen kann, gehoert die Metadatendatei und ihr Auslesen in den Umfang dieses Plans:
-
-- Der Worker schreibt im echten (nicht Dry-Run-) Backup pro Zusatzordner einen Eintrag in eine strukturierte Metadatei, z. B. `_Ordner.json` im Sicherungsziel:
-  - `Name` (Zielordnername)
-  - `OriginalPath`
-  - `BackedUpAt`
-- Im Restore-Zweig (`Mode -eq 'Restore'`, nach `Assert-BackupIdentity`) liest der Worker `_Ordner.json`, falls vorhanden, und ergaenzt `$folderDefinitions` um Eintraege `{ Name = ...; Path = OriginalPath }`, bevor die bestehende Existenzpruefung (`Test-Path $restoreSource`) laeuft. Damit fuegen sich Zusatzordner ohne Sonderfall in die vorhandene Restore-Logik ein.
-- Die GUI muss `Update-LibraryList` im Restore-Zweig (Zeile 702-713) ebenfalls erweitern: Zusaetzlich zu `Get-LibraryNames -IncludeMissing` auch `_Ordner.json` aus `$backupRoot` lesen (falls vorhanden) und deren Eintraege als Zusatzordner-Items anzeigen, damit sie ueberhaupt anwaehlbar sind.
-- Fehlt `_Ordner.json` (z. B. Sicherung vor diesem Update erstellt), bleibt das Verhalten wie bisher: Zusatzordner sind beim Restore schlicht nicht sichtbar, ohne Fehler.
-
-## 3. Laufwerk Nach Erfolg Sicher Auswerfen
-
-### UI
-
-- Checkbox in `Bibliothekssicherung-GUI.ps1` ergaenzen:
-  - Deutsch: `Laufwerk nach Erfolg sicher auswerfen`
-  - Englisch: `Safely eject drive after success`
-- Nur im Backup-Modus aktivieren.
-- Bei internem Laufwerk (`DriveType = 3`) die Checkbox fest deaktivieren und abwaehlen (nicht nur warnen), analog zur bestehenden Warnung fuer interne Sicherungsziele (`Bibliothekssicherung-GUI.ps1:841-849`) – ein Warndialog fuer eine Aktion, die ohnehin sinnlos ist, verwirrt nur.
-- Waehrend des Vorgangs sperren und danach wieder freigeben.
-
-### Auswurfzeitpunkt
-
-- In der GUI nach Prozessende ausfuehren, nicht im Worker.
-- Bedingungen:
-  - Exit-Code `0`
-  - Ergebnis `Success = true`
-  - `result.Mode = 'Backup'`
-  - kein Dry-Run
-  - Checkbox aktiv
-  - aktives Laufwerk vorhanden und bevorzugt `DriveType = 2`
-
-### Auswurffunktion
-
-- Funktion `Dismount-BackupDriveSafely` in `Bibliothekssicherung-GUI.ps1` anlegen.
-- Primaerer Ansatz per Shell-COM (fuehrt einen echten Geraete-Auswurf durch, nicht nur ein Aushaengen des Dateisystems):
-  - `$shell = New-Object -ComObject Shell.Application`
-  - `$shell.Namespace(17).ParseName("$Drive\")` liefert das Laufwerk-Item (Namespace 17 = Arbeitsplatz; der kanonische Verb-Name `Eject` funktioniert sprachunabhaengig, unabhaengig von der UI-Sprache).
-  - `.InvokeVerb('Eject')` aufrufen.
-  - Anschliessend das COM-Objekt explizit freigeben (`[System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell)`), da COM-RCWs von `Shell.Application` sonst bis zur naechsten GC im Prozess haengen bleiben.
-- Fallback, falls der Shell-Verb-Aufruf fehlschlaegt oder das Item nicht gefunden wird:
-  - WMI/CIM `Win32_Volume` mit `DriveLetter`, `Dismount($false, $false)`.
-  - Wichtiger Unterschied zum primaeren Ansatz: `Dismount` haengt nur das Dateisystem aus, ohne das Geraet elektrisch abzumelden/anzuhalten. Das ist meist ausreichend, damit das Laufwerk gefahrlos gezogen werden kann, aber kein vollwertiger "Sicher entfernen"-Vorgang. Die Erfolgsmeldung sollte das widerspiegeln (z. B. "Laufwerk wurde ausgehaengt" statt "Laufwerk wurde ausgeworfen"), falls nur dieser Fallback gegriffen hat.
-- Fehler abfangen und nur als Warnung anzeigen:
-  - Backup bleibt erfolgreich, auch wenn Auswurf fehlschlaegt.
-  - Status/Resultbox ergaenzen: `Sicherung erfolgreich, Auswurf konnte nicht abgeschlossen werden.`
-
-### UX
-
-- Nach erfolgreichem Auswurf:
-  - Status: `Sicherung erfolgreich abgeschlossen. Laufwerk kann entfernt werden.`
-  - Drive-Liste aktualisieren, weil das Laufwerk danach verschwunden sein kann.
-- Wenn Auswurf fehlschlaegt:
-  - MessageBox mit kurzer Ursache und Hinweis, das Laufwerk manuell auszuwerfen.
+- **CHM-Hilfedateien**: klassisches Windows-Format, aber durch
+  Sicherheitszonen-Blockierung bei aus dem Internet heruntergeladenen
+  Dateien beim Endnutzer oft nur nach manuellem Entsperren nutzbar; keine
+  moderne Bearbeitung ohne Zusatztools.
+- **Eingebetteter WebView2-Hilfe-Viewer**: professionelles In-App-Erlebnis,
+  aber WebView2-Runtime-Abhaengigkeit (auf ungepflegten Windows-Installationen
+  ggf. nicht vorhanden) und deutlich mehr UI-Code fuer den Nutzen bei dieser
+  App-Groesse nicht gerechtfertigt.
+- **Nur Online-Dokumentation**: fuer eine Backup-Anwendung ungeeignet, weil
+  Hilfe gerade dann verfuegbar sein muss, wenn kein Internetzugang besteht
+  (z. B. Wiederherstellung auf einem frisch aufgesetzten Rechner).
+- **Pandoc als Build-Abhaengigkeit statt eigenem Konverter**: reduziert
+  eigenen Code, bricht aber mit dem bestehenden "keine externen
+  Build-Tools ausser optional Inno Setup"-Stil des Projekts und macht den
+  Build auf Rechnern ohne Pandoc-Installation kaputt, sofern nicht dieselbe
+  weiche Fallback-Logik wie fuer Inno Setup (`Get-InnoCompiler`,
+  `-SkipInstaller`) nachgebaut wird. Bleibt als Option, falls der
+  Markdown-Funktionsumfang spaeter deutlich waechst (z. B. Bilder mit
+  Bildunterschriften, verschachtelte Tabellen).
+- **`.txt`-Dateien parallel dauerhaft weiterfuehren**: vermeidet jede
+  Aenderung am Fallback-Verhalten, bedeutet aber eine dritte, staendig von
+  Hand synchron zu haltende Kopie derselben Inhalte. Nur empfohlen, falls
+  die rohe Markdown-Datei als Fallback-Darstellung als zu unschoen
+  empfunden wird.
 
 ## Tests und Pruefung
 
 ### Manuelle Tests
 
-1. Backup normal starten und bestaetigen, dass kein Dry-Run-Schalter im Log steht.
-2. Dry-Run aktivieren:
-   - Robocopy-Log enthaelt bei aktiviertem `/L` weiterhin Datei-/Ordnernamen (also `/NFL`/`/NDL` tatsaechlich entfernt).
-   - Es werden keine Nutzdateien auf das Ziel geschrieben.
-   - `_Sicherungsinfo.txt` wird nicht als erfolgreiche Sicherung aktualisiert.
-   - GUI zeigt Simulation statt Sicherung.
-3. Zusatzordner hinzufuegen:
-   - Ordner erscheint angehakt in der Liste.
-   - **Laufwerk wechseln oder zwischen Sichern/Wiederherstellen umschalten und pruefen, dass der Zusatzordner weiterhin in der Liste steht** (Regressionstest fuer den `Update-LibraryList`-Rebuild).
-   - Backup kopiert ihn unter eindeutigem Zielnamen.
-   - Duplikat-Auswahl wird verhindert, ebenso ein Name, der einem reservierten internen Namen entspricht (`_logs` o. ae.).
-   - Pfade mit Leerzeichen funktionieren.
-   - Ein bereits ausgewaehlter Zusatzordner laesst sich wieder aus der Liste entfernen.
-4. Restore nach Backup mit Zusatzordner:
-   - Standardordner bleiben unveraendert funktionsfaehig.
-   - Zusatzordner aus `_Ordner.json` erscheinen im Restore-Modus in der Liste und werden mit Originalpfad wiederhergestellt.
-   - Eine aeltere Sicherung ohne `_Ordner.json` funktioniert weiterhin fehlerfrei fuer die Standardordner.
-5. Auto-Auswurf:
-   - Bei erfolgreichem Backup auf USB-Stick wird Auswurf versucht.
-   - Bei Dry-Run wird nicht ausgeworfen.
-   - Bei Restore wird nicht ausgeworfen.
-   - Bei Robocopy-Fehlercode ab 8 wird nicht ausgeworfen.
-   - Checkbox ist bei internem Ziellaufwerk (`DriveType = 3`) deaktiviert.
-6. Layout: Fenster auf einem kleinen Bildschirm (z. B. 1366x768) starten und pruefen, dass alle neuen Controls sichtbar bzw. ueber die Bildlaufleiste erreichbar sind und sich nicht ueberlappen.
+1. Build ausfuehren (`build.ps1`), pruefen dass `Hilfe\index.de.html` und
+   `Hilfe\index.en.html` im Staging-Ordner, im portablen ZIP und im
+   Installer-Ausgabeverzeichnis vorhanden sind.
+2. Beide HTML-Dateien im Standardbrowser oeffnen: Inhaltsverzeichnis,
+   Ueberschriften-Hierarchie, Tabellen, Listen korrekt dargestellt; Drucken
+   ergibt ein lesbares Layout.
+3. Hilfe-Button in der App (Deutsch und Englisch, ggf. ueber
+   `CurrentUICulture` simuliert) oeffnet die jeweils passende Sprachdatei.
+4. Jede der fuenf neuen "?"-Schaltflaechen oeffnet die HTML-Datei und
+   springt sichtbar zum richtigen Abschnitt (Anchor), in beiden Sprachen.
+5. HTML-Datei versehentlich loeschen/umbenennen, pruefen dass Hilfe-Button
+   und "?"-Buttons korrekt auf die Markdown-Datei zurueckfallen bzw. bei
+   deren Fehlen die bestehende Fehlermeldung zeigen.
+6. Version im generierten HTML pruefen (`{{VERSION}}` korrekt ersetzt,
+   entspricht `$buildVersion`).
+7. Sichtprüfung auf kleinen Bildschirmen: neue "?"-Buttons ueberlappen
+   keine bestehenden Controls, auch bei der jeweils laengeren
+   Sprachvariante der Nachbartexte.
 
 ### Statische Pruefung
 
-- PowerShell-Parserlauf fuer beide Skripte:
-  - `[System.Management.Automation.PSParser]::Tokenize((Get-Content .\Bibliothekssicherung-GUI.ps1 -Raw), [ref]$null)`
-  - `[System.Management.Automation.PSParser]::Tokenize((Get-Content .\Bibliothekssicherung.ps1 -Raw), [ref]$null)`
-- Falls lokal moeglich: GUI starten und die Controls in Backup/Restore-Modus pruefen.
+- PowerShell-Parserlauf fuer `build.ps1` und `Bibliothekssicherung-GUI.ps1`
+  nach Aenderung (`[System.Management.Automation.PSParser]::Tokenize(...)`).
+- Der neue Markdown-Konverter bekommt, falls sinnvoll trennbar, ein kleines
+  eigenstaendiges Test-Snippet (z. B. `build.ps1 -HelpOnly` oder eine
+  separate Pester-freie Testfunktion), das ihn gegen beide
+  `docs/help.*.md`-Dateien laufen laesst und auf HTML-Wohlgeformtheit prueft
+  (z. B. per `[xml]`-Parse nach Normalisierung, oder zumindest auf
+  Vorhandensein aller erwarteten Anchor-IDs und darauf, dass keine Absaetze
+  innerhalb offener Listen erzeugt werden).
 
 ## Empfohlene Umsetzungsreihenfolge
 
-1. Fensterlayout klaeren (Abschnitt 0): neue Flaeche/Zeile fuer die Checkboxen einplanen, Fensterhoehe und abhaengige Y-Koordinaten anpassen.
-2. Datenmodell fuer Ordnerlistenelemente auf `Name/DisplayName/Path/IsCustom` umstellen und `$script:customFolders` als persistente Zusatzordner-Liste einfuehren; `Update-LibraryList` entsprechend erweitern und mit einem Laufwerks-/Moduswechsel-Test absichern, bevor weitere Funktionen darauf aufbauen.
-3. Zusatzordner-Button, `FolderBrowserDialog`, Zielnamensvergabe (inkl. reservierter Namen) und Entfernen-Moeglichkeit in der GUI einfuehren.
-4. Temporaere JSON-Datei (`SelectedFoldersFile`) fuer die Ordnerauswahl einfuehren und in die bestehenden Sperr-/Cleanup-Stellen eintragen (siehe "Gemeinsame Codestellen").
-5. Worker so erweitern, dass er `SelectedFoldersFile` lesen kann, alte `SelectedFolders`-Logik aber beibehaelt; Validierung inkl. verschachtelter/reservierter Pfade ergaenzen.
-6. `_Ordner.json`-Metadatei beim echten Backup schreiben und im Restore-Zweig (Worker und GUI) lesen, damit Zusatzordner auch wiederhergestellt werden koennen.
-7. Dry-Run-Checkbox, Worker-Parameter und Robocopy `/L` implementieren (inkl. Entfernen von `/NFL`/`/NDL` im Dry-Run).
-8. Dry-Run-Metadaten- und Ergebnislogik absichern.
-9. Auto-Auswurf-Checkbox und `Dismount-BackupDriveSafely` (COM-Eject primaer, WMI-Dismount als Fallback) implementieren.
-10. Hilfe/README/Changelog aktualisieren.
-11. Parserpruefung und manuelle Tests durchfuehren (inkl. der neuen Regressionstests aus dem Testabschnitt).
+1. `docs/help.de.md` und `docs/help.en.md` aus den bestehenden `.txt`-Dateien
+   erstellen, Abschnittsparitaet herstellen, fehlende Abschnitte ergaenzen,
+   neuen Backup-Ampel-Abschnitt schreiben, Anchor-Slugs fuer die fuenf
+   Kontext-Themen setzen.
+2. Markdown-zu-HTML-Konverter in `build.ps1` (oder ausgelagerter Datei)
+   implementieren und isoliert gegen die beiden Quellen testen.
+3. `build.ps1` um den HTML-Erzeugungsschritt erweitern, alte
+   Versions-Ersetzungslogik fuer die `.txt`-Dateien entfernen, Staging/ZIP/
+   Installer-Weg pruefen (Abschnitt 3).
+4. `$helpFile`/`$helpButton.Add_Click` in der GUI auf die HTML-Datei
+   umstellen, inkl. Fallback auf die Markdown-Datei.
+5. `Open-HelpTopic`-Hilfsfunktion und die fuenf neuen "?"-Buttons in der GUI
+   ergaenzen, Platzierung dynamisch ueber `GetPreferredSize` loesen.
+6. Alte `.txt`-Dateien aus dem Repository-Root entfernen.
+7. README/CHANGELOG aktualisieren (Hinweis auf neues Hilfeformat und
+   kontextsensitive Hilfe).
+8. Manuelle Tests und Parserpruefung durchfuehren (siehe Testabschnitt).
 
 ## Fortschritt
 
-- [x] Plan geprueft und offene Architekturfragen entschieden:
-  - Optionszeile wird durch eine moderate Fensterhoehen-Erweiterung umgesetzt.
-  - Zusatzordner werden ueber eine temporaere JSON-Datei an den Worker uebergeben.
-  - Zusatzordner-Restore gehoert zum Umfang und nutzt `_Ordner.json`.
-  - Dry-Run darf `_Sicherungsinfo.txt`, `_Ordner.json` und bekannte-Laufwerk-Einstellungen nicht veraendern.
-  - Auto-Auswurf wird nur nach echtem erfolgreichem Backup auf Wechseldatentraegern versucht.
-- [x] Feature 1: Eigene Ordner hinzufuegen und wiederherstellen.
-  - GUI nutzt ein einheitliches Ordner-Item-Modell (`Name`, `DisplayName`, `Path`, `IsCustom`, `Checked`).
-  - Zusatzordner koennen per `FolderBrowserDialog` hinzugefuegt und wieder entfernt werden.
-  - Zusatzordner bleiben bei Laufwerks- und Moduswechsel erhalten.
-  - Ausgewaehlte Ordner werden als temporaere JSON-Datei an den Worker uebergeben.
-  - Worker liest `SelectedFoldersFile`, validiert Zusatzordner und schreibt/liest `_Ordner.json` fuer Restore.
-- [x] Feature 2: Dry-Run-Modus.
-  - GUI bietet `Nur simulieren (Dry-Run)` nur im Backup-Modus an.
-  - Worker unterstuetzt `-DryRun` und nutzt Robocopy `/L`.
-  - Im Dry-Run werden `/NFL` und `/NDL` weggelassen, damit das Log die geplanten Dateien/Ordner zeigt.
-  - Dry-Run schreibt keine echten Sicherungsmetadaten und merkt kein neues Sicherungslaufwerk.
-- [x] Feature 3: Laufwerk nach Erfolg sicher auswerfen.
-  - GUI bietet `Laufwerk nach Erfolg sicher auswerfen` nur fuer echte Backup-Laeufe auf Wechseldatentraegern an.
-  - Erfolgszweig ruft `Dismount-BackupDriveSafely` nur bei echtem erfolgreichem Backup auf.
-  - Primaerer Weg ist Shell-COM `Eject`, Fallback ist WMI/CIM `Win32_Volume.Dismount`.
-  - Fehlschlag beim Auswurf wird als Warnung behandelt, ohne das erfolgreiche Backup nachtraeglich als Fehler zu markieren.
-- [x] Dokumentation und Validierung abgeschlossen.
-  - README, deutsche README, beide Hilfedateien und Changelog wurden aktualisiert.
-  - PowerShell-Parserpruefung fuer GUI und Worker ist erfolgreich.
-  - Dry-Run-Smoke-Test mit temporaerem SUBST-Laufwerk erfolgreich: keine Nutzdatei kopiert, Auswahlfilter korrekt.
-  - Zusatzordner-Backup-Smoke-Test erfolgreich: Datei kopiert, `_Ordner.json` geschrieben, Auswahlfilter korrekt.
-  - Zusatzordner-Restore-Smoke-Test erfolgreich: Datei anhand `_Ordner.json` an den Originalpfad wiederhergestellt.
-- [x] Review-Fixes umgesetzt.
-  - Fehlgeschlagener Worker-Start stellt Start-, Zusatzordner-, Dry-Run- und Auswurf-Controls wieder her.
-  - `_Ordner.json` wird mit vorhandenen Zusatzordner-Metadaten gemerged statt ueberschrieben oder geloescht.
-  - Standardordner-Abwahlen bleiben beim Hinzufuegen/Entfernen von Zusatzordnern erhalten.
-  - Zusatzordner-Namen werden gegen vorhandene `_Ordner.json`-Eintraege geprueft.
-  - Auto-Auswurf-Checkbox bleibt nach normalen Laufabschluessen erhalten, solange Modus und Laufwerk sie erlauben.
-  - Auswurfpfad enthaelt keine feste UI-blockierende Wartezeit und keine `Test-Path`-Timing-Heuristik mehr.
-  - Reservierte Namen und Pfadverschachtelungspruefung liegen in `M24Backup.Shared.ps1`; `build.ps1` paketiert die Datei mit.
+- [x] Plan bewertet und angepasst: Markdown-Dateien werden als Laufzeit-
+  Fallback mit ausgeliefert.
+- [x] Markdown-Quellen erstellen und alte Textduplikate entfernen.
+- [x] Markdown-zu-HTML-Konverter und Build-Integration umsetzen.
+- [x] GUI auf HTML-Hilfe plus kontextsensitive Hilfe-Buttons umstellen.
+- [x] README/CHANGELOG aktualisieren.
+- [x] Build, Parser und Artefakte pruefen.
+  - `build.ps1 -Version 1.2.1-help-test -SkipInstaller` erfolgreich.
+  - Generierte HTML-Dateien und Markdown-Fallbacks liegen im Staging und im
+    portablen ZIP.
+  - Anchors `dry-run`, `safe-eject`, `custom-folders`, `restore` und
+    `backup-health` in beiden HTML-Dateien gefunden.
+- [x] Review-Fixes nachgezogen.
+  - Markdown-Quellen werden im Build explizit als UTF-8 gelesen.
+  - Listenfortsetzungen werden korrekt in das vorherige `<li>` uebernommen.
+  - Robocopy-Parameter, Sicherheitsgrenzen, Exit-Codes und Empfehlungen sind
+    gegen den Worker und die alte Hilfe abgeglichen.
+  - Proprietäre `{#anchor}`-Syntax wurde durch normale HTML-Anker ersetzt.

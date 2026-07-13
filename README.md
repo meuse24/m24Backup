@@ -66,8 +66,8 @@ preview is shown before any changes are made.
 
 Detailed instructions are included in the repository and every distribution:
 
-- [`Help-and-Info.txt`](Help-and-Info.txt) – English
-- [`Hilfe-und-Info.txt`](Hilfe-und-Info.txt) – Deutsch
+- [`docs/help.en.md`](docs/help.en.md) – English source for the local HTML help
+- [`docs/help.de.md`](docs/help.de.md) – German source for the local HTML help
 
 ## System requirements
 

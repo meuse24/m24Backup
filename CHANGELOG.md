@@ -26,6 +26,8 @@ dokumentiert. Die Versionierung orientiert sich an
 - Automatischer Auswurf wird nach erfolgreicher Sicherung kurz verzögert
   und mit Wiederholungsversuchen gestartet, damit Windows letzte Datei- und
   Prozesszugriffe schließen kann
+- Lokales HTML-Hilfesystem mit Markdown-Quellen, Inhaltsverzeichnis und
+  kontextsensitiven Hilfe-Schaltflaechen in der GUI
 - Release-Orchestrator mit automatischer SemVer-Erhöhung, Schutzprüfungen,
   Build, Git-Tag, Push und Veröffentlichung der Artefakte als GitHub-Release
 - Automatische Wiederholungsversuche bei vorübergehenden GitHub-API- und

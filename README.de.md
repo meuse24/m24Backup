@@ -67,8 +67,8 @@ aktuellen Profil passen. Vor Änderungen erscheint eine Konfliktvorschau.
 
 Die ausführliche Anleitung ist im Projekt und in jeder Distribution enthalten:
 
-- [`Hilfe-und-Info.txt`](Hilfe-und-Info.txt) – Deutsch
-- [`Help-and-Info.txt`](Help-and-Info.txt) – English
+- [`docs/help.de.md`](docs/help.de.md) – deutsche Quelle der lokalen HTML-Hilfe
+- [`docs/help.en.md`](docs/help.en.md) – englische Quelle der lokalen HTML-Hilfe
 
 ## Systemvoraussetzungen
 
