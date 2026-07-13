@@ -28,12 +28,23 @@ param(
     [string]$ApprovalFile,
     # Optional: mit | getrennte Anzeigenamen der zu sichernden Ordner.
     [string]$SelectedFolders,
+    # Optional: JSON-Datei mit ausgewaehlten Ordnern inkl. benutzerdefinierter Pfade.
+    [string]$SelectedFoldersFile,
+    # Simuliert ein Backup mit Robocopy /L, ohne Nutzdaten oder Metadaten zu schreiben.
+    [switch]$DryRun,
     # Anzahl der parallelen Robocopy-Threads.
     [int]$Threads = 8
 )
 
 # Behandelt auch Fehler ausserhalb einzelner Funktionen als Abbruch.
 $ErrorActionPreference = 'Stop'
+$sharedScript = Join-Path $PSScriptRoot 'M24Backup.Shared.ps1'
+if (Test-Path -LiteralPath $sharedScript -PathType Leaf) {
+    . $sharedScript
+} else {
+    throw "Shared helper script not found: $sharedScript"
+}
+
 $script:isGerman = [System.Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq 'de'
 function M {
     param([string]$German, [string]$English)
@@ -80,7 +91,7 @@ trap {
     }
     if ($ResultFile) {
         try {
-            [pscustomobject]@{ Success = $false; Cancelled = $false; Mode = $Mode; Message = $_.Exception.Message; FinishedAt = (Get-Date).ToString('o') } |
+            [pscustomobject]@{ Success = $false; Cancelled = $false; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $_.Exception.Message; FinishedAt = (Get-Date).ToString('o') } |
                 ConvertTo-Json | Set-Content -LiteralPath $ResultFile -Encoding UTF8 -ErrorAction SilentlyContinue
         } catch {}
     }
@@ -97,6 +108,9 @@ if (-not $Silent) {
 
 if ($Threads -lt 1 -or $Threads -gt 128) {
     throw (M "Der Parameter -Threads muss zwischen 1 und 128 liegen." "The -Threads parameter must be between 1 and 128.")
+}
+if ($DryRun -and $Mode -ne 'Backup') {
+    throw (M "Dry-Run ist nur fuer Sicherungen verfuegbar." "Dry run is only available for backups.")
 }
 
 function Write-BackupStatus {
@@ -394,6 +408,50 @@ function Assert-BackupIdentity {
     }
 }
 
+function Test-IsReservedBackupName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
+    if ($Name.StartsWith('_')) { return $true }
+    return (Get-ReservedBackupNames) -contains $Name
+}
+
+function Assert-ValidBackupFolderName {
+    param([string]$Name)
+    if (Test-IsReservedBackupName -Name $Name) {
+        throw ((M "Der Ordnername '{0}' ist fuer interne Sicherungsdateien reserviert." "Folder name '{0}' is reserved for internal backup files.") -f $Name)
+    }
+    foreach ($invalidChar in [System.IO.Path]::GetInvalidFileNameChars()) {
+        if ($Name.IndexOf($invalidChar) -ge 0) {
+            throw ((M "Der Ordnername '{0}' enthaelt ungueltige Zeichen." "Folder name '{0}' contains invalid characters.") -f $Name)
+        }
+    }
+}
+
+function Read-SelectedFolderSpecs {
+    if ($SelectedFoldersFile) {
+        if (-not (Test-Path -LiteralPath $SelectedFoldersFile -PathType Leaf)) {
+            throw ((M "Die Auswahldatei wurde nicht gefunden: {0}" "The selection file was not found: {0}") -f $SelectedFoldersFile)
+        }
+        return @(Get-Content -LiteralPath $SelectedFoldersFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+    }
+    if ($SelectedFolders) {
+        return @($SelectedFolders -split '\|' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object {
+            [pscustomobject]@{ Name = $_; Path = $null; IsCustom = $false }
+        })
+    }
+    return @()
+}
+
+function Read-CustomFolderMetadata {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
+    try {
+        return @(Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop | Where-Object { $_.Name -and $_.OriginalPath })
+    } catch {
+        return @()
+    }
+}
+
 # AppData ist bewusst nicht Teil der Sicherung. Ein Pfad, der direkt dem
 # gesamten Benutzerprofil entspricht, wird ebenfalls ausgeschlossen.
 $folderDefinitions = @(
@@ -415,14 +473,67 @@ $drive = Resolve-UsbDrive -Drive $UsbDrive -Silent:$Silent
 # Jeder Computer und Benutzer erhaelt am Ziel einen eigenen Sicherungsordner.
 $destination = Join-Path $drive ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
 $metadataFile = Join-Path $destination '_Sicherungsinfo.txt'
+$folderMetadataFile = Join-Path $destination '_Ordner.json'
 $logDir = Join-Path $destination "_logs"
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $logPrefix = if ($Mode -eq 'Restore') { 'restore' } else { 'robocopy' }
 $logFile = Join-Path $logDir ("{0}_{1}.log" -f $logPrefix, $stamp)
+$selectedFolderSpecs = @(Read-SelectedFolderSpecs)
+
+if ($Mode -eq 'Restore' -and (Test-Path -LiteralPath $destination -PathType Container)) {
+    $restoreCustomDefinitions = @(Read-CustomFolderMetadata -Path $folderMetadataFile | ForEach-Object {
+        [pscustomobject]@{ Name = [string]$_.Name; Path = [string]$_.OriginalPath; IsCustom = $true }
+    })
+    $folderDefinitions = @($folderDefinitions) + $restoreCustomDefinitions
+    foreach ($selectedCustomSpec in @($selectedFolderSpecs | Where-Object { $_.IsCustom -and $_.Name -and $_.Path })) {
+        $selectedName = [string]$selectedCustomSpec.Name
+        if (@($folderDefinitions | Where-Object { $_.Name.Equals($selectedName, [System.StringComparison]::OrdinalIgnoreCase) }).Count -eq 0) {
+            $folderDefinitions = @($folderDefinitions) + [pscustomobject]@{
+                Name = $selectedName
+                Path = [string]$selectedCustomSpec.Path
+                IsCustom = $true
+            }
+        }
+    }
+}
+
+if ($Mode -eq 'Backup' -and $selectedFolderSpecs.Count -gt 0) {
+    $customSpecs = @($selectedFolderSpecs | Where-Object { $_.IsCustom })
+    $existingCustomMetadata = @(Read-CustomFolderMetadata -Path $folderMetadataFile)
+    foreach ($customSpec in $customSpecs) {
+        $customName = [string]$customSpec.Name
+        $customPath = [string]$customSpec.Path
+        Assert-ValidBackupFolderName -Name $customName
+        if ([string]::IsNullOrWhiteSpace($customPath) -or -not (Test-Path -LiteralPath $customPath -PathType Container)) {
+            throw ((M "Der Zusatzordner '{0}' wurde nicht gefunden." "The additional folder '{0}' was not found.") -f $customName)
+        }
+        $customPath = Get-NormalizedFullPath $customPath
+        if ($customPath.Equals((Get-NormalizedFullPath $env:USERPROFILE), [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw (M "Das gesamte Benutzerprofil kann nicht als Zusatzordner gesichert werden." "The whole user profile cannot be backed up as an additional folder.")
+        }
+        foreach ($existingCustom in $existingCustomMetadata) {
+            if ($existingCustom.Name.Equals($customName, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $existingPath = Get-NormalizedFullPath ([string]$existingCustom.OriginalPath)
+                if (-not $existingPath.Equals($customPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw ((M "Der Zusatzordnername '{0}' ist im vorhandenen Backup bereits fuer '{1}' vergeben." "The additional folder name '{0}' is already used in the existing backup for '{1}'.") -f $customName, $existingPath)
+                }
+            }
+        }
+        foreach ($existingDefinition in $folderDefinitions) {
+            if ($existingDefinition.Name.Equals($customName, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw ((M "Der Zusatzordnername '{0}' ist bereits vergeben." "The additional folder name '{0}' is already in use.") -f $customName)
+            }
+            if ($existingDefinition.Path -and (Test-IsSameOrNestedPath -FirstPath $customPath -SecondPath $existingDefinition.Path)) {
+                throw ((M "Der Zusatzordner '{0}' ueberschneidet sich mit '{1}'." "The additional folder '{0}' overlaps with '{1}'.") -f $customName, $existingDefinition.Name)
+            }
+        }
+        $folderDefinitions = @($folderDefinitions) + [pscustomobject]@{ Name = $customName; Path = $customPath; IsCustom = $true }
+    }
+}
 
 if ($Mode -eq 'Backup') {
     $backupFolders = @($folderDefinitions | Where-Object { Test-Path -LiteralPath $_.Path -PathType Container } | ForEach-Object {
-        [pscustomobject]@{ Name = $_.Name; Path = $_.Path; TargetPath = Join-Path $destination $_.Name }
+        [pscustomobject]@{ Name = $_.Name; Path = $_.Path; TargetPath = Join-Path $destination $_.Name; IsCustom = [bool]$_.IsCustom }
     })
     Write-BackupStatus -Type 'STATUS' -Text (M 'Sicherung wird vorbereitet ...' 'Preparing backup ...')
 } else {
@@ -433,14 +544,14 @@ if ($Mode -eq 'Backup') {
     $backupFolders = @($folderDefinitions | ForEach-Object {
         $restoreSource = Join-Path $destination $_.Name
         if (Test-Path -LiteralPath $restoreSource -PathType Container) {
-            [pscustomobject]@{ Name = $_.Name; Path = $restoreSource; TargetPath = $_.Path }
+            [pscustomobject]@{ Name = $_.Name; Path = $restoreSource; TargetPath = $_.Path; IsCustom = [bool]$_.IsCustom }
         }
     })
     Write-BackupStatus -Type 'STATUS' -Text (M 'Wiederherstellung wird vorbereitet ...' 'Preparing restore ...')
 }
 
-if ($SelectedFolders) {
-    $selectedNames = @($SelectedFolders -split '\|' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($selectedFolderSpecs.Count -gt 0) {
+    $selectedNames = @($selectedFolderSpecs | ForEach-Object { [string]$_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $backupFolders = @($backupFolders | Where-Object { $selectedNames -contains $_.Name })
 }
 if (-not $backupFolders) {
@@ -519,12 +630,14 @@ if ($preflight.ScanWarnings.Count -gt 0) {
         }
     }
 }
-foreach ($targetRoot in $preflight.RequiredByRoot.Keys) {
-    # Die Zielwurzeln sind oben bereits als Laufwerksbuchstaben validiert.
-    $spaceDisk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $targetRoot) -ErrorAction Stop
-    $requiredWithReserve = [int64]([int64]$preflight.RequiredByRoot[$targetRoot] * 1.05)
-    if ($requiredWithReserve -gt [int64]$spaceDisk.FreeSpace) {
-        throw ((M "Nicht genug freier Speicherplatz auf {0}. Benoetigt werden voraussichtlich {1:N1} GB, frei sind {2:N1} GB." "Not enough free space on {0}. Approximately {1:N1} GB is required; {2:N1} GB is available.") -f $targetRoot, ([int64]$preflight.RequiredByRoot[$targetRoot] / 1GB), ([int64]$spaceDisk.FreeSpace / 1GB))
+if (-not $DryRun) {
+    foreach ($targetRoot in $preflight.RequiredByRoot.Keys) {
+        # Die Zielwurzeln sind oben bereits als Laufwerksbuchstaben validiert.
+        $spaceDisk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $targetRoot) -ErrorAction Stop
+        $requiredWithReserve = [int64]([int64]$preflight.RequiredByRoot[$targetRoot] * 1.05)
+        if ($requiredWithReserve -gt [int64]$spaceDisk.FreeSpace) {
+            throw ((M "Nicht genug freier Speicherplatz auf {0}. Benoetigt werden voraussichtlich {1:N1} GB, frei sind {2:N1} GB." "Not enough free space on {0}. Approximately {1:N1} GB is required; {2:N1} GB is available.") -f $targetRoot, ([int64]$preflight.RequiredByRoot[$targetRoot] / 1GB), ([int64]$spaceDisk.FreeSpace / 1GB))
+        }
     }
 }
 if ($Mode -eq 'Backup' -and $fat32Warning -and $preflight.LargeFiles.Count -gt 0) {
@@ -593,7 +706,7 @@ if (-not $Silent) {
 # Erst nach der Bestaetigung wird auf das Ziellaufwerk geschrieben. Ein
 # abgelehnter Vorgang hinterlaesst so weder Ordner noch veraenderte Metadaten.
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-if ($Mode -eq 'Backup') {
+if ($Mode -eq 'Backup' -and -not $DryRun) {
     @(
         'Bibliothekssicherung', '', "Computer: $env:COMPUTERNAME", "Benutzer: $env:USERNAME",
         "Letzter Sicherungsversuch: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", "Quelle: $env:USERPROFILE",
@@ -609,8 +722,8 @@ $foldersWithHints = @()
 $folderNumber = 0
 $folderCount = @($backupFolders).Count
 $backupStartedAt = Get-Date
-$operationName = if ($Mode -eq 'Restore') { M 'Wiederherstellung' 'Restore' } else { M 'Sicherung' 'Backup' }
-$successMessage = if ($Mode -eq 'Restore') { M 'Wiederherstellung erfolgreich abgeschlossen.' 'Restore completed successfully.' } else { M 'Sicherung erfolgreich abgeschlossen.' 'Backup completed successfully.' }
+$operationName = if ($Mode -eq 'Restore') { M 'Wiederherstellung' 'Restore' } elseif ($DryRun) { M 'Sicherungssimulation' 'Backup simulation' } else { M 'Sicherung' 'Backup' }
+$successMessage = if ($Mode -eq 'Restore') { M 'Wiederherstellung erfolgreich abgeschlossen.' 'Restore completed successfully.' } elseif ($DryRun) { M 'Simulation erfolgreich abgeschlossen.' 'Simulation completed successfully.' } else { M 'Sicherung erfolgreich abgeschlossen.' 'Backup completed successfully.' }
 $failureMessage = if ($Mode -eq 'Restore') { M 'Wiederherstellung mit Fehlern beendet.' 'Restore finished with errors.' } else { M 'Sicherung mit Fehlern beendet.' 'Backup finished with errors.' }
 $cancelMessage = if ($Mode -eq 'Restore') { M 'Wiederherstellung wurde auf Wunsch beendet.' 'Restore was cancelled by request.' } else { M 'Sicherung wurde auf Wunsch beendet.' 'Backup was cancelled by request.' }
 
@@ -624,16 +737,17 @@ $cancelMessage = if ($Mode -eq 'Restore') { M 'Wiederherstellung wurde auf Wunsc
     $bitLockerStatus,
     "Hinweis: Geoeffnete/gesperrte Dateien werden ohne VSS ggf. uebersprungen.",
     "Threads: $Threads",
+    ("Dry-Run: {0}" -f $(if ($DryRun) { 'Ja - es werden keine Nutzdaten kopiert.' } else { 'Nein' })),
     ""
 ) | Add-Content -LiteralPath $logFile -Encoding Unicode
 
 foreach ($folder in $backupFolders) {
     if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
         Write-BackupStatus -Type 'ABGEBROCHEN' -Text (M 'Vorgang wurde auf Wunsch beendet.' 'Operation was cancelled by request.')
-        if ($Mode -eq 'Backup') { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Vom Benutzer abgebrochen am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
+        if ($Mode -eq 'Backup' -and -not $DryRun) { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Vom Benutzer abgebrochen am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
         if ($ResultFile) {
             [pscustomobject]@{
-                Success = $false; Cancelled = $true; Mode = $Mode; Message = $cancelMessage
+                Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $cancelMessage
                 Destination = $destination; LogFile = $logFile
                 StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o')
                 SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @()
@@ -665,12 +779,15 @@ foreach ($folder in $backupFolders) {
         "/W:3",
         "/COPY:DAT",
         "/DCOPY:DAT",
-        "/NFL",
-        "/NDL",
         "/NP",
-        "/UNILOG+:$logFile",
-        "/XF"
-    ) + $excludedFiles
+        "/UNILOG+:$logFile"
+    )
+    if (-not $DryRun) {
+        $robocopyArgs += @("/NFL", "/NDL")
+    } else {
+        $robocopyArgs += "/L"
+    }
+    $robocopyArgs += @("/XF") + $excludedFiles
 
     $null = & robocopy @robocopyArgs
     $code = $LASTEXITCODE
@@ -696,10 +813,10 @@ foreach ($folder in $backupFolders) {
 
 if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
     Write-BackupStatus -Type 'ABGEBROCHEN' -Text (M 'Vorgang wurde auf Wunsch beendet.' 'Operation was cancelled by request.')
-    if ($Mode -eq 'Backup') { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Vom Benutzer abgebrochen am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
+    if ($Mode -eq 'Backup' -and -not $DryRun) { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Vom Benutzer abgebrochen am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
     if ($ResultFile) {
         [pscustomobject]@{
-            Success = $false; Cancelled = $true; Mode = $Mode; Message = $cancelMessage
+            Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $cancelMessage
             Destination = $destination; LogFile = $logFile
             StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o')
             SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
@@ -712,7 +829,28 @@ Write-Host ""
 if ($maxCode -le 7) {
     $finishedAt = Get-Date
     $remainingDisk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drive) -ErrorAction SilentlyContinue
-    if ($Mode -eq 'Backup') { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Erfolgreich abgeschlossen am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
+    if ($Mode -eq 'Backup' -and -not $DryRun) { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Erfolgreich abgeschlossen am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
+    if ($Mode -eq 'Backup' -and -not $DryRun) {
+        $customBackupFolders = @($backupFolders | Where-Object { $_.IsCustom })
+        if ($customBackupFolders.Count -gt 0 -or (Test-Path -LiteralPath $folderMetadataFile -PathType Leaf)) {
+            $mergedMetadata = @{}
+            foreach ($existingCustom in Read-CustomFolderMetadata -Path $folderMetadataFile) {
+                $mergedMetadata[[string]$existingCustom.Name] = [pscustomobject]@{
+                    Name = [string]$existingCustom.Name
+                    OriginalPath = [string]$existingCustom.OriginalPath
+                    BackedUpAt = [string]$existingCustom.BackedUpAt
+                }
+            }
+            foreach ($customFolder in $customBackupFolders) {
+                $mergedMetadata[[string]$customFolder.Name] = [pscustomobject]@{
+                    Name = [string]$customFolder.Name
+                    OriginalPath = [string]$customFolder.Path
+                    BackedUpAt = $finishedAt.ToString('o')
+                }
+            }
+            @($mergedMetadata.Values | Sort-Object Name) | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $folderMetadataFile -Encoding UTF8
+        }
+    }
     Write-BackupStatus -Type "FERTIG" -Text $successMessage
     Write-Host $successMessage
     $folderSummaryLabel = if ($Mode -eq 'Restore') { M 'Wiederhergestellte Ordner' 'Restored folders' } else { M 'Gesicherte Ordner' 'Backed-up folders' }
@@ -729,6 +867,7 @@ if ($maxCode -le 7) {
             Success = $true
             Cancelled = $false
             Mode = $Mode
+            DryRun = $DryRun.IsPresent
             Message = $successMessage
             Destination = $destination
             LogFile = $logFile
@@ -750,7 +889,7 @@ if ($maxCode -le 7) {
 }
 
 Write-Host $failureMessage
-if ($Mode -eq 'Backup') { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Mit Fehlern beendet am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
+if ($Mode -eq 'Backup' -and -not $DryRun) { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Mit Fehlern beendet am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
 Write-BackupStatus -Type "FEHLER" -Text ((M "Fehler in: {0}" "Errors in: {0}") -f ($failedFolders -join ", "))
 $localizedFailedFolders = @($failedFolders | ForEach-Object { Get-LocalizedFolderName $_ })
 Write-Host ((M "Betroffene Ordner: {0}" "Affected folders: {0}") -f ($localizedFailedFolders -join ", "))
@@ -760,6 +899,7 @@ if ($ResultFile) {
         Success = $false
         Cancelled = $false
         Mode = $Mode
+        DryRun = $DryRun.IsPresent
         Message = (M 'Vorgang mit Kopierfehlern beendet.' 'Operation finished with copy errors.')
         Destination = $destination
         LogFile = $logFile

@@ -17,6 +17,11 @@ Windows systems and in English on all other systems.
 - Uses Robocopy and never deletes files from the backup destination.
 - Checks the destination, available disk space, and FAT32 limitations before
   starting.
+- Can simulate a backup with a dry run and show the planned changes in the log
+  without copying user data.
+- Can include additional user-selected folders and restore them later through
+  stored folder metadata.
+- Can safely eject a successfully used USB backup drive after completion.
 - Shows progress and a clear result directly in the application window.
 - Shows a traffic-light health indicator with the age, duration, and folder
   count of the latest backup on the selected drive.
@@ -49,8 +54,11 @@ directly on a backup drive.
 
 1. Connect the backup drive and start the application.
 2. Select **Backup** mode and choose the destination drive.
-3. Select the folders to include and click **Start backup**.
-4. Check the final status and open the log if necessary.
+3. Select the folders to include, optionally use **Add folder...**, or enable
+   **Simulate only (dry run)**.
+4. Optionally enable **Safely eject drive after success**.
+5. Click **Start backup**, check the final status, and open the log if
+   necessary.
 
 To restore files, select **Restore** mode. The application only accepts a
 backup whose computer and user metadata match the current profile. A conflict

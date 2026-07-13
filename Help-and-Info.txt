@@ -45,10 +45,21 @@ display language and English on all other display languages.
   2. Connect a USB drive or external disk.
   3. Select the destination drive.
   4. Select the folders to include.
-  5. Click "Start backup".
-  6. Wait for the successful completion message.
+  5. Optionally use "Add folder..." to include another work folder.
+  6. Optionally enable "Simulate only (dry run)" to create a log of planned
+     copy operations without copying user data.
+  7. Optionally enable "Safely eject drive after success".
+  8. Click "Start backup".
+  9. Wait for the successful completion message.
 
 The destination drive must remain connected while the operation is running.
+
+Dry-run mode uses Robocopy /L. The log lists the planned copy operations, but
+no user data is copied and successful-backup metadata is not updated.
+
+Additional folders are stored under unique names in the backup destination.
+The _Ordner.json file records their original paths so they can be offered
+again during a later restore.
 
 After a successful backup, the application stores the drive's unique volume
 identifier in the local Windows user profile. On the next launch, the drive is
@@ -56,6 +67,11 @@ selected automatically and marked with a star even if Windows assigned a
 different drive letter. A warning is shown before backing up to another drive.
 If confirmed and completed successfully, that drive becomes the remembered
 backup drive.
+
+When "Safely eject drive after success" is enabled, the application attempts a
+Windows eject after a successful real backup to a removable drive. If ejecting
+fails, the backup still remains successful and the drive should be removed
+manually through Windows.
 
 
 4. Backup behavior

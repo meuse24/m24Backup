@@ -11,6 +11,13 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+$sharedScript = Join-Path $PSScriptRoot 'M24Backup.Shared.ps1'
+if (Test-Path -LiteralPath $sharedScript -PathType Leaf) {
+    . $sharedScript
+} else {
+    throw "Shared helper script not found: $sharedScript"
+}
+
 $script:isGerman = [System.Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq 'de'
 function L {
     param([string]$German, [string]$English)
@@ -46,6 +53,7 @@ $script:resultFile = $null
 $script:cancelFile = $null
 $script:previewFile = $null
 $script:approvalFile = $null
+$script:selectedFoldersFile = $null
 $script:restorePreviewShown = $false
 $script:scanWarningShown = $false
 $script:lastLogDir = $null
@@ -55,6 +63,10 @@ $script:backupCancelled = $false
 $script:driveMap = @{}
 $script:activeDrive = $null
 $script:activeMode = $null
+$script:activeDryRun = $false
+$script:autoEjectRequested = $false
+$script:customFolders = @()
+$script:folderCheckStates = @{}
 $settingsDirectory = Join-Path $env:LOCALAPPDATA 'M24Backup'
 $settingsFile = Join-Path $settingsDirectory 'settings.json'
 $script:knownDrive = $null
@@ -75,6 +87,11 @@ function Get-UserShellFolder {
 
 function Get-LibraryNames {
     param([switch]$IncludeMissing)
+    return @(Get-LibraryDefinitions -IncludeMissing:$IncludeMissing | ForEach-Object { $_.Name })
+}
+
+function Get-LibraryDefinitions {
+    param([switch]$IncludeMissing)
     $folders = @(
         [pscustomobject]@{ Name = "Desktop"; Path = [Environment]::GetFolderPath("Desktop") },
         [pscustomobject]@{ Name = "Dokumente"; Path = [Environment]::GetFolderPath("MyDocuments") },
@@ -87,7 +104,119 @@ function Get-LibraryNames {
         [pscustomobject]@{ Name = "Kontakte"; Path = Join-Path $env:USERPROFILE "Contacts" }
     )
 
-    return @($folders | Where-Object { $_.Path -and ($IncludeMissing -or (Test-Path -LiteralPath $_.Path)) } | ForEach-Object { $_.Name })
+    return @($folders | Where-Object { $_.Path -and ($IncludeMissing -or (Test-Path -LiteralPath $_.Path)) })
+}
+
+function New-FolderListItem {
+    param(
+        [string]$Name,
+        [string]$DisplayName,
+        [string]$Path,
+        [bool]$IsCustom,
+        [bool]$Checked = $true
+    )
+
+    $item = [pscustomobject]@{
+        Name = $Name
+        DisplayName = $DisplayName
+        Path = $Path
+        IsCustom = $IsCustom
+        Checked = $Checked
+    }
+    $item | Add-Member -MemberType ScriptMethod -Name ToString -Value { return $this.DisplayName } -Force
+    return $item
+}
+
+function Get-FolderItemDisplayName {
+    param($Item)
+    if ($Item -and $Item.PSObject.Properties['DisplayName']) { return [string]$Item.DisplayName }
+    if ($Item -and $Item.PSObject.Properties['Name']) { return Get-FolderDisplayName ([string]$Item.Name) }
+    return [string]$Item
+}
+
+function ConvertTo-QuotedArgument {
+    param([string]$Value)
+    if ($null -eq $Value) { return '""' }
+    return '"{0}"' -f ($Value -replace '"', '\"')
+}
+
+function Get-FolderMetadataFile {
+    param([string]$BackupRoot)
+    return Join-Path $BackupRoot '_Ordner.json'
+}
+
+function Get-RestoreCustomFolders {
+    param([string]$BackupRoot)
+    $metadataFile = Get-FolderMetadataFile -BackupRoot $BackupRoot
+    if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) { return @() }
+    try {
+        $metadata = @(Get-Content -LiteralPath $metadataFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+        return @($metadata | Where-Object {
+            $_.Name -and $_.OriginalPath -and (Test-Path -LiteralPath (Join-Path $BackupRoot $_.Name) -PathType Container)
+        } | ForEach-Object {
+            New-FolderListItem -Name ([string]$_.Name) -DisplayName ("{0} ({1})" -f $_.Name, $_.OriginalPath) -Path ([string]$_.OriginalPath) -IsCustom $true -Checked $true
+        })
+    } catch {
+        return @()
+    }
+}
+
+function Get-ExistingCustomFolderMetadataForSelectedDrive {
+    if (-not $driveCombo.SelectedItem) { return @() }
+    try {
+        $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+        $backupRoot = Join-Path $disk.DeviceID ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
+        $metadataFile = Get-FolderMetadataFile -BackupRoot $backupRoot
+        if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) { return @() }
+        return @(Get-Content -LiteralPath $metadataFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop | Where-Object { $_.Name -and $_.OriginalPath })
+    } catch {
+        return @()
+    }
+}
+
+function Get-SafeCustomFolderName {
+    param([string]$Path)
+
+    $baseName = Split-Path -LiteralPath $Path -Leaf
+    if ([string]::IsNullOrWhiteSpace($baseName)) { $baseName = ($Path -replace '[:\\\/]+', '').Trim() }
+    foreach ($invalidChar in [System.IO.Path]::GetInvalidFileNameChars()) {
+        $baseName = $baseName.Replace([string]$invalidChar, '_')
+    }
+    $baseName = $baseName.Trim()
+    if ([string]::IsNullOrWhiteSpace($baseName) -or $baseName.StartsWith('_')) {
+        $baseName = "Zusatzordner"
+    }
+
+    $reserved = Get-ReservedBackupNames
+    $existingNames = @()
+    $existingNames += @(Get-LibraryDefinitions -IncludeMissing | ForEach-Object { $_.Name })
+    $existingNames += @($script:customFolders | ForEach-Object { $_.Name })
+    $existingNames += @(Get-ExistingCustomFolderMetadataForSelectedDrive | ForEach-Object { $_.Name })
+    $candidate = $baseName
+    $index = 2
+    while (
+        ($candidate.StartsWith('_')) -or
+        ($reserved -contains $candidate) -or
+        (@($existingNames | Where-Object { $_.Equals($candidate, [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0)
+    ) {
+        $candidate = "{0} ({1})" -f $baseName, $index
+        $index++
+    }
+    return $candidate
+}
+
+function Sync-FolderCheckState {
+    for ($i = 0; $i -lt $libraryList.Items.Count; $i++) {
+        $item = $libraryList.Items[$i]
+        if ($item.PSObject.Properties['Name']) {
+            $script:folderCheckStates[[string]$item.Name] = $libraryList.GetItemChecked($i)
+        }
+    }
+    foreach ($customFolder in $script:customFolders) {
+        if ($script:folderCheckStates.ContainsKey([string]$customFolder.Name)) {
+            $customFolder.Checked = [bool]$script:folderCheckStates[[string]$customFolder.Name]
+        }
+    }
 }
 
 function Get-NewestLogFile {
@@ -160,6 +289,38 @@ function Save-KnownBackupDrive {
     } finally {
         Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Dismount-BackupDriveSafely {
+    param([string]$Drive)
+
+    $driveRoot = "{0}\" -f $Drive.TrimEnd('\')
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $driveItem = $shell.Namespace(17).ParseName($driveRoot)
+        if ($driveItem) {
+            $driveItem.InvokeVerb('Eject')
+            return [pscustomobject]@{ Success = $true; Method = 'Eject'; Message = L 'Auswurf wurde angefordert.' 'Eject was requested.' }
+        }
+    } catch {
+        # Fallback unten versuchen.
+    } finally {
+        if ($shell) {
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+        }
+    }
+
+    try {
+        $volume = Get-CimInstance Win32_Volume -Filter ("DriveLetter='{0}'" -f $Drive.TrimEnd('\')) -ErrorAction Stop
+        $result = Invoke-CimMethod -InputObject $volume -MethodName Dismount -Arguments @{ Force = $false; Permanent = $false } -ErrorAction Stop
+        if ($result.ReturnValue -eq 0) {
+            return [pscustomobject]@{ Success = $true; Method = 'Dismount'; Message = L 'Laufwerk wurde ausgehängt und kann entfernt werden.' 'The drive was dismounted and can be removed.' }
+        }
+        throw "WMI ReturnValue $($result.ReturnValue)"
+    } catch {
+        return [pscustomobject]@{ Success = $false; Method = 'None'; Message = $_.Exception.Message }
     }
 }
 
@@ -262,7 +423,7 @@ $form = New-Object System.Windows.Forms.Form
 $form.Text = L "Bibliothekssicherung" "Library Backup"
 if ($appVersion) { $form.Text = "{0} {1}" -f $form.Text, $appVersion }
 $form.StartPosition = "CenterScreen"
-$form.ClientSize = New-Object System.Drawing.Size(720, 734)
+$form.ClientSize = New-Object System.Drawing.Size(720, 782)
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedSingle
 $form.MaximizeBox = $false
 $form.MinimizeBox = $true
@@ -494,9 +655,8 @@ $libraryList.BackColor = [System.Drawing.Color]::White
 $libraryList.TabIndex = 5
 $form.Controls.Add($libraryList)
 
-foreach ($name in Get-LibraryNames) {
-    $item = [pscustomobject]@{ CanonicalName = $name; DisplayName = Get-FolderDisplayName $name }
-    $item | Add-Member -MemberType ScriptMethod -Name ToString -Value { return $this.DisplayName } -Force
+foreach ($folder in Get-LibraryDefinitions) {
+    $item = New-FolderListItem -Name $folder.Name -DisplayName (Get-FolderDisplayName $folder.Name) -Path $folder.Path -IsCustom $false -Checked $true
     [void]$libraryList.Items.Add($item, $true)
 }
 
@@ -524,6 +684,31 @@ $noneButton.BackColor = $surfaceColor
 $noneButton.TabIndex = 7
 $form.Controls.Add($noneButton)
 
+$addFolderButton = New-Object System.Windows.Forms.Button
+$addFolderButton.Text = L "Weiteren Ordner..." "Add folder..."
+$addFolderButton.Location = New-Object System.Drawing.Point(384, 334)
+$addFolderButton.Size = New-Object System.Drawing.Size(106, 27)
+$addFolderButton.FlatStyle = 'Flat'
+$addFolderButton.FlatAppearance.BorderSize = 1
+$addFolderButton.FlatAppearance.BorderColor = $buttonBorderColor
+$addFolderButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
+$addFolderButton.BackColor = $surfaceColor
+$addFolderButton.TabIndex = 8
+$form.Controls.Add($addFolderButton)
+
+$removeFolderButton = New-Object System.Windows.Forms.Button
+$removeFolderButton.Text = L "Entfernen" "Remove"
+$removeFolderButton.Location = New-Object System.Drawing.Point(384, 371)
+$removeFolderButton.Size = New-Object System.Drawing.Size(106, 27)
+$removeFolderButton.FlatStyle = 'Flat'
+$removeFolderButton.FlatAppearance.BorderSize = 1
+$removeFolderButton.FlatAppearance.BorderColor = $buttonBorderColor
+$removeFolderButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
+$removeFolderButton.BackColor = $surfaceColor
+$removeFolderButton.Enabled = $false
+$removeFolderButton.TabIndex = 9
+$form.Controls.Add($removeFolderButton)
+
 # Das Logo nutzt den freien Bereich rechts neben Ordnerliste und Buttons
 # in voller Hoehe von Beschriftung und Liste.
 # Es ist optional: Fehlt die Datei, bleibt die Flaeche einfach leer.
@@ -549,27 +734,45 @@ if (Test-Path -LiteralPath $logoFile -PathType Leaf) {
 }
 $form.Controls.Add($logoBox)
 
-$activitySurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 466)) -Size (New-Object System.Drawing.Size(692, 156))
+$optionsSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 466)) -Size (New-Object System.Drawing.Size(692, 38))
+
+$dryRunCheckBox = New-Object System.Windows.Forms.CheckBox
+$dryRunCheckBox.Text = L "Nur simulieren (Dry-Run)" "Simulate only (dry run)"
+$dryRunCheckBox.AutoSize = $true
+$dryRunCheckBox.Location = New-Object System.Drawing.Point(30, 476)
+$dryRunCheckBox.BackColor = $surfaceColor
+$dryRunCheckBox.TabIndex = 10
+$form.Controls.Add($dryRunCheckBox)
+
+$ejectCheckBox = New-Object System.Windows.Forms.CheckBox
+$ejectCheckBox.Text = L "Laufwerk nach Erfolg sicher auswerfen" "Safely eject drive after success"
+$ejectCheckBox.AutoSize = $true
+$ejectCheckBox.Location = New-Object System.Drawing.Point(285, 476)
+$ejectCheckBox.BackColor = $surfaceColor
+$ejectCheckBox.TabIndex = 11
+$form.Controls.Add($ejectCheckBox)
+
+$activitySurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 514)) -Size (New-Object System.Drawing.Size(692, 156))
 
 $statusCaption = New-Object System.Windows.Forms.Label
 $statusCaption.Text = "Status:"
 $statusCaption.AutoSize = $true
 $statusCaption.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$statusCaption.Location = New-Object System.Drawing.Point(30, 478)
+$statusCaption.Location = New-Object System.Drawing.Point(30, 526)
 $statusCaption.BackColor = $surfaceColor
 $form.Controls.Add($statusCaption)
 
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = L "Bereit." "Ready."
 $statusLabel.AutoEllipsis = $true
-$statusLabel.Location = New-Object System.Drawing.Point(82, 478)
+$statusLabel.Location = New-Object System.Drawing.Point(82, 526)
 $statusLabel.Size = New-Object System.Drawing.Size(608, 22)
 $statusLabel.BackColor = $surfaceColor
 $statusLabel.Anchor = "Top, Left, Right"
 $form.Controls.Add($statusLabel)
 
 $progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(30, 506)
+$progressBar.Location = New-Object System.Drawing.Point(30, 554)
 $progressBar.Size = New-Object System.Drawing.Size(660, 8)
 $progressBar.Anchor = "Top, Left, Right"
 $progressBar.Style = "Blocks"
@@ -579,12 +782,12 @@ $resultLabel = New-Object System.Windows.Forms.Label
 $resultLabel.Text = L "Ergebnisübersicht:" "Summary:"
 $resultLabel.AutoSize = $true
 $resultLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$resultLabel.Location = New-Object System.Drawing.Point(30, 524)
+$resultLabel.Location = New-Object System.Drawing.Point(30, 572)
 $resultLabel.BackColor = $surfaceColor
 $form.Controls.Add($resultLabel)
 
 $resultBox = New-Object System.Windows.Forms.TextBox
-$resultBox.Location = New-Object System.Drawing.Point(30, 546)
+$resultBox.Location = New-Object System.Drawing.Point(30, 594)
 $resultBox.Size = New-Object System.Drawing.Size(660, 64)
 $resultBox.Anchor = "Top, Left, Right"
 $resultBox.Multiline = $true
@@ -595,11 +798,11 @@ $script:resultSummary = L "Noch keine Sicherung ausgeführt." "No backup has bee
 $resultBox.Text = $script:resultSummary
 $form.Controls.Add($resultBox)
 
-$footerSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(0, 632)) -Size (New-Object System.Drawing.Size(720, 102)) -Anchor 'Top, Left, Right'
+$footerSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(0, 680)) -Size (New-Object System.Drawing.Size(720, 102)) -Anchor 'Top, Left, Right'
 
 $startButton = New-Object System.Windows.Forms.Button
 $startButton.Text = L "Sicherung starten" "Start backup"
-$startButton.Location = New-Object System.Drawing.Point(30, 654)
+$startButton.Location = New-Object System.Drawing.Point(30, 702)
 $startButton.Size = New-Object System.Drawing.Size(175, 46)
 $startButton.BackColor = $accentColor
 $startButton.ForeColor = $accentTextColor
@@ -614,7 +817,7 @@ $form.AcceptButton = $startButton
 
 $logButton = New-Object System.Windows.Forms.Button
 $logButton.Text = L "Protokoll öffnen" "Open log"
-$logButton.Location = New-Object System.Drawing.Point(213, 654)
+$logButton.Location = New-Object System.Drawing.Point(213, 702)
 $logButton.Size = New-Object System.Drawing.Size(145, 46)
 $logButton.BackColor = [System.Drawing.Color]::White
 $logButton.FlatStyle = "Flat"
@@ -630,7 +833,7 @@ $form.Controls.Add($logButton)
 $closeButton = New-Object System.Windows.Forms.Button
 $destinationButton = New-Object System.Windows.Forms.Button
 $destinationButton.Text = L "Sicherungsordner öffnen" "Open backup folder"
-$destinationButton.Location = New-Object System.Drawing.Point(366, 654)
+$destinationButton.Location = New-Object System.Drawing.Point(366, 702)
 $destinationButton.Size = New-Object System.Drawing.Size(181, 46)
 $destinationButton.BackColor = [System.Drawing.Color]::White
 $destinationButton.FlatStyle = "Flat"
@@ -644,7 +847,7 @@ $destinationButton.TabIndex = 10
 $form.Controls.Add($destinationButton)
 
 $closeButton.Text = L "Schließen" "Close"
-$closeButton.Location = New-Object System.Drawing.Point(555, 654)
+$closeButton.Location = New-Object System.Drawing.Point(555, 702)
 $closeButton.Size = New-Object System.Drawing.Size(135, 46)
 $closeButton.BackColor = [System.Drawing.Color]::White
 $closeButton.FlatStyle = "Flat"
@@ -658,7 +861,7 @@ $form.Controls.Add($closeButton)
 
 $cancelButton = New-Object System.Windows.Forms.Button
 $cancelButton.Text = L "Sicherung abbrechen" "Cancel backup"
-$cancelButton.Location = New-Object System.Drawing.Point(30, 654)
+$cancelButton.Location = New-Object System.Drawing.Point(30, 702)
 $cancelButton.Size = New-Object System.Drawing.Size(175, 46)
 $cancelButton.BackColor = [System.Drawing.Color]::White
 $cancelButton.ForeColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
@@ -693,17 +896,45 @@ function Update-ResultOverview {
 function Update-SelectionState {
     $count = $libraryList.CheckedItems.Count
     $startButton.Enabled = ($count -gt 0 -and $null -ne $driveCombo.SelectedItem -and -not $script:backupProcess)
+    $selectedItem = $libraryList.SelectedItem
+    $removeFolderButton.Enabled = $backupRadio.Checked -and $selectedItem -and
+        $selectedItem.PSObject.Properties['IsCustom'] -and $selectedItem.IsCustom -and -not $script:backupProcess
     Update-ResultOverview
 }
 
+function Update-BackupOptionState {
+    $isBackup = $backupRadio.Checked
+    $isInternalDrive = $false
+    if ($driveCombo.SelectedItem) {
+        $selectedDisk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+        $isInternalDrive = $selectedDisk -and $selectedDisk.DriveType -eq 3
+    }
+
+    $dryRunCheckBox.Enabled = $isBackup -and -not $script:backupProcess
+    if (-not $isBackup) { $dryRunCheckBox.Checked = $false }
+
+    $ejectCheckBox.Enabled = $isBackup -and -not $isInternalDrive -and -not $script:backupProcess
+    if (-not $isBackup -or $isInternalDrive) { $ejectCheckBox.Checked = $false }
+
+    $addFolderButton.Enabled = $isBackup -and -not $script:backupProcess
+    $removeFolderButton.Visible = $isBackup
+    $addFolderButton.Visible = $isBackup
+    Update-SelectionState
+}
+
 function Update-LibraryList {
+    Sync-FolderCheckState
     $libraryList.Items.Clear()
-    $names = @()
+    $items = @()
     if ($restoreRadio.Checked) {
         if ($driveCombo.SelectedItem) {
             $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
             $backupRoot = Join-Path $disk.DeviceID ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
-            $names = @(Get-LibraryNames -IncludeMissing | Where-Object { Test-Path -LiteralPath (Join-Path $backupRoot $_) -PathType Container })
+            $items += @(Get-LibraryDefinitions -IncludeMissing | Where-Object { Test-Path -LiteralPath (Join-Path $backupRoot $_.Name) -PathType Container } | ForEach-Object {
+                $checked = if ($script:folderCheckStates.ContainsKey([string]$_.Name)) { [bool]$script:folderCheckStates[[string]$_.Name] } else { $true }
+                New-FolderListItem -Name $_.Name -DisplayName (Get-FolderDisplayName $_.Name) -Path $_.Path -IsCustom $false -Checked $checked
+            })
+            $items += @(Get-RestoreCustomFolders -BackupRoot $backupRoot)
         }
         $titleLabel.Text = L "Persönliche Dateien wiederherstellen" "Restore personal files"
         $descriptionLabel.Text = L "Neuere lokale Dateien bleiben erhalten; es wird nichts gelöscht." "Newer local files are kept; nothing is deleted."
@@ -712,7 +943,11 @@ function Update-LibraryList {
         $startButton.Text = L "Wiederherstellung prüfen" "Review restore"
         $fat32Label.Visible = $false
     } else {
-        $names = @(Get-LibraryNames)
+        $items += @(Get-LibraryDefinitions | ForEach-Object {
+            $checked = if ($script:folderCheckStates.ContainsKey([string]$_.Name)) { [bool]$script:folderCheckStates[[string]$_.Name] } else { $true }
+            New-FolderListItem -Name $_.Name -DisplayName (Get-FolderDisplayName $_.Name) -Path $_.Path -IsCustom $false -Checked $checked
+        })
+        $items += @($script:customFolders)
         $titleLabel.Text = L "Persönliche Dateien sichern" "Back up personal files"
         $descriptionLabel.Text = L "Wählen Sie Ziel und Ordner. Vorhandene Dateien werden nicht gelöscht." "Choose a destination and folders. Existing files are not deleted."
         $driveLabel.Text = L "Ziellaufwerk:" "Destination drive:"
@@ -723,11 +958,10 @@ function Update-LibraryList {
             $fat32Label.Visible = $selectedDisk.FileSystem -eq 'FAT32'
         }
     }
-    foreach ($name in $names) {
-        $item = [pscustomobject]@{ CanonicalName = $name; DisplayName = Get-FolderDisplayName $name }
-        $item | Add-Member -MemberType ScriptMethod -Name ToString -Value { return $this.DisplayName } -Force
-        [void]$libraryList.Items.Add($item, $true)
+    foreach ($item in $items) {
+        [void]$libraryList.Items.Add($item, [bool]$item.Checked)
     }
+    Update-BackupOptionState
     Update-SelectionState
 }
 
@@ -741,13 +975,61 @@ $noneButton.Add_Click({
     Update-SelectionState
 })
 
+$addFolderButton.Add_Click({
+    Sync-FolderCheckState
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = L "Weiteren Ordner für die Sicherung auswählen" "Select another folder to back up"
+    $dialog.ShowNewFolderButton = $false
+    try {
+        if ($dialog.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        $selectedPath = [System.IO.Path]::GetFullPath($dialog.SelectedPath).TrimEnd('\')
+        if (-not (Test-Path -LiteralPath $selectedPath -PathType Container)) {
+            [System.Windows.Forms.MessageBox]::Show((L "Der ausgewählte Ordner wurde nicht gefunden." "The selected folder was not found."), $form.Text, "OK", "Warning") | Out-Null
+            return
+        }
+
+        $profilePath = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
+        if ($selectedPath.Equals($profilePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            [System.Windows.Forms.MessageBox]::Show((L "Das gesamte Benutzerprofil kann nicht als Zusatzordner ausgewählt werden." "The whole user profile cannot be selected as an additional folder."), $form.Text, "OK", "Warning") | Out-Null
+            return
+        }
+
+        $existingFolders = @()
+        $existingFolders += @(Get-LibraryDefinitions | ForEach-Object { $_.Path })
+        $existingFolders += @($script:customFolders | ForEach-Object { $_.Path })
+        $existingFolders += @(Get-ExistingCustomFolderMetadataForSelectedDrive | ForEach-Object { $_.OriginalPath })
+        foreach ($existingPath in @($existingFolders | Where-Object { $_ })) {
+            if (Test-IsSameOrNestedPath -FirstPath $selectedPath -SecondPath $existingPath) {
+                [System.Windows.Forms.MessageBox]::Show((L "Der ausgewählte Ordner ist bereits enthalten oder überschneidet sich mit einem vorhandenen Eintrag." "The selected folder is already included or overlaps an existing entry."), $form.Text, "OK", "Warning") | Out-Null
+                return
+            }
+        }
+
+        $name = Get-SafeCustomFolderName -Path $selectedPath
+        $displayName = "{0} ({1})" -f $name, $selectedPath
+        $script:customFolders += (New-FolderListItem -Name $name -DisplayName $displayName -Path $selectedPath -IsCustom $true -Checked $true)
+        Update-LibraryList
+    } finally {
+        $dialog.Dispose()
+    }
+})
+
+$removeFolderButton.Add_Click({
+    $selectedItem = $libraryList.SelectedItem
+    if (-not $selectedItem -or -not $selectedItem.PSObject.Properties['IsCustom'] -or -not $selectedItem.IsCustom) { return }
+    $script:customFolders = @($script:customFolders | Where-Object { $_.Name -ne $selectedItem.Name })
+    Update-LibraryList
+})
+
 $libraryList.Add_ItemCheck({
     # Beim initialen Befüllen existiert das Fensterhandle noch nicht. In diesem
     # Fall aktualisiert Update-LibraryList den Zustand nach dem Befüllen selbst.
     if ($form.IsHandleCreated -and -not $form.IsDisposed) {
-        $form.BeginInvoke([Action]{ Update-SelectionState }) | Out-Null
+        $form.BeginInvoke([Action]{ Sync-FolderCheckState; Update-SelectionState }) | Out-Null
     }
 })
+
+$libraryList.Add_SelectedIndexChanged({ Update-SelectionState })
 
 function Update-DriveList {
     $driveCombo.Items.Clear()
@@ -800,6 +1082,7 @@ $driveCombo.Add_SelectedIndexChanged({
         }))
         Update-BackupHealth
         Update-LibraryList
+        Update-BackupOptionState
         Update-SelectionState
     }
 })
@@ -807,10 +1090,10 @@ $driveCombo.Add_SelectedIndexChanged({
 $refreshButton.Add_Click({ Update-DriveList })
 
 $backupRadio.Add_CheckedChanged({
-    if ($backupRadio.Checked) { Update-LibraryList }
+    if ($backupRadio.Checked) { Update-LibraryList; Update-BackupOptionState }
 })
 $restoreRadio.Add_CheckedChanged({
-    if ($restoreRadio.Checked) { Update-LibraryList }
+    if ($restoreRadio.Checked) { Update-LibraryList; Update-BackupOptionState }
 })
 
 $startButton.Add_Click({
@@ -849,18 +1132,25 @@ $startButton.Add_Click({
     }
     $drive = $disk.DeviceID
     $selectedFolders = @($libraryList.CheckedItems | ForEach-Object {
-        if ($_.PSObject.Properties['CanonicalName']) { $_.CanonicalName } else { $_.ToString() }
+        [pscustomobject]@{
+            Name = [string]$_.Name
+            Path = if ($_.Path) { [string]$_.Path } else { $null }
+            IsCustom = [bool]$_.IsCustom
+        }
     })
     $script:statusFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.status" -f [guid]::NewGuid().ToString("N"))
     $script:resultFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.result.json" -f [guid]::NewGuid().ToString("N"))
     $script:cancelFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.cancel" -f [guid]::NewGuid().ToString("N"))
     $script:previewFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.preview.json" -f [guid]::NewGuid().ToString("N"))
     $script:approvalFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.approve" -f [guid]::NewGuid().ToString("N"))
+    $script:selectedFoldersFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.folders.json" -f [guid]::NewGuid().ToString("N"))
     $script:lastLogDir = Join-Path $drive ("Bibliothekssicherung\{0}_{1}\_logs" -f $env:COMPUTERNAME, $env:USERNAME)
     $script:lastDestination = Join-Path $drive ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
     $script:backupStartedAt = Get-Date
     $script:backupCancelled = $false
     $script:activeDrive = $disk
+    $script:activeDryRun = $backupRadio.Checked -and $dryRunCheckBox.Checked
+    $script:autoEjectRequested = $backupRadio.Checked -and $ejectCheckBox.Checked -and $disk.DriveType -eq 2
     $script:restorePreviewShown = $false
     $script:scanWarningShown = $false
     $cancelButton.Text = if ($restoreRadio.Checked) { L "Wiederherstellung abbrechen" "Cancel restore" } else { L "Sicherung abbrechen" "Cancel backup" }
@@ -868,7 +1158,13 @@ $startButton.Add_Click({
     $destinationButton.Enabled = $false
     $resultBox.Text = L "Vorprüfung wird gestartet ..." "Starting preflight checks ..."
     $statusLabel.ForeColor = [System.Drawing.SystemColors]::ControlText
-    $statusLabel.Text = if ($restoreRadio.Checked) { L "Wiederherstellung wird geprüft ..." "Checking restore ..." } else { L "Sicherung wird gestartet ..." "Starting backup ..." }
+    $statusLabel.Text = if ($restoreRadio.Checked) {
+        L "Wiederherstellung wird geprüft ..." "Checking restore ..."
+    } elseif ($script:activeDryRun) {
+        L "Simulation wird gestartet ..." "Starting simulation ..."
+    } else {
+        L "Sicherung wird gestartet ..." "Starting backup ..."
+    }
     $progressBar.Style = "Blocks"
     $progressBar.Minimum = 0
     $progressBar.Maximum = [math]::Max(1, $selectedFolders.Count)
@@ -881,6 +1177,10 @@ $startButton.Add_Click({
     $libraryList.Enabled = $false
     $allButton.Enabled = $false
     $noneButton.Enabled = $false
+    $addFolderButton.Enabled = $false
+    $removeFolderButton.Enabled = $false
+    $dryRunCheckBox.Enabled = $false
+    $ejectCheckBox.Enabled = $false
     $closeButton.Visible = $false
     $startButton.Visible = $false
     $cancelButton.Enabled = $true
@@ -888,11 +1188,28 @@ $startButton.Add_Click({
     $form.AcceptButton = $null
 
     try {
+        $selectedFolders | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:selectedFoldersFile -Encoding UTF8
         $powershellExe = Join-Path $PSHOME "powershell.exe"
-        $selectedArgument = $selectedFolders -join '|'
         $mode = if ($restoreRadio.Checked) { 'Restore' } else { 'Backup' }
         $script:activeMode = $mode
-        $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode "{1}" -ParentProcessId "{2}" -UsbDrive "{3}" -Silent -StatusFile "{4}" -ResultFile "{5}" -CancelFile "{6}" -PreviewFile "{7}" -ApprovalFile "{8}" -SelectedFolders "{9}"' -f $coreScript, $mode, $PID, $drive, $script:statusFile, $script:resultFile, $script:cancelFile, $script:previewFile, $script:approvalFile, $selectedArgument
+        $argumentList = @(
+            '-NoLogo',
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', $coreScript,
+            '-Mode', $mode,
+            '-ParentProcessId', $PID,
+            '-UsbDrive', $drive,
+            '-Silent',
+            '-StatusFile', $script:statusFile,
+            '-ResultFile', $script:resultFile,
+            '-CancelFile', $script:cancelFile,
+            '-PreviewFile', $script:previewFile,
+            '-ApprovalFile', $script:approvalFile,
+            '-SelectedFoldersFile', $script:selectedFoldersFile
+        )
+        if ($script:activeDryRun) { $argumentList += '-DryRun' }
+        $arguments = ($argumentList | ForEach-Object { ConvertTo-QuotedArgument ([string]$_) }) -join ' '
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
         $startInfo.FileName = $powershellExe
         $startInfo.Arguments = $arguments
@@ -906,6 +1223,10 @@ $startButton.Add_Click({
         }
         $timer.Start()
     } catch {
+        if ($script:backupProcess) {
+            try { $script:backupProcess.Dispose() } catch {}
+            $script:backupProcess = $null
+        }
         $progressBar.Style = "Blocks"
         $startButton.Enabled = $true
         $refreshButton.Enabled = $true
@@ -915,13 +1236,14 @@ $startButton.Add_Click({
         $libraryList.Enabled = $true
         $allButton.Enabled = $true
         $noneButton.Enabled = $true
+        Update-BackupOptionState
         $closeButton.Visible = $true
         $startButton.Visible = $true
         $cancelButton.Visible = $false
         $form.AcceptButton = $startButton
         $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
         $statusLabel.Text = L "Start fehlgeschlagen." "Failed to start."
-        foreach ($temporaryFile in @($script:statusFile, $script:resultFile, $script:cancelFile, $script:previewFile, $script:approvalFile)) {
+        foreach ($temporaryFile in @($script:statusFile, $script:resultFile, $script:cancelFile, $script:previewFile, $script:approvalFile, $script:selectedFoldersFile)) {
             if ($temporaryFile) { Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue }
         }
         $script:statusFile = $null
@@ -929,8 +1251,12 @@ $startButton.Add_Click({
         $script:cancelFile = $null
         $script:previewFile = $null
         $script:approvalFile = $null
+        $script:selectedFoldersFile = $null
         $script:activeDrive = $null
         $script:activeMode = $null
+        $script:activeDryRun = $false
+        $script:autoEjectRequested = $false
+        Update-BackupOptionState
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, (L "Fehler" "Error"), "OK", "Error") | Out-Null
     }
 })
@@ -1012,12 +1338,14 @@ $timer.Add_Tick({
                         $progressBar.Value = [math]::Min($current - 1, $progressBar.Maximum)
                         $statusLabel.Text = if ($restoreRadio.Checked) {
                             if ($script:isGerman) { "Ordner $current von $total wird wiederhergestellt: $name" } else { "Restoring folder $current of $total`: $name" }
+                        } elseif ($script:activeDryRun) {
+                            if ($script:isGerman) { "Ordner $current von $total wird simuliert: $name" } else { "Simulating folder $current of $total`: $name" }
                         } else {
                             if ($script:isGerman) { "Ordner $current von $total wird gesichert: $name" } else { "Backing up folder $current of $total`: $name" }
                         }
                     }
-                    "STATUS" { $statusLabel.Text = if ($restoreRadio.Checked) { L "Wiederherstellung wird vorbereitet ..." "Preparing restore ..." } else { L "Sicherung wird vorbereitet ..." "Preparing backup ..." } }
-                    "FERTIG" { $statusLabel.Text = if ($restoreRadio.Checked) { L "Wiederherstellung erfolgreich abgeschlossen." "Restore completed successfully." } else { L "Sicherung erfolgreich abgeschlossen." "Backup completed successfully." } }
+                    "STATUS" { $statusLabel.Text = if ($restoreRadio.Checked) { L "Wiederherstellung wird vorbereitet ..." "Preparing restore ..." } elseif ($script:activeDryRun) { L "Simulation wird vorbereitet ..." "Preparing simulation ..." } else { L "Sicherung wird vorbereitet ..." "Preparing backup ..." } }
+                    "FERTIG" { $statusLabel.Text = if ($restoreRadio.Checked) { L "Wiederherstellung erfolgreich abgeschlossen." "Restore completed successfully." } elseif ($script:activeDryRun) { L "Simulation erfolgreich abgeschlossen." "Simulation completed successfully." } else { L "Sicherung erfolgreich abgeschlossen." "Backup completed successfully." } }
                     "FEHLER" { $statusLabel.Text = $parts[1] }
                     "ABGEBROCHEN" { $statusLabel.Text = L "Vorgang wurde abgebrochen." "Operation was cancelled." }
                 }
@@ -1041,6 +1369,7 @@ $timer.Add_Tick({
             $libraryList.Enabled = $true
             $allButton.Enabled = $true
             $noneButton.Enabled = $true
+            Update-BackupOptionState
             $closeButton.Visible = $true
             $startButton.Visible = $true
             $cancelButton.Visible = $false
@@ -1064,8 +1393,11 @@ $timer.Add_Tick({
                 $duration = if ($elapsed.TotalHours -ge 1) { "{0:hh\:mm\:ss}" -f $elapsed } else { "{0:mm\:ss}" -f $elapsed }
                 $statusLabel.ForeColor = [System.Drawing.Color]::DarkGreen
                 $isRestore = $result -and $result.Mode -eq 'Restore'
+                $isDryRun = $result -and $result.DryRun
                 $statusLabel.Text = if ($isRestore) {
                     (L "Wiederherstellung erfolgreich abgeschlossen ({0})." "Restore completed successfully ({0}).") -f $duration
+                } elseif ($isDryRun) {
+                    (L "Simulation erfolgreich abgeschlossen ({0}). Log: {1}" "Simulation completed successfully ({0}). Log: {1}") -f $duration, $newestLog
                 } else {
                     (L "Erfolgreich abgeschlossen ({0}). Ziel: {1}" "Completed successfully ({0}). Destination: {1}") -f $duration, $script:lastDestination
                 }
@@ -1075,20 +1407,37 @@ $timer.Add_Tick({
                     $displayHints = @($result.HintFolders | ForEach-Object { Get-FolderDisplayName $_ })
                     $hints = if ($displayHints.Count) { (L " Hinweise: {0}." " Notes: {0}.") -f ($displayHints -join ', ') } else { "" }
                     $resultBox.Text = if ($script:isGerman) {
-                        "$(if ($isRestore) { 'Wiederhergestellt' } else { 'Gesichert' }): $(@($result.SuccessfulFolders).Count) Ordner. Geplant: $($result.PlannedFiles) Dateien / $plannedGb GB. Dauer: $duration.$hints"
+                        "$(if ($isRestore) { 'Wiederhergestellt' } elseif ($isDryRun) { 'Simuliert' } else { 'Gesichert' }): $(@($result.SuccessfulFolders).Count) Ordner. Geplant: $($result.PlannedFiles) Dateien / $plannedGb GB. Dauer: $duration.$hints"
                     } else {
-                        "$(if ($isRestore) { 'Restored' } else { 'Backed up' }): $(@($result.SuccessfulFolders).Count) folders. Planned: $($result.PlannedFiles) files / $plannedGb GB. Duration: $duration.$hints"
+                        "$(if ($isRestore) { 'Restored' } elseif ($isDryRun) { 'Simulated' } else { 'Backed up' }): $(@($result.SuccessfulFolders).Count) folders. Planned: $($result.PlannedFiles) files / $plannedGb GB. Duration: $duration.$hints"
                     }
                 } else {
                     $resultBox.Text = L "Vorgang erfolgreich abgeschlossen." "Operation completed successfully."
                 }
-                if ($script:activeMode -eq 'Backup' -and $script:activeDrive) {
+                if ($script:activeMode -eq 'Backup' -and -not $isDryRun -and $script:activeDrive) {
                     try {
                         Save-KnownBackupDrive -Disk $script:activeDrive
                         $driveToolTip.SetToolTip($driveCombo, (L 'Dieses Laufwerk ist jetzt als bekanntes Sicherungslaufwerk gespeichert.' 'This drive is now remembered as the backup drive.'))
                     } catch {
                         [System.Windows.Forms.MessageBox]::Show(
                             ((L "Die Sicherung war erfolgreich, das Laufwerk konnte aber nicht für die automatische Wiedererkennung gespeichert werden:`r`n{0}" "The backup succeeded, but the drive could not be saved for automatic recognition:`r`n{0}") -f $_.Exception.Message),
+                            $form.Text,
+                            'OK',
+                            'Warning'
+                        ) | Out-Null
+                    }
+                }
+                if ($script:autoEjectRequested -and $script:activeDrive -and $script:activeDrive.DriveType -eq 2 -and -not $isDryRun -and -not $isRestore) {
+                    $ejectResult = Dismount-BackupDriveSafely -Drive $script:activeDrive.DeviceID
+                    if ($ejectResult.Success) {
+                        $statusLabel.Text = L "Sicherung erfolgreich abgeschlossen. Laufwerk kann entfernt werden." "Backup completed successfully. The drive can be removed."
+                        $resultBox.Text = "{0}{1}{2}" -f $resultBox.Text, [Environment]::NewLine, $ejectResult.Message
+                        Update-DriveList
+                    } else {
+                        $statusLabel.Text = L "Sicherung erfolgreich, Auswurf konnte nicht abgeschlossen werden." "Backup succeeded, but eject could not be completed."
+                        $resultBox.Text = "{0}{1}{2}" -f $resultBox.Text, [Environment]::NewLine, (L "Auswurf fehlgeschlagen. Bitte Laufwerk manuell sicher entfernen." "Eject failed. Safely remove the drive manually.")
+                        [System.Windows.Forms.MessageBox]::Show(
+                            ((L "Die Sicherung war erfolgreich, aber das Laufwerk konnte nicht automatisch ausgeworfen werden:`r`n{0}" "The backup succeeded, but the drive could not be ejected automatically:`r`n{0}") -f $ejectResult.Message),
                             $form.Text,
                             'OK',
                             'Warning'
@@ -1115,6 +1464,9 @@ $timer.Add_Tick({
             Update-BackupHealth
             $script:activeDrive = $null
             $script:activeMode = $null
+            $script:activeDryRun = $false
+            $script:autoEjectRequested = $false
+            Update-BackupOptionState
             Update-ResultOverview
             if ($script:statusFile) {
                 Remove-Item -LiteralPath $script:statusFile -Force -ErrorAction SilentlyContinue
@@ -1128,7 +1480,7 @@ $timer.Add_Tick({
                 Remove-Item -LiteralPath $script:cancelFile -Force -ErrorAction SilentlyContinue
                 $script:cancelFile = $null
             }
-            foreach ($temporaryName in @('previewFile', 'approvalFile')) {
+            foreach ($temporaryName in @('previewFile', 'approvalFile', 'selectedFoldersFile')) {
                 $temporaryPath = Get-Variable -Name $temporaryName -Scope Script -ValueOnly
                 if ($temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
                 Set-Variable -Name $temporaryName -Scope Script -Value $null
@@ -1210,12 +1562,13 @@ $form.Add_Shown({
 # WinForms kann die Z-Reihenfolge von Panels bei der ersten echten Anzeige
 # anders behandeln als DrawToBitmap. Die dekorativen Flächen muessen deshalb
 # ausdruecklich hinter allen interaktiven Steuerelementen liegen.
-foreach ($surface in @($targetSurface, $folderSurface, $activitySurface, $footerSurface)) {
+foreach ($surface in @($targetSurface, $folderSurface, $optionsSurface, $activitySurface, $footerSurface)) {
     $surface.SendToBack()
 }
 
 $script:knownDrive = Get-KnownBackupDrive
 Update-DriveList
+Update-BackupOptionState
 Update-SelectionState
 
 # Auf Bildschirmen mit wenig Arbeitshoehe startet das Fenster verkleinert;

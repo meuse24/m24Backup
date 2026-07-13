@@ -51,13 +51,26 @@ Normalerweise genügt ein Doppelklick auf
   3. Bei Bedarf auf „Aktualisieren“ klicken.
   4. Das gewünschte Ziellaufwerk auswählen.
   5. Die zu sichernden Ordner markieren.
-  6. Auf „Sicherung starten“ klicken.
-  7. Warten, bis der Status den erfolgreichen Abschluss meldet.
+  6. Bei Bedarf mit „Weiteren Ordner...“ zusätzliche Arbeitsordner
+     hinzufügen.
+  7. Optional „Nur simulieren (Dry-Run)“ aktivieren, um nur das Protokoll der
+     geplanten Kopiervorgänge zu erzeugen.
+  8. Optional „Laufwerk nach Erfolg sicher auswerfen“ aktivieren.
+  9. Auf „Sicherung starten“ klicken.
+ 10. Warten, bis der Status den erfolgreichen Abschluss meldet.
 
 Nach dem Abschluss können der Sicherungsordner und das technische Protokoll
 direkt über die entsprechenden Schaltflächen geöffnet werden.
 
 Während einer Sicherung darf das Ziellaufwerk nicht entfernt werden.
+
+Im Dry-Run-Modus verwendet das Programm Robocopy /L. Dadurch werden die
+geplanten Kopiervorgänge in das Protokoll geschrieben, aber keine Nutzdaten
+kopiert und keine Sicherungsmetadaten als erfolgreich aktualisiert.
+
+Zusatzordner werden im Sicherungsziel unter einem eindeutigen Namen abgelegt.
+Die Datei _Ordner.json speichert den Originalpfad, damit diese Ordner bei
+einer späteren Wiederherstellung wieder angeboten werden können.
 
 Nach einer erfolgreichen Sicherung merkt sich die App die eindeutige
 Datenträger-ID dieses Laufwerks im lokalen Windows-Benutzerprofil. Beim
@@ -66,6 +79,11 @@ markiert, wenn Windows ihm einen anderen Laufwerksbuchstaben zugewiesen hat.
 Vor einer Sicherung auf ein anderes Laufwerk erscheint eine Warnung. Wird sie
 bestätigt und die Sicherung erfolgreich abgeschlossen, wird dieses Laufwerk
 künftig als bekanntes Sicherungslaufwerk verwendet.
+
+Ist „Laufwerk nach Erfolg sicher auswerfen“ aktiv, versucht die App nach einem
+erfolgreichen echten Backup auf einem Wechseldatenträger den Windows-Auswurf.
+Bei einem Fehlschlag bleibt die Sicherung erfolgreich; das Laufwerk muss dann
+manuell sicher entfernt werden.
 
 
 4. Verhalten der Sicherung

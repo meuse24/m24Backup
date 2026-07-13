@@ -222,6 +222,7 @@ New-AppIcon -SourcePath $logoPath -DestinationPath $iconPath
 $releaseFiles = @(
     'Bibliothekssicherung-GUI.ps1',
     'Bibliothekssicherung.ps1',
+    'M24Backup.Shared.ps1',
     'Bibliothekssicherung starten.bat',
     'Bibliothekssicherung starten.vbs',
     'Hilfe-und-Info.txt',

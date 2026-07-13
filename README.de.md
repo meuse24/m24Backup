@@ -17,6 +17,12 @@ auf Englisch.
   gespeicherte Spiele und weitere erkannte Benutzerordner.
 - Nutzt Robocopy und löscht keine Dateien aus dem Sicherungsziel.
 - Prüft Ziel, freien Speicherplatz und FAT32-Einschränkungen vor dem Start.
+- Kann eine Sicherung per Dry-Run simulieren und die geplanten Änderungen im
+  Protokoll anzeigen, ohne Nutzdaten zu kopieren.
+- Kann zusätzliche frei gewählte Ordner in die Sicherung aufnehmen und über
+  gespeicherte Metadaten wiederherstellen.
+- Kann ein erfolgreich verwendetes USB-Sicherungslaufwerk anschließend sicher
+  auswerfen.
 - Zeigt Fortschritt und ein verständliches Ergebnis direkt im Fenster an.
 - Zeigt eine Backup-Ampel mit Alter, Dauer und Ordnerzahl der letzten Sicherung
   auf dem ausgewählten Laufwerk.
@@ -49,8 +55,11 @@ direkt auf einem Sicherungslaufwerk liegen.
 
 1. Sicherungslaufwerk anschließen und die Anwendung starten.
 2. Modus **Sichern** und das gewünschte Ziellaufwerk auswählen.
-3. Zu sichernde Ordner markieren und **Sicherung starten** wählen.
-4. Den Abschlussstatus prüfen und bei Bedarf das Protokoll öffnen.
+3. Zu sichernde Ordner markieren, bei Bedarf **Weiteren Ordner...** nutzen
+   oder **Nur simulieren (Dry-Run)** aktivieren.
+4. Optional **Laufwerk nach Erfolg sicher auswerfen** aktivieren.
+5. **Sicherung starten** wählen, den Abschlussstatus prüfen und bei Bedarf das
+   Protokoll öffnen.
 
 Für eine Rücksicherung den Modus **Wiederherstellen** wählen. Die Anwendung
 akzeptiert nur eine Sicherung, deren Computer- und Benutzerinformationen zum

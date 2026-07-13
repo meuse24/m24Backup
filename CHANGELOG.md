@@ -13,6 +13,12 @@ dokumentiert. Die Versionierung orientiert sich an
 - Wiedererkennung und automatische Auswahl des zuletzt erfolgreich verwendeten
   Sicherungslaufwerks über seine Datenträger-ID
 - Sicherheitsabfrage vor dem Wechsel auf ein anderes Sicherungslaufwerk
+- Dry-Run-Modus fuer Sicherungen mit Robocopy `/L`, sichtbarer Datei- und
+  Ordnerliste im Protokoll und ohne Veraenderung echter Sicherungsmetadaten
+- Frei waehlbare Zusatzordner per Ordnerauswahl, inklusive Metadaten fuer eine
+  spaetere Wiederherstellung an den Originalpfad
+- Option zum sicheren Auswerfen eines erfolgreich verwendeten
+  USB-Sicherungslaufwerks
 - Release-Orchestrator mit automatischer SemVer-Erhöhung, Schutzprüfungen,
   Build, Git-Tag, Push und Veröffentlichung der Artefakte als GitHub-Release
 - Automatische Wiederholungsversuche bei vorübergehenden GitHub-API- und
