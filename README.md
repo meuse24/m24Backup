@@ -94,7 +94,9 @@ trusted source and verify them against `SHA256SUMS.txt`.
 
 M24 Backup is built with Windows PowerShell 5.1, Windows Forms, and Robocopy.
 The interface and backup worker run in separate processes and communicate
-through atomically written status files and structured JSON results.
+through atomically written status files and structured JSON results. Shared
+validation helpers live in `M24Backup.Shared.ps1` and are loaded by both the
+GUI and worker.
 
 Run from source:
 

@@ -187,6 +187,7 @@ Beispiel:
 In diesem Ordner befinden sich die gesicherten Bibliotheksordner sowie:
 
   - _Sicherungsinfo.txt    Zuordnung und Angaben zur Sicherung
+  - _Ordner.json           Originalpfade frei hinzugefügter Ordner
   - _logs\                 technische Backup- und Restore-Protokolle
 
 
@@ -275,6 +276,11 @@ Bibliothekssicherung.ps1
   Worker für Backup und Restore. Er führt Preflight-Prüfungen durch, erstellt
   Transferpläne und startet Robocopy.
 
+M24Backup.Shared.ps1
+
+  Gemeinsame Hilfsfunktionen für reservierte interne Namen und Pfadprüfungen,
+  die von GUI und Worker per Dot-Sourcing geladen werden.
+
 Bibliothekssicherung starten.vbs / .bat
 
   Der VBS-Starter öffnet die grafische Oberfläche ohne sichtbares
@@ -290,6 +296,8 @@ Bibliothekssicherung starten.vbs / .bat
   - System.Drawing für Größen, Farben, Schriftarten und Symbole
   - Robocopy als native Windows-Kopierengine
   - CIM/WMI-Klasse Win32_LogicalDisk für Laufwerksinformationen
+  - Shell.Application-COM und Win32_Volume-Dismount für den optionalen
+    Laufwerksauswurf
   - Windows Registry „User Shell Folders“ für umgeleitete Bibliotheken
   - JSON für strukturierte Vorschau- und Ergebnisdaten
   - temporäre Dateien für die Inter-Prozess-Kommunikation
@@ -333,6 +341,7 @@ Windows-Verzeichnis:
   - .status          aktueller strukturierter Status
   - .result.json     abschließendes Ergebnis
   - .preview.json    Restore-Konfliktvorschau bzw. Warnungen der Vorprüfung
+  - .folders.json    ausgewählte Standard- und Zusatzordner inklusive Pfade
   - .approve         ausdrückliche Freigabe (Restore-Start oder Fortsetzen
                      trotz Lesewarnungen der Vorprüfung)
   - .cancel          kooperatives Abbruchsignal
@@ -384,8 +393,12 @@ zum Abbruch, weil sie auf einen defekten Datenträger hindeuten können.
   /COPY:DAT     kopiert Daten, Attribute und Zeitstempel
   /DCOPY:DAT    übernimmt Verzeichnisdaten, Attribute und Zeitstempel
   /NFL /NDL     reduziert die Protokollmenge
+  /L            listet im Dry-Run nur geplante Kopiervorgänge auf
   /NP           unterdrückt Prozent-Fortschritt im technischen Log
   /UNILOG+      schreibt ein angehängtes Unicode-Protokoll
+
+Im Dry-Run werden /NFL und /NDL bewusst weggelassen, damit das Protokoll die
+geplanten Dateien und Ordner enthält.
 
 Bewusst nicht verwendet:
 

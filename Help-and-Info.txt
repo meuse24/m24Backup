@@ -148,9 +148,9 @@ Backups use this structure:
 
   <Drive>:\Bibliothekssicherung\<Computer>_<User>\
 
-The folder contains the backed-up folders, _Sicherungsinfo.txt, and the _logs
-directory. Internal folder names remain stable and are not changed when the
-display language changes.
+The folder contains the backed-up folders, _Sicherungsinfo.txt, _Ordner.json
+for additional-folder original paths, and the _logs directory. Internal folder
+names remain stable and are not changed when the display language changes.
 
 
 10. Logs
@@ -185,6 +185,9 @@ approval, and cancellation.
 Bibliothekssicherung.ps1 is the worker for backup and restore. It performs
 validation and preflight checks and runs Robocopy.
 
+M24Backup.Shared.ps1 contains helper functions shared by the GUI and worker,
+including reserved internal names and nested-path checks.
+
 
 13. Tech stack
 --------------
@@ -194,6 +197,7 @@ validation and preflight checks and runs Robocopy.
   - System.Windows.Forms and System.Drawing
   - Robocopy
   - Win32_LogicalDisk via CIM/WMI
+  - Shell.Application COM and Win32_Volume dismount for optional drive eject
   - Windows User Shell Folders registry values
   - JSON for previews and structured results
   - Atomic temporary files for inter-process communication
@@ -212,6 +216,9 @@ The worker validates the drive and folder mappings, calculates required disk
 space, waits for restore or preflight-warning approval, runs Robocopy once per
 selected folder, and writes status, Unicode logs, and the final result.
 
+The temporary .folders.json file passes selected standard and additional
+folders, including custom source paths, from the GUI to the worker.
+
 
 15. Important Robocopy options
 ------------------------------
@@ -224,7 +231,11 @@ selected folder, and writes status, Unicode logs, and the final result.
   /R:1 /W:3   limit retries and retry delay
   /COPY:DAT   copy data, attributes, and timestamps
   /DCOPY:DAT  preserve directory data, attributes, and timestamps
+  /L          list planned copy operations during dry run
   /UNILOG+    append Unicode log output
+
+During dry run, /NFL and /NDL are intentionally omitted so the log contains the
+planned files and folders.
 
 /MIR and /PURGE are intentionally never used.
 

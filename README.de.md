@@ -97,7 +97,9 @@ sollten nur aus einer vertrauenswürdigen Quelle bezogen und anhand von
 
 Die Anwendung besteht aus Windows PowerShell 5.1, Windows Forms und Robocopy.
 Oberfläche und Sicherungs-Worker laufen in getrennten Prozessen und tauschen
-atomar geschriebene Status- und JSON-Ergebnisdateien aus.
+atomar geschriebene Status- und JSON-Ergebnisdateien aus. Gemeinsame
+Validierungshelfer liegen in `M24Backup.Shared.ps1` und werden von GUI und
+Worker geladen.
 
 Lokaler Start:
 
