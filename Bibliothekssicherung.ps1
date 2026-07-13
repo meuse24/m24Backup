@@ -82,6 +82,24 @@ function Write-AtomicTextFile {
 }
 
 trap {
+    $trapLogFile = $null
+    $logVariable = Get-Variable -Name logFile -ErrorAction SilentlyContinue
+    if ($logVariable -and $logVariable.Value) {
+        $trapLogFile = [string]$logVariable.Value
+        try {
+            $trapLogDir = Split-Path -Path $trapLogFile -Parent
+            if ($trapLogDir) { New-Item -ItemType Directory -Path $trapLogDir -Force | Out-Null }
+            @(
+                "Start: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+                "Vorgang: $Mode",
+                "Fehler vor oder waehrend des Kopiervorgangs.",
+                "Grund: $($_.Exception.Message)",
+                ""
+            ) | Add-Content -LiteralPath $trapLogFile -Encoding Unicode
+        } catch {
+            $trapLogFile = $null
+        }
+    }
     if ($StatusFile) {
         try {
             Write-AtomicTextFile -Path $StatusFile -Content ("FEHLER|{0}" -f $_.Exception.Message)
@@ -91,7 +109,7 @@ trap {
     }
     if ($ResultFile) {
         try {
-            [pscustomobject]@{ Success = $false; Cancelled = $false; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $_.Exception.Message; FinishedAt = (Get-Date).ToString('o') } |
+            [pscustomobject]@{ Success = $false; Cancelled = $false; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $_.Exception.Message; LogFile = $trapLogFile; FinishedAt = (Get-Date).ToString('o') } |
                 ConvertTo-Json | Set-Content -LiteralPath $ResultFile -Encoding UTF8 -ErrorAction SilentlyContinue
         } catch {}
     }
@@ -432,7 +450,8 @@ function Read-SelectedFolderSpecs {
         if (-not (Test-Path -LiteralPath $SelectedFoldersFile -PathType Leaf)) {
             throw ((M "Die Auswahldatei wurde nicht gefunden: {0}" "The selection file was not found: {0}") -f $SelectedFoldersFile)
         }
-        return @(Get-Content -LiteralPath $SelectedFoldersFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+        $parsedSelection = Get-Content -LiteralPath $SelectedFoldersFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return @($parsedSelection)
     }
     if ($SelectedFolders) {
         return @($SelectedFolders -split '\|' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object {
@@ -450,6 +469,15 @@ function Read-CustomFolderMetadata {
     } catch {
         return @()
     }
+}
+
+function Test-IsCustomFolderSpec {
+    param($Spec)
+    if (-not $Spec -or -not $Spec.PSObject.Properties['IsCustom']) { return $false }
+    $value = $Spec.IsCustom
+    if ($value -is [bool]) { return $value }
+    if ($null -eq $value) { return $false }
+    return ([string]$value).Trim().Equals('true', [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 # AppData ist bewusst nicht Teil der Sicherung. Ein Pfad, der direkt dem
@@ -485,7 +513,7 @@ if ($Mode -eq 'Restore' -and (Test-Path -LiteralPath $destination -PathType Cont
         [pscustomobject]@{ Name = [string]$_.Name; Path = [string]$_.OriginalPath; IsCustom = $true }
     })
     $folderDefinitions = @($folderDefinitions) + $restoreCustomDefinitions
-    foreach ($selectedCustomSpec in @($selectedFolderSpecs | Where-Object { $_.IsCustom -and $_.Name -and $_.Path })) {
+    foreach ($selectedCustomSpec in @($selectedFolderSpecs | Where-Object { (Test-IsCustomFolderSpec $_) -and $_.Name -and $_.Path })) {
         $selectedName = [string]$selectedCustomSpec.Name
         if (@($folderDefinitions | Where-Object { $_.Name.Equals($selectedName, [System.StringComparison]::OrdinalIgnoreCase) }).Count -eq 0) {
             $folderDefinitions = @($folderDefinitions) + [pscustomobject]@{
@@ -498,7 +526,7 @@ if ($Mode -eq 'Restore' -and (Test-Path -LiteralPath $destination -PathType Cont
 }
 
 if ($Mode -eq 'Backup' -and $selectedFolderSpecs.Count -gt 0) {
-    $customSpecs = @($selectedFolderSpecs | Where-Object { $_.IsCustom })
+    $customSpecs = @($selectedFolderSpecs | Where-Object { Test-IsCustomFolderSpec $_ })
     $existingCustomMetadata = @(Read-CustomFolderMetadata -Path $folderMetadataFile)
     foreach ($customSpec in $customSpecs) {
         $customName = [string]$customSpec.Name

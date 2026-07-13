@@ -19,6 +19,13 @@ dokumentiert. Die Versionierung orientiert sich an
   spaetere Wiederherstellung an den Originalpfad
 - Option zum sicheren Auswerfen eines erfolgreich verwendeten
   USB-Sicherungslaufwerks
+- Animierte Fortschrittsanzeige während laufender Sicherungs-, Simulations-
+  und Wiederherstellungsvorgänge
+- Laufzeitanzeige für laufende Vorgänge und klarer Zwischenstatus während
+  eines angeforderten Abbruchs
+- Automatischer Auswurf wird nach erfolgreicher Sicherung kurz verzögert
+  und mit Wiederholungsversuchen gestartet, damit Windows letzte Datei- und
+  Prozesszugriffe schließen kann
 - Release-Orchestrator mit automatischer SemVer-Erhöhung, Schutzprüfungen,
   Build, Git-Tag, Push und Veröffentlichung der Artefakte als GitHub-Release
 - Automatische Wiederholungsversuche bei vorübergehenden GitHub-API- und

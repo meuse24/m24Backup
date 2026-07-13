@@ -57,6 +57,7 @@ $script:selectedFoldersFile = $null
 $script:restorePreviewShown = $false
 $script:scanWarningShown = $false
 $script:lastLogDir = $null
+$script:lastLogFile = $null
 $script:lastDestination = $null
 $script:backupStartedAt = $null
 $script:backupCancelled = $false
@@ -65,6 +66,13 @@ $script:activeDrive = $null
 $script:activeMode = $null
 $script:activeDryRun = $false
 $script:autoEjectRequested = $false
+$script:pendingEjectDrive = $null
+$script:ejectAttemptsRemaining = 0
+$script:ejectDialogOpen = $false
+$script:lastProgressCurrent = 0
+$script:lastProgressTotal = 1
+$script:preCancelStatusText = $null
+$script:preCancelResultText = $null
 $script:customFolders = @()
 $script:folderCheckStates = @{}
 $settingsDirectory = Join-Path $env:LOCALAPPDATA 'M24Backup'
@@ -219,12 +227,88 @@ function Sync-FolderCheckState {
     }
 }
 
+function Get-CheckedFolderItems {
+    $items = @()
+    for ($i = 0; $i -lt $libraryList.Items.Count; $i++) {
+        if ($libraryList.GetItemChecked($i)) {
+            $items += $libraryList.Items[$i]
+        }
+    }
+    return $items
+}
+
+function Start-BusyProgress {
+    if ($progressBar.Style -ne [System.Windows.Forms.ProgressBarStyle]::Marquee) {
+        $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+    }
+    if ($progressBar.MarqueeAnimationSpeed -ne 35) {
+        $progressBar.MarqueeAnimationSpeed = 35
+    }
+}
+
+function Stop-BusyProgress {
+    $progressBar.MarqueeAnimationSpeed = 0
+    if ($progressBar.Style -ne [System.Windows.Forms.ProgressBarStyle]::Blocks) {
+        $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Blocks
+    }
+}
+
+function Reset-ProgressIndicator {
+    param([int]$Maximum)
+
+    Stop-BusyProgress
+    $progressBar.Minimum = 0
+    $progressBar.Maximum = [math]::Max(1, $Maximum)
+    $progressBar.Value = 0
+    $script:lastProgressCurrent = 0
+    $script:lastProgressTotal = $progressBar.Maximum
+}
+
+function Set-ProgressFromLastStatus {
+    Stop-BusyProgress
+    $progressBar.Maximum = [math]::Max(1, $script:lastProgressTotal)
+    $progressBar.Value = [math]::Min([math]::Max(0, $script:lastProgressCurrent - 1), $progressBar.Maximum)
+}
+
+function Format-ElapsedDuration {
+    param([TimeSpan]$Elapsed)
+
+    if ($Elapsed.TotalHours -ge 1) { return ("{0:hh\:mm\:ss}" -f $Elapsed) }
+    return ("{0:mm\:ss}" -f $Elapsed)
+}
+
+function Update-ElapsedDuration {
+    if ($script:backupStartedAt) {
+        $durationLabel.Text = Format-ElapsedDuration ((Get-Date) - $script:backupStartedAt)
+    } else {
+        $durationLabel.Text = "--:--"
+    }
+}
+
+function Set-CancellationPendingOverview {
+    $resultBox.Text = if ($restoreRadio.Checked) {
+        L "Wiederherstellung wird abgebrochen. Der laufende Vorgang wird sauber beendet; das kann einige Zeit dauern." "Restore is being cancelled. The current operation is finishing safely; this can take some time."
+    } elseif ($script:activeDryRun) {
+        L "Simulation wird abgebrochen. Der laufende Vorgang wird sauber beendet; das kann einige Zeit dauern." "Simulation is being cancelled. The current operation is finishing safely; this can take some time."
+    } else {
+        L "Sicherung wird abgebrochen. Der laufende Kopiervorgang wird sauber beendet; das kann einige Zeit dauern." "Backup is being cancelled. The current copy operation is finishing safely; this can take some time."
+    }
+}
+
 function Get-NewestLogFile {
+    if ($script:lastLogFile -and (Test-Path -LiteralPath $script:lastLogFile -PathType Leaf)) {
+        return Get-Item -LiteralPath $script:lastLogFile -ErrorAction SilentlyContinue
+    }
     if (-not $script:lastLogDir -or -not (Test-Path -LiteralPath $script:lastLogDir)) {
         return $null
     }
 
-    return Get-ChildItem -LiteralPath $script:lastLogDir -Filter "*.log" -File -ErrorAction SilentlyContinue |
+    $logs = Get-ChildItem -LiteralPath $script:lastLogDir -Filter "*.log" -File -ErrorAction SilentlyContinue
+    if ($script:backupStartedAt) {
+        $startedAt = $script:backupStartedAt.AddSeconds(-2)
+        $logs = @($logs | Where-Object { $_.LastWriteTime -ge $startedAt })
+    }
+    return $logs |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
 }
@@ -375,7 +459,7 @@ function Get-BackupHealth {
             $startText = ($startLine -replace '^Letzter Sicherungsversuch:\s*', '').Trim()
             if ([datetime]::TryParseExact($startText, 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$startedAt) -and $finishedAt -ge $startedAt) {
                 $elapsed = $finishedAt - $startedAt
-                $durationText = if ($elapsed.TotalHours -ge 1) { $elapsed.ToString('hh\:mm\:ss') } else { $elapsed.ToString('mm\:ss') }
+                $durationText = Format-ElapsedDuration $elapsed
             }
         }
 
@@ -663,7 +747,7 @@ foreach ($folder in Get-LibraryDefinitions) {
 $allButton = New-Object System.Windows.Forms.Button
 $allButton.Text = L "Alle" "All"
 $allButton.Location = New-Object System.Drawing.Point(384, 260)
-$allButton.Size = New-Object System.Drawing.Size(76, 27)
+$allButton.Size = New-Object System.Drawing.Size(50, 27)
 $allButton.FlatStyle = 'Flat'
 $allButton.FlatAppearance.BorderSize = 1
 $allButton.FlatAppearance.BorderColor = $buttonBorderColor
@@ -674,8 +758,8 @@ $form.Controls.Add($allButton)
 
 $noneButton = New-Object System.Windows.Forms.Button
 $noneButton.Text = L "Keine" "None"
-$noneButton.Location = New-Object System.Drawing.Point(384, 297)
-$noneButton.Size = New-Object System.Drawing.Size(76, 27)
+$noneButton.Location = New-Object System.Drawing.Point(440, 260)
+$noneButton.Size = New-Object System.Drawing.Size(50, 27)
 $noneButton.FlatStyle = 'Flat'
 $noneButton.FlatAppearance.BorderSize = 1
 $noneButton.FlatAppearance.BorderColor = $buttonBorderColor
@@ -685,9 +769,10 @@ $noneButton.TabIndex = 7
 $form.Controls.Add($noneButton)
 
 $addFolderButton = New-Object System.Windows.Forms.Button
-$addFolderButton.Text = L "Weiteren Ordner..." "Add folder..."
-$addFolderButton.Location = New-Object System.Drawing.Point(384, 334)
-$addFolderButton.Size = New-Object System.Drawing.Size(106, 27)
+$addFolderButton.Text = L "Weiteren`r`nOrdner..." "Add`r`nfolder..."
+$addFolderButton.Location = New-Object System.Drawing.Point(384, 297)
+$addFolderButton.Size = New-Object System.Drawing.Size(106, 54)
+$addFolderButton.TextAlign = 'MiddleCenter'
 $addFolderButton.FlatStyle = 'Flat'
 $addFolderButton.FlatAppearance.BorderSize = 1
 $addFolderButton.FlatAppearance.BorderColor = $buttonBorderColor
@@ -698,7 +783,7 @@ $form.Controls.Add($addFolderButton)
 
 $removeFolderButton = New-Object System.Windows.Forms.Button
 $removeFolderButton.Text = L "Entfernen" "Remove"
-$removeFolderButton.Location = New-Object System.Drawing.Point(384, 371)
+$removeFolderButton.Location = New-Object System.Drawing.Point(384, 362)
 $removeFolderButton.Size = New-Object System.Drawing.Size(106, 27)
 $removeFolderButton.FlatStyle = 'Flat'
 $removeFolderButton.FlatAppearance.BorderSize = 1
@@ -766,16 +851,35 @@ $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = L "Bereit." "Ready."
 $statusLabel.AutoEllipsis = $true
 $statusLabel.Location = New-Object System.Drawing.Point(82, 526)
-$statusLabel.Size = New-Object System.Drawing.Size(608, 22)
+$statusLabel.Size = New-Object System.Drawing.Size(455, 22)
 $statusLabel.BackColor = $surfaceColor
 $statusLabel.Anchor = "Top, Left, Right"
 $form.Controls.Add($statusLabel)
+
+$durationCaption = New-Object System.Windows.Forms.Label
+$durationCaption.Text = L "Dauer:" "Elapsed:"
+$durationCaption.AutoSize = $true
+$durationCaption.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
+$durationCaption.Location = New-Object System.Drawing.Point(552, 526)
+$durationCaption.BackColor = $surfaceColor
+$durationCaption.Anchor = "Top, Right"
+$form.Controls.Add($durationCaption)
+
+$durationLabel = New-Object System.Windows.Forms.Label
+$durationLabel.Text = "--:--"
+$durationLabel.Location = New-Object System.Drawing.Point(612, 526)
+$durationLabel.Size = New-Object System.Drawing.Size(78, 22)
+$durationLabel.TextAlign = 'TopRight'
+$durationLabel.BackColor = $surfaceColor
+$durationLabel.Anchor = "Top, Right"
+$form.Controls.Add($durationLabel)
 
 $progressBar = New-Object System.Windows.Forms.ProgressBar
 $progressBar.Location = New-Object System.Drawing.Point(30, 554)
 $progressBar.Size = New-Object System.Drawing.Size(660, 8)
 $progressBar.Anchor = "Top, Left, Right"
 $progressBar.Style = "Blocks"
+$progressBar.MarqueeAnimationSpeed = 0
 $form.Controls.Add($progressBar)
 
 $resultLabel = New-Object System.Windows.Forms.Label
@@ -880,6 +984,13 @@ $form.Controls.Add($cancelButton)
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 350
 
+$ejectTimer = New-Object System.Windows.Forms.Timer
+$ejectTimer.Interval = 3500
+$ejectTimer.Add_Tick({
+    $ejectTimer.Stop()
+    Complete-DelayedAutoEject
+})
+
 function Update-ResultOverview {
     # Ergaenzt die Ergebnisuebersicht im Leerlauf um die aktuelle Auswahl.
     # Waehrend eines laufenden Vorgangs gehoert die Anzeige dem Fortschritt.
@@ -893,12 +1004,95 @@ function Update-ResultOverview {
     $resultBox.Text = "{0}{1}{2}" -f $script:resultSummary, [Environment]::NewLine, $selectionLine
 }
 
+function Add-ResultLine {
+    param([string]$Text)
+
+    if (-not $Text) { return }
+    if ($script:backupProcess) {
+        $resultBox.Text = "{0}{1}{2}" -f $resultBox.Text, [Environment]::NewLine, $Text
+        $script:resultSummary = $resultBox.Text
+    } else {
+        $script:resultSummary = "{0}{1}{2}" -f $script:resultSummary, [Environment]::NewLine, $Text
+        Update-ResultOverview
+    }
+}
+
+function Request-DelayedAutoEject {
+    param([string]$Drive)
+
+    if (-not $Drive) { return }
+    $script:pendingEjectDrive = $Drive
+    $script:ejectAttemptsRemaining = 3
+    $statusLabel.Text = L "Sicherung erfolgreich. Automatischer Auswurf wird vorbereitet ..." "Backup completed. Preparing automatic eject ..."
+    Add-ResultLine (L "Automatischer Auswurf wird in wenigen Sekunden versucht." "Automatic eject will be attempted in a few seconds.")
+    $startButton.Enabled = $false
+    $refreshButton.Enabled = $false
+    $driveCombo.Enabled = $false
+    $backupRadio.Enabled = $false
+    $restoreRadio.Enabled = $false
+    $libraryList.Enabled = $false
+    $allButton.Enabled = $false
+    $noneButton.Enabled = $false
+    Update-BackupOptionState
+    $ejectTimer.Stop()
+    $ejectTimer.Start()
+}
+
+function Complete-DelayedAutoEject {
+    if (-not $script:pendingEjectDrive) { return }
+
+    $driveToEject = $script:pendingEjectDrive
+    $statusLabel.Text = L "Laufwerk wird sicher ausgeworfen ..." "Safely ejecting drive ..."
+
+    $ejectResult = Dismount-BackupDriveSafely -Drive $driveToEject
+    if ($ejectResult.Success) {
+        $script:pendingEjectDrive = $null
+        $script:ejectAttemptsRemaining = 0
+        $statusLabel.Text = L "Sicherung erfolgreich abgeschlossen. Laufwerk kann entfernt werden." "Backup completed successfully. The drive can be removed."
+        Add-ResultLine $ejectResult.Message
+        Update-DriveList
+    } else {
+        $script:ejectAttemptsRemaining--
+        if ($script:ejectAttemptsRemaining -gt 0) {
+            $statusLabel.Text = L "Laufwerk ist noch beschäftigt. Auswurf wird erneut versucht ..." "Drive is still busy. Retrying eject ..."
+            Add-ResultLine (L "Auswurf war noch nicht möglich. Neuer Versuch folgt." "Eject was not possible yet. Retrying.")
+            $ejectTimer.Start()
+            return
+        }
+        $script:pendingEjectDrive = $null
+        $statusLabel.Text = L "Sicherung erfolgreich, Auswurf konnte nicht abgeschlossen werden." "Backup succeeded, but eject could not be completed."
+        Add-ResultLine (L "Auswurf fehlgeschlagen. Bitte Laufwerk manuell sicher entfernen." "Eject failed. Safely remove the drive manually.")
+        if (-not $script:ejectDialogOpen) {
+            $script:ejectDialogOpen = $true
+            try {
+                [System.Windows.Forms.MessageBox]::Show(
+                    ((L "Die Sicherung war erfolgreich, aber das Laufwerk konnte nicht automatisch ausgeworfen werden:`r`n{0}" "The backup succeeded, but the drive could not be ejected automatically:`r`n{0}") -f $ejectResult.Message),
+                    $form.Text,
+                    'OK',
+                    'Warning'
+                ) | Out-Null
+            } finally {
+                $script:ejectDialogOpen = $false
+            }
+        }
+    }
+    $refreshButton.Enabled = $true
+    $driveCombo.Enabled = $true
+    $backupRadio.Enabled = $true
+    $restoreRadio.Enabled = $true
+    $libraryList.Enabled = $true
+    $allButton.Enabled = $true
+    $noneButton.Enabled = $true
+    Update-SelectionState
+    Update-BackupOptionState
+}
+
 function Update-SelectionState {
     $count = $libraryList.CheckedItems.Count
-    $startButton.Enabled = ($count -gt 0 -and $null -ne $driveCombo.SelectedItem -and -not $script:backupProcess)
+    $startButton.Enabled = ($count -gt 0 -and $null -ne $driveCombo.SelectedItem -and -not $script:backupProcess -and -not $script:pendingEjectDrive)
     $selectedItem = $libraryList.SelectedItem
     $removeFolderButton.Enabled = $backupRadio.Checked -and $selectedItem -and
-        $selectedItem.PSObject.Properties['IsCustom'] -and $selectedItem.IsCustom -and -not $script:backupProcess
+        $selectedItem.PSObject.Properties['IsCustom'] -and $selectedItem.IsCustom -and -not $script:backupProcess -and -not $script:pendingEjectDrive
     Update-ResultOverview
 }
 
@@ -910,13 +1104,13 @@ function Update-BackupOptionState {
         $isInternalDrive = $selectedDisk -and $selectedDisk.DriveType -eq 3
     }
 
-    $dryRunCheckBox.Enabled = $isBackup -and -not $script:backupProcess
+    $dryRunCheckBox.Enabled = $isBackup -and -not $script:backupProcess -and -not $script:pendingEjectDrive
     if (-not $isBackup) { $dryRunCheckBox.Checked = $false }
 
-    $ejectCheckBox.Enabled = $isBackup -and -not $isInternalDrive -and -not $script:backupProcess
+    $ejectCheckBox.Enabled = $isBackup -and -not $isInternalDrive -and -not $script:backupProcess -and -not $script:pendingEjectDrive
     if (-not $isBackup -or $isInternalDrive) { $ejectCheckBox.Checked = $false }
 
-    $addFolderButton.Enabled = $isBackup -and -not $script:backupProcess
+    $addFolderButton.Enabled = $isBackup -and -not $script:backupProcess -and -not $script:pendingEjectDrive
     $removeFolderButton.Visible = $isBackup
     $addFolderButton.Visible = $isBackup
     Update-SelectionState
@@ -1068,6 +1262,7 @@ function Update-DriveList {
 }
 
 $driveCombo.Add_SelectedIndexChanged({
+    if ($script:pendingEjectDrive) { return }
     if ($driveCombo.SelectedItem) {
         $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
         $sizeGb = [math]::Round($disk.Size / 1GB, 1)
@@ -1087,7 +1282,10 @@ $driveCombo.Add_SelectedIndexChanged({
     }
 })
 
-$refreshButton.Add_Click({ Update-DriveList })
+$refreshButton.Add_Click({
+    if ($script:pendingEjectDrive) { return }
+    Update-DriveList
+})
 
 $backupRadio.Add_CheckedChanged({
     if ($backupRadio.Checked) { Update-LibraryList; Update-BackupOptionState }
@@ -1097,6 +1295,10 @@ $restoreRadio.Add_CheckedChanged({
 })
 
 $startButton.Add_Click({
+    if ($script:pendingEjectDrive) {
+        [System.Windows.Forms.MessageBox]::Show((L "Der automatische Auswurf läuft noch. Bitte warten Sie einen Moment." "Automatic eject is still in progress. Please wait a moment."), $form.Text, "OK", "Information") | Out-Null
+        return
+    }
     if (-not $driveCombo.SelectedItem) {
         [System.Windows.Forms.MessageBox]::Show((L "Bitte wählen Sie ein Ziellaufwerk." "Please select a drive."), $form.Text, "OK", "Warning") | Out-Null
         return
@@ -1131,7 +1333,7 @@ $startButton.Add_Click({
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     }
     $drive = $disk.DeviceID
-    $selectedFolders = @($libraryList.CheckedItems | ForEach-Object {
+    $selectedFolders = @(Get-CheckedFolderItems | ForEach-Object {
         [pscustomobject]@{
             Name = [string]$_.Name
             Path = if ($_.Path) { [string]$_.Path } else { $null }
@@ -1145,14 +1347,18 @@ $startButton.Add_Click({
     $script:approvalFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.approve" -f [guid]::NewGuid().ToString("N"))
     $script:selectedFoldersFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.folders.json" -f [guid]::NewGuid().ToString("N"))
     $script:lastLogDir = Join-Path $drive ("Bibliothekssicherung\{0}_{1}\_logs" -f $env:COMPUTERNAME, $env:USERNAME)
+    $script:lastLogFile = $null
     $script:lastDestination = Join-Path $drive ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
     $script:backupStartedAt = Get-Date
     $script:backupCancelled = $false
+    $script:preCancelStatusText = $null
+    $script:preCancelResultText = $null
     $script:activeDrive = $disk
     $script:activeDryRun = $backupRadio.Checked -and $dryRunCheckBox.Checked
     $script:autoEjectRequested = $backupRadio.Checked -and $ejectCheckBox.Checked -and $disk.DriveType -eq 2
     $script:restorePreviewShown = $false
     $script:scanWarningShown = $false
+    Update-ElapsedDuration
     $cancelButton.Text = if ($restoreRadio.Checked) { L "Wiederherstellung abbrechen" "Cancel restore" } else { L "Sicherung abbrechen" "Cancel backup" }
     $logButton.Enabled = $false
     $destinationButton.Enabled = $false
@@ -1165,10 +1371,8 @@ $startButton.Add_Click({
     } else {
         L "Sicherung wird gestartet ..." "Starting backup ..."
     }
-    $progressBar.Style = "Blocks"
-    $progressBar.Minimum = 0
-    $progressBar.Maximum = [math]::Max(1, $selectedFolders.Count)
-    $progressBar.Value = 0
+    Reset-ProgressIndicator -Maximum $selectedFolders.Count
+    Start-BusyProgress
     $startButton.Enabled = $false
     $refreshButton.Enabled = $false
     $backupRadio.Enabled = $false
@@ -1227,7 +1431,7 @@ $startButton.Add_Click({
             try { $script:backupProcess.Dispose() } catch {}
             $script:backupProcess = $null
         }
-        $progressBar.Style = "Blocks"
+        Reset-ProgressIndicator -Maximum $selectedFolders.Count
         $startButton.Enabled = $true
         $refreshButton.Enabled = $true
         $backupRadio.Enabled = $true
@@ -1256,12 +1460,16 @@ $startButton.Add_Click({
         $script:activeMode = $null
         $script:activeDryRun = $false
         $script:autoEjectRequested = $false
+        $script:backupStartedAt = $null
+        Update-ElapsedDuration
         Update-BackupOptionState
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, (L "Fehler" "Error"), "OK", "Error") | Out-Null
     }
 })
 
 $timer.Add_Tick({
+    Update-ElapsedDuration
+
     if ($script:statusFile -and (Test-Path -LiteralPath $script:statusFile)) {
         try {
             $status = (Get-Content -LiteralPath $script:statusFile -Raw -ErrorAction Stop).Trim()
@@ -1326,16 +1534,18 @@ $timer.Add_Tick({
                         }
                     }
                     "PRUEFUNG" {
+                        Start-BusyProgress
                         $displayFolder = Get-FolderDisplayName $parts[3]
                         $statusLabel.Text = if ($script:isGerman) { "Prüfe Ordner $($parts[1]) von $($parts[2]): $displayFolder" } else { "Checking folder $($parts[1]) of $($parts[2]): $displayFolder" }
                         $resultBox.Text = L "Dateien und benötigter Speicherplatz werden geprüft ..." "Checking files and required disk space ..."
                     }
                     "FORTSCHRITT" {
+                        Start-BusyProgress
                         $current = [int]$parts[1]
                         $total = [int]$parts[2]
+                        $script:lastProgressCurrent = $current
+                        $script:lastProgressTotal = [math]::Max(1, $total)
                         $name = Get-FolderDisplayName $parts[3]
-                        $progressBar.Maximum = [math]::Max(1, $total)
-                        $progressBar.Value = [math]::Min($current - 1, $progressBar.Maximum)
                         $statusLabel.Text = if ($restoreRadio.Checked) {
                             if ($script:isGerman) { "Ordner $current von $total wird wiederhergestellt: $name" } else { "Restoring folder $current of $total`: $name" }
                         } elseif ($script:activeDryRun) {
@@ -1344,8 +1554,14 @@ $timer.Add_Tick({
                             if ($script:isGerman) { "Ordner $current von $total wird gesichert: $name" } else { "Backing up folder $current of $total`: $name" }
                         }
                     }
-                    "STATUS" { $statusLabel.Text = if ($restoreRadio.Checked) { L "Wiederherstellung wird vorbereitet ..." "Preparing restore ..." } elseif ($script:activeDryRun) { L "Simulation wird vorbereitet ..." "Preparing simulation ..." } else { L "Sicherung wird vorbereitet ..." "Preparing backup ..." } }
-                    "FERTIG" { $statusLabel.Text = if ($restoreRadio.Checked) { L "Wiederherstellung erfolgreich abgeschlossen." "Restore completed successfully." } elseif ($script:activeDryRun) { L "Simulation erfolgreich abgeschlossen." "Simulation completed successfully." } else { L "Sicherung erfolgreich abgeschlossen." "Backup completed successfully." } }
+                    "STATUS" {
+                        Start-BusyProgress
+                        $statusLabel.Text = if ($restoreRadio.Checked) { L "Wiederherstellung wird vorbereitet ..." "Preparing restore ..." } elseif ($script:activeDryRun) { L "Simulation wird vorbereitet ..." "Preparing simulation ..." } else { L "Sicherung wird vorbereitet ..." "Preparing backup ..." }
+                    }
+                    "FERTIG" {
+                        Stop-BusyProgress
+                        $statusLabel.Text = if ($restoreRadio.Checked) { L "Wiederherstellung erfolgreich abgeschlossen." "Restore completed successfully." } elseif ($script:activeDryRun) { L "Simulation erfolgreich abgeschlossen." "Simulation completed successfully." } else { L "Sicherung erfolgreich abgeschlossen." "Backup completed successfully." }
+                    }
                     "FEHLER" { $statusLabel.Text = $parts[1] }
                     "ABGEBROCHEN" { $statusLabel.Text = L "Vorgang wurde abgebrochen." "Operation was cancelled." }
                 }
@@ -1357,10 +1573,16 @@ $timer.Add_Tick({
 
     if ($script:backupProcess) {
         $script:backupProcess.Refresh()
+        if ($script:backupCancelled -and -not $script:backupProcess.HasExited) {
+            $statusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
+            $statusLabel.Text = L "Abbruch läuft – bitte warten ..." "Cancellation in progress - please wait ..."
+            Set-CancellationPendingOverview
+        }
         if ($script:backupProcess.HasExited) {
             $exitCode = $script:backupProcess.ExitCode
             $timer.Stop()
-            $progressBar.Style = "Blocks"
+            Set-ProgressFromLastStatus
+            Update-ElapsedDuration
             $startButton.Enabled = $true
             $refreshButton.Enabled = $true
             $backupRadio.Enabled = $true
@@ -1375,14 +1597,17 @@ $timer.Add_Tick({
             $cancelButton.Visible = $false
             $form.AcceptButton = $closeButton
 
-            $newestLog = Get-NewestLogFile
-            $logButton.Enabled = $null -ne $newestLog
-            $destinationButton.Enabled = $script:lastDestination -and (Test-Path -LiteralPath $script:lastDestination)
-
             $result = $null
             if ($script:resultFile -and (Test-Path -LiteralPath $script:resultFile)) {
                 try { $result = Get-Content -LiteralPath $script:resultFile -Raw | ConvertFrom-Json } catch {}
             }
+            if ($result -and $result.LogFile -and (Test-Path -LiteralPath ([string]$result.LogFile) -PathType Leaf)) {
+                $script:lastLogFile = [string]$result.LogFile
+            }
+
+            $newestLog = Get-NewestLogFile
+            $logButton.Enabled = $null -ne $newestLog
+            $destinationButton.Enabled = $script:lastDestination -and (Test-Path -LiteralPath $script:lastDestination)
 
             if ($script:backupCancelled) {
                 $statusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
@@ -1390,7 +1615,7 @@ $timer.Add_Tick({
                 $resultBox.Text = L "Vom Benutzer abgebrochen. Bereits kopierte Dateien bleiben erhalten." "Cancelled by the user. Files already copied remain in place."
             } elseif ($exitCode -eq 0) {
                 $elapsed = (Get-Date) - $script:backupStartedAt
-                $duration = if ($elapsed.TotalHours -ge 1) { "{0:hh\:mm\:ss}" -f $elapsed } else { "{0:mm\:ss}" -f $elapsed }
+                $duration = Format-ElapsedDuration $elapsed
                 $statusLabel.ForeColor = [System.Drawing.Color]::DarkGreen
                 $isRestore = $result -and $result.Mode -eq 'Restore'
                 $isDryRun = $result -and $result.DryRun
@@ -1428,27 +1653,24 @@ $timer.Add_Tick({
                     }
                 }
                 if ($script:autoEjectRequested -and $script:activeDrive -and $script:activeDrive.DriveType -eq 2 -and -not $isDryRun -and -not $isRestore) {
-                    $ejectResult = Dismount-BackupDriveSafely -Drive $script:activeDrive.DeviceID
-                    if ($ejectResult.Success) {
-                        $statusLabel.Text = L "Sicherung erfolgreich abgeschlossen. Laufwerk kann entfernt werden." "Backup completed successfully. The drive can be removed."
-                        $resultBox.Text = "{0}{1}{2}" -f $resultBox.Text, [Environment]::NewLine, $ejectResult.Message
-                        Update-DriveList
-                    } else {
-                        $statusLabel.Text = L "Sicherung erfolgreich, Auswurf konnte nicht abgeschlossen werden." "Backup succeeded, but eject could not be completed."
-                        $resultBox.Text = "{0}{1}{2}" -f $resultBox.Text, [Environment]::NewLine, (L "Auswurf fehlgeschlagen. Bitte Laufwerk manuell sicher entfernen." "Eject failed. Safely remove the drive manually.")
-                        [System.Windows.Forms.MessageBox]::Show(
-                            ((L "Die Sicherung war erfolgreich, aber das Laufwerk konnte nicht automatisch ausgeworfen werden:`r`n{0}" "The backup succeeded, but the drive could not be ejected automatically:`r`n{0}") -f $ejectResult.Message),
-                            $form.Text,
-                            'OK',
-                            'Warning'
-                        ) | Out-Null
-                    }
+                    Request-DelayedAutoEject -Drive $script:activeDrive.DeviceID
                 }
             } else {
                 $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
                 $statusLabel.Text = (L "Vorgang mit Fehlern beendet (Exit-Code {0})." "Operation finished with errors (exit code {0}).") -f $exitCode
-                $resultBox.Text = if ($result -and $result.Message) { $result.Message } else { L "Details finden Sie im Protokoll." "See the log for details." }
-                $errorText = (L "Der Vorgang wurde mit Fehlern beendet.`r`nExit-Code: {0}`r`nBitte prüfen Sie die Logdatei." "The operation finished with errors.`r`nExit code: {0}`r`nPlease review the log file.") -f $exitCode
+                $resultBox.Text = if ($result -and $result.Message) {
+                    $result.Message
+                } elseif ($newestLog) {
+                    L "Details finden Sie im Protokoll." "See the log for details."
+                } else {
+                    L "Es wurde keine Logdatei erstellt." "No log file was created."
+                }
+                $errorText = if ($newestLog) {
+                    (L "Der Vorgang wurde mit Fehlern beendet.`r`nExit-Code: {0}`r`nBitte prüfen Sie die Logdatei." "The operation finished with errors.`r`nExit code: {0}`r`nPlease review the log file.") -f $exitCode
+                } else {
+                    $detail = if ($result -and $result.Message) { [string]$result.Message } else { L "Es wurde keine Logdatei erstellt." "No log file was created." }
+                    (L "Der Vorgang wurde mit Fehlern beendet.`r`nExit-Code: {0}`r`n{1}" "The operation finished with errors.`r`nExit code: {0}`r`n{1}") -f $exitCode, $detail
+                }
                 [System.Windows.Forms.MessageBox]::Show($errorText, (L "Fehler" "Error"), "OK", "Error") | Out-Null
             }
 
@@ -1523,14 +1745,19 @@ $cancelButton.Add_Click({
     if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
 
     $script:backupCancelled = $true
+    $script:preCancelStatusText = $statusLabel.Text
+    $script:preCancelResultText = $resultBox.Text
     $cancelButton.Enabled = $false
     $statusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
-    $statusLabel.Text = L "Abbruch angefordert – der aktuelle Ordner wird noch sicher beendet ..." "Cancellation requested — the current folder will finish safely ..."
+    $statusLabel.Text = L "Abbruch angefordert - der aktuelle Ordner wird noch sicher beendet ..." "Cancellation requested - the current folder will finish safely ..."
+    Set-CancellationPendingOverview
     try {
         Set-Content -LiteralPath $script:cancelFile -Value 'cancel' -Encoding ASCII -ErrorAction Stop
     } catch {
         $script:backupCancelled = $false
         $cancelButton.Enabled = $true
+        if ($script:preCancelStatusText) { $statusLabel.Text = $script:preCancelStatusText }
+        if ($script:preCancelResultText) { $resultBox.Text = $script:preCancelResultText }
         [System.Windows.Forms.MessageBox]::Show((L "Der Abbruch konnte nicht angefordert werden." "Cancellation could not be requested."), $form.Text, "OK", "Error") | Out-Null
     }
 })
@@ -1539,9 +1766,14 @@ $closeButton.Add_Click({ $form.Close() })
 
 $form.Add_FormClosing({
     param($sender, $eventArgs)
-    if ($script:backupProcess -and -not $script:backupProcess.HasExited) {
+    if ($script:ejectDialogOpen) {
+        $eventArgs.Cancel = $true
+    } elseif ($script:backupProcess -and -not $script:backupProcess.HasExited) {
         $eventArgs.Cancel = $true
         [System.Windows.Forms.MessageBox]::Show((L "Der Vorgang läuft noch. Bitte warten Sie bis zum Abschluss." "The operation is still running. Please wait until it finishes."), $form.Text, "OK", "Warning") | Out-Null
+    } elseif ($script:pendingEjectDrive) {
+        $eventArgs.Cancel = $true
+        [System.Windows.Forms.MessageBox]::Show((L "Der automatische Auswurf wird gerade vorbereitet. Bitte warten Sie einen Moment." "Automatic eject is being prepared. Please wait a moment."), $form.Text, "OK", "Information") | Out-Null
     }
 })
 
@@ -1551,6 +1783,7 @@ $form.Add_FormClosed({
     if ($appIcon) { $appIcon.Dispose() }
     if ($healthToolTip) { $healthToolTip.Dispose() }
     if ($driveToolTip) { $driveToolTip.Dispose() }
+    if ($ejectTimer) { $ejectTimer.Dispose() }
 })
 
 # Beim Start liegt der Fokus auf "Sicherung starten", damit die Sicherung
