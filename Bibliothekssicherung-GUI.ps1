@@ -537,7 +537,7 @@ $form = New-Object System.Windows.Forms.Form
 $form.Text = L "Bibliothekssicherung" "Library Backup"
 if ($appVersion) { $form.Text = "{0} {1}" -f $form.Text, $appVersion }
 $form.StartPosition = "CenterScreen"
-$form.ClientSize = New-Object System.Drawing.Size(720, 714)
+$form.ClientSize = New-Object System.Drawing.Size(720, 698)
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedSingle
 $form.MaximizeBox = $false
 $form.MinimizeBox = $true
@@ -644,20 +644,20 @@ $restoreRadio.Location = New-Object System.Drawing.Point(($backupRadio.Left + $b
 $modePanel.Size = New-Object System.Drawing.Size(($restoreRadio.Left + $restoreRadio.GetPreferredSize([System.Drawing.Size]::Empty).Width + 14), 36)
 $modePanel.Location = New-Object System.Drawing.Point((690 - $modePanel.Width), 12)
 $helpButton.Location = New-Object System.Drawing.Point(($modePanel.Left - $helpButton.Width - 8), $modePanel.Top)
-$targetSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 86)) -Size (New-Object System.Drawing.Size(692, 108))
+$targetSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 86)) -Size (New-Object System.Drawing.Size(692, 92))
 
 $driveLabel = New-Object System.Windows.Forms.Label
 $driveLabel.Text = L "Ziellaufwerk:" "Destination drive:"
 $driveLabel.AutoSize = $true
 $driveLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$driveLabel.Location = New-Object System.Drawing.Point(30, 96)
+$driveLabel.Location = New-Object System.Drawing.Point(30, 104)
 $driveLabel.BackColor = $surfaceColor
 $form.Controls.Add($driveLabel)
 
 $driveCombo = New-Object System.Windows.Forms.ComboBox
 $driveCombo.DropDownStyle = "DropDownList"
-$driveCombo.Location = New-Object System.Drawing.Point(30, 118)
-$driveCombo.Size = New-Object System.Drawing.Size(549, 27)
+$driveCombo.Location = New-Object System.Drawing.Point(145, 98)
+$driveCombo.Size = New-Object System.Drawing.Size(434, 27)
 $driveCombo.Anchor = "Top, Left, Right"
 $driveCombo.TabIndex = 3
 $form.Controls.Add($driveCombo)
@@ -666,8 +666,8 @@ $driveToolTip = New-Object System.Windows.Forms.ToolTip
 
 $refreshButton = New-Object System.Windows.Forms.Button
 $refreshButton.Text = L "Aktualisieren" "Refresh"
-$refreshButton.Location = New-Object System.Drawing.Point(587, 116)
-$refreshButton.Size = New-Object System.Drawing.Size(103, 31)
+$refreshButton.Location = New-Object System.Drawing.Point(587, 98)
+$refreshButton.Size = New-Object System.Drawing.Size(103, 27)
 $refreshButton.BackColor = $surfaceColor
 $refreshButton.FlatStyle = 'Flat'
 $refreshButton.FlatAppearance.BorderColor = $buttonBorderColor
@@ -678,12 +678,12 @@ $form.Controls.Add($refreshButton)
 $driveInfoLabel = New-Object System.Windows.Forms.Label
 $driveInfoLabel.AutoSize = $true
 $driveInfoLabel.ForeColor = $secondaryTextColor
-$driveInfoLabel.Location = New-Object System.Drawing.Point(30, 151)
+$driveInfoLabel.Location = New-Object System.Drawing.Point(30, 133)
 $driveInfoLabel.BackColor = $surfaceColor
 $form.Controls.Add($driveInfoLabel)
 
 $healthPanel = New-Object System.Windows.Forms.Panel
-$healthPanel.Location = New-Object System.Drawing.Point(180, 147)
+$healthPanel.Location = New-Object System.Drawing.Point(180, 129)
 $healthPanel.Size = New-Object System.Drawing.Size(510, 25)
 $healthPanel.Anchor = 'Top, Left, Right'
 $healthPanel.BackColor = $surfaceColor
@@ -712,12 +712,21 @@ $healthPanel.Controls.Add($healthLabel)
 
 $healthToolTip = New-Object System.Windows.Forms.ToolTip
 function Update-BackupHealth {
+    $fat32Label.Visible = $false
+    $driveInfoLabel.Visible = $true
     if (-not $driveCombo.SelectedItem) {
         $healthPanel.Visible = $false
         return
     }
 
     $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+    $showFat32Warning = $backupRadio.Checked -and ([string]$disk.FileSystem).Equals('FAT32', [System.StringComparison]::OrdinalIgnoreCase)
+    $fat32Label.Visible = $showFat32Warning
+    $driveInfoLabel.Visible = -not $showFat32Warning
+    if ($showFat32Warning) {
+        $healthPanel.Visible = $false
+        return
+    }
     $health = Get-BackupHealth -Drive $disk.DeviceID
     $healthDot.Tag = switch ($health.Level) {
         'Green' { [System.Drawing.Color]::FromArgb(16, 124, 16) }
@@ -739,26 +748,26 @@ $fat32Label.ForeColor = [System.Drawing.Color]::FromArgb(128, 72, 0)
 $fat32Label.BackColor = [System.Drawing.Color]::FromArgb(255, 247, 224)
 $fat32Label.AutoSize = $false
 $fat32Label.TextAlign = 'MiddleLeft'
-$fat32Label.Location = New-Object System.Drawing.Point(30, 169)
+$fat32Label.Location = New-Object System.Drawing.Point(30, 129)
 $fat32Label.Size = New-Object System.Drawing.Size(660, 25)
 $fat32Label.Padding = New-Object System.Windows.Forms.Padding(10, 0, 0, 0)
 $fat32Label.Visible = $false
 $form.Controls.Add($fat32Label)
 
-$folderSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 202)) -Size (New-Object System.Drawing.Size(692, 224))
+$folderSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 186)) -Size (New-Object System.Drawing.Size(692, 224))
 
 $libraryLabel = New-Object System.Windows.Forms.Label
 $libraryLabel.Text = L "Diese Ordner werden gesichert:" "These folders will be backed up:"
 $libraryLabel.AutoSize = $true
 $libraryLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$libraryLabel.Location = New-Object System.Drawing.Point(30, 211)
+$libraryLabel.Location = New-Object System.Drawing.Point(30, 195)
 $libraryLabel.BackColor = $surfaceColor
 $form.Controls.Add($libraryLabel)
 $libraryList = New-Object System.Windows.Forms.CheckedListBox
 # Die Ordnernamen sind kurz; eine schmale, dafuer hoehere Liste zeigt alle
 # Eintraege ohne Scrollbalken. Alle/Keine und der Auswahlzaehler nutzen den
 # frei gewordenen Platz rechts daneben.
-$libraryList.Location = New-Object System.Drawing.Point(30, 234)
+$libraryList.Location = New-Object System.Drawing.Point(30, 218)
 $libraryList.Size = New-Object System.Drawing.Size(340, 184)
 $libraryList.Anchor = "Top, Left"
 $libraryList.CheckOnClick = $true
@@ -773,7 +782,7 @@ foreach ($folder in Get-LibraryDefinitions) {
 
 $allButton = New-Object System.Windows.Forms.Button
 $allButton.Text = L "Alle" "All"
-$allButton.Location = New-Object System.Drawing.Point(384, 234)
+$allButton.Location = New-Object System.Drawing.Point(384, 218)
 $allButton.Size = New-Object System.Drawing.Size(50, 27)
 $allButton.FlatStyle = 'Flat'
 $allButton.FlatAppearance.BorderSize = 1
@@ -785,7 +794,7 @@ $form.Controls.Add($allButton)
 
 $noneButton = New-Object System.Windows.Forms.Button
 $noneButton.Text = L "Keine" "None"
-$noneButton.Location = New-Object System.Drawing.Point(440, 234)
+$noneButton.Location = New-Object System.Drawing.Point(440, 218)
 $noneButton.Size = New-Object System.Drawing.Size(50, 27)
 $noneButton.FlatStyle = 'Flat'
 $noneButton.FlatAppearance.BorderSize = 1
@@ -797,7 +806,7 @@ $form.Controls.Add($noneButton)
 
 $addFolderButton = New-Object System.Windows.Forms.Button
 $addFolderButton.Text = L "Hinzufügen" "Add folder"
-$addFolderButton.Location = New-Object System.Drawing.Point(384, 271)
+$addFolderButton.Location = New-Object System.Drawing.Point(384, 255)
 $addFolderButton.Size = New-Object System.Drawing.Size(106, 27)
 $addFolderButton.TextAlign = 'MiddleCenter'
 $addFolderButton.FlatStyle = 'Flat'
@@ -810,7 +819,7 @@ $form.Controls.Add($addFolderButton)
 
 $removeFolderButton = New-Object System.Windows.Forms.Button
 $removeFolderButton.Text = L "Entfernen" "Remove"
-$removeFolderButton.Location = New-Object System.Drawing.Point(384, 308)
+$removeFolderButton.Location = New-Object System.Drawing.Point(384, 292)
 $removeFolderButton.Size = New-Object System.Drawing.Size(106, 27)
 $removeFolderButton.FlatStyle = 'Flat'
 $removeFolderButton.FlatAppearance.BorderSize = 1
@@ -825,7 +834,7 @@ $form.Controls.Add($removeFolderButton)
 # in voller Hoehe von Beschriftung und Liste.
 # Es ist optional: Fehlt die Datei, bleibt die Flaeche einfach leer.
 $logoBox = New-Object System.Windows.Forms.PictureBox
-$logoBox.Location = New-Object System.Drawing.Point(503, 211)
+$logoBox.Location = New-Object System.Drawing.Point(503, 195)
 $logoBox.Size = New-Object System.Drawing.Size(187, 207)
 $logoBox.SizeMode = 'Zoom'
 $logoBox.BackColor = $surfaceColor
@@ -846,36 +855,36 @@ if (Test-Path -LiteralPath $logoFile -PathType Leaf) {
 }
 $form.Controls.Add($logoBox)
 
-$optionsSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 434)) -Size (New-Object System.Drawing.Size(692, 34))
+$optionsSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 418)) -Size (New-Object System.Drawing.Size(692, 34))
 
 $dryRunCheckBox = New-Object System.Windows.Forms.CheckBox
 $dryRunCheckBox.Text = L "Nur simulieren (Dry-Run)" "Simulate only (dry run)"
 $dryRunCheckBox.AutoSize = $true
-$dryRunCheckBox.Location = New-Object System.Drawing.Point(30, 442)
+$dryRunCheckBox.Location = New-Object System.Drawing.Point(30, 426)
 $dryRunCheckBox.BackColor = $surfaceColor
 $dryRunCheckBox.TabIndex = 10
 $form.Controls.Add($dryRunCheckBox)
 $ejectCheckBox = New-Object System.Windows.Forms.CheckBox
 $ejectCheckBox.Text = L "Laufwerk nach Erfolg sicher auswerfen" "Safely eject drive after success"
 $ejectCheckBox.AutoSize = $true
-$ejectCheckBox.Location = New-Object System.Drawing.Point(285, 442)
+$ejectCheckBox.Location = New-Object System.Drawing.Point(285, 426)
 $ejectCheckBox.BackColor = $surfaceColor
 $ejectCheckBox.TabIndex = 11
 $form.Controls.Add($ejectCheckBox)
-$activitySurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 476)) -Size (New-Object System.Drawing.Size(692, 148))
+$activitySurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 460)) -Size (New-Object System.Drawing.Size(692, 148))
 
 $statusCaption = New-Object System.Windows.Forms.Label
 $statusCaption.Text = "Status:"
 $statusCaption.AutoSize = $true
 $statusCaption.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$statusCaption.Location = New-Object System.Drawing.Point(30, 486)
+$statusCaption.Location = New-Object System.Drawing.Point(30, 470)
 $statusCaption.BackColor = $surfaceColor
 $form.Controls.Add($statusCaption)
 
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = L "Bereit." "Ready."
 $statusLabel.AutoEllipsis = $true
-$statusLabel.Location = New-Object System.Drawing.Point(82, 486)
+$statusLabel.Location = New-Object System.Drawing.Point(82, 470)
 $statusLabel.Size = New-Object System.Drawing.Size(455, 22)
 $statusLabel.BackColor = $surfaceColor
 $statusLabel.Anchor = "Top, Left, Right"
@@ -885,14 +894,14 @@ $durationCaption = New-Object System.Windows.Forms.Label
 $durationCaption.Text = L "Dauer:" "Elapsed:"
 $durationCaption.AutoSize = $true
 $durationCaption.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$durationCaption.Location = New-Object System.Drawing.Point(552, 486)
+$durationCaption.Location = New-Object System.Drawing.Point(552, 470)
 $durationCaption.BackColor = $surfaceColor
 $durationCaption.Anchor = "Top, Right"
 $form.Controls.Add($durationCaption)
 
 $durationLabel = New-Object System.Windows.Forms.Label
 $durationLabel.Text = "--:--"
-$durationLabel.Location = New-Object System.Drawing.Point(612, 486)
+$durationLabel.Location = New-Object System.Drawing.Point(612, 470)
 $durationLabel.Size = New-Object System.Drawing.Size(78, 22)
 $durationLabel.TextAlign = 'TopRight'
 $durationLabel.BackColor = $surfaceColor
@@ -900,7 +909,7 @@ $durationLabel.Anchor = "Top, Right"
 $form.Controls.Add($durationLabel)
 
 $progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(30, 512)
+$progressBar.Location = New-Object System.Drawing.Point(30, 496)
 $progressBar.Size = New-Object System.Drawing.Size(660, 8)
 $progressBar.Anchor = "Top, Left, Right"
 $progressBar.Style = "Blocks"
@@ -911,12 +920,12 @@ $resultLabel = New-Object System.Windows.Forms.Label
 $resultLabel.Text = L "Ergebnisübersicht:" "Summary:"
 $resultLabel.AutoSize = $true
 $resultLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$resultLabel.Location = New-Object System.Drawing.Point(30, 528)
+$resultLabel.Location = New-Object System.Drawing.Point(30, 512)
 $resultLabel.BackColor = $surfaceColor
 $form.Controls.Add($resultLabel)
 
 $resultBox = New-Object System.Windows.Forms.TextBox
-$resultBox.Location = New-Object System.Drawing.Point(30, 548)
+$resultBox.Location = New-Object System.Drawing.Point(30, 532)
 $resultBox.Size = New-Object System.Drawing.Size(660, 64)
 $resultBox.Anchor = "Top, Left, Right"
 $resultBox.Multiline = $true
@@ -928,11 +937,11 @@ $script:resultSummary = L "Noch keine Sicherung ausgeführt." "No backup has bee
 $resultBox.Text = $script:resultSummary
 $form.Controls.Add($resultBox)
 
-$footerSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(0, 632)) -Size (New-Object System.Drawing.Size(720, 82)) -Anchor 'Top, Left, Right'
+$footerSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(0, 616)) -Size (New-Object System.Drawing.Size(720, 82)) -Anchor 'Top, Left, Right'
 
 $startButton = New-Object System.Windows.Forms.Button
 $startButton.Text = L "Sicherung starten" "Start backup"
-$startButton.Location = New-Object System.Drawing.Point(30, 652)
+$startButton.Location = New-Object System.Drawing.Point(30, 636)
 $startButton.Size = New-Object System.Drawing.Size(175, 40)
 $startButton.BackColor = $accentColor
 $startButton.ForeColor = $accentTextColor
@@ -947,7 +956,7 @@ $form.AcceptButton = $startButton
 
 $logButton = New-Object System.Windows.Forms.Button
 $logButton.Text = L "Protokoll öffnen" "Open log"
-$logButton.Location = New-Object System.Drawing.Point(213, 652)
+$logButton.Location = New-Object System.Drawing.Point(213, 636)
 $logButton.Size = New-Object System.Drawing.Size(145, 40)
 $logButton.BackColor = [System.Drawing.Color]::White
 $logButton.FlatStyle = "Flat"
@@ -963,7 +972,7 @@ $form.Controls.Add($logButton)
 $closeButton = New-Object System.Windows.Forms.Button
 $destinationButton = New-Object System.Windows.Forms.Button
 $destinationButton.Text = L "Sicherungsordner öffnen" "Open backup folder"
-$destinationButton.Location = New-Object System.Drawing.Point(366, 652)
+$destinationButton.Location = New-Object System.Drawing.Point(366, 636)
 $destinationButton.Size = New-Object System.Drawing.Size(181, 40)
 $destinationButton.BackColor = [System.Drawing.Color]::White
 $destinationButton.FlatStyle = "Flat"
@@ -977,7 +986,7 @@ $destinationButton.TabIndex = 10
 $form.Controls.Add($destinationButton)
 
 $closeButton.Text = L "Schließen" "Close"
-$closeButton.Location = New-Object System.Drawing.Point(555, 652)
+$closeButton.Location = New-Object System.Drawing.Point(555, 636)
 $closeButton.Size = New-Object System.Drawing.Size(135, 40)
 $closeButton.BackColor = [System.Drawing.Color]::White
 $closeButton.FlatStyle = "Flat"
@@ -991,7 +1000,7 @@ $form.Controls.Add($closeButton)
 
 $cancelButton = New-Object System.Windows.Forms.Button
 $cancelButton.Text = L "Sicherung abbrechen" "Cancel backup"
-$cancelButton.Location = New-Object System.Drawing.Point(30, 652)
+$cancelButton.Location = New-Object System.Drawing.Point(30, 636)
 $cancelButton.Size = New-Object System.Drawing.Size(175, 40)
 $cancelButton.BackColor = [System.Drawing.Color]::White
 $cancelButton.ForeColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
@@ -1161,7 +1170,6 @@ function Update-LibraryList {
         $driveLabel.Text = L "Sicherungslaufwerk:" "Backup drive:"
         $libraryLabel.Text = L "Diese Ordner sind in der Sicherung verfügbar:" "These folders are available in the backup:"
         $startButton.Text = L "Wiederherstellung prüfen" "Review restore"
-        $fat32Label.Visible = $false
     } else {
         $items += @(Get-LibraryDefinitions | ForEach-Object {
             $checked = if ($script:folderCheckStates.ContainsKey([string]$_.Name)) { [bool]$script:folderCheckStates[[string]$_.Name] } else { $true }
@@ -1173,10 +1181,6 @@ function Update-LibraryList {
         $driveLabel.Text = L "Ziellaufwerk:" "Destination drive:"
         $libraryLabel.Text = L "Diese Ordner werden gesichert:" "These folders will be backed up:"
         $startButton.Text = L "Sicherung starten" "Start backup"
-        if ($driveCombo.SelectedItem) {
-            $selectedDisk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
-            $fat32Label.Visible = $selectedDisk.FileSystem -eq 'FAT32'
-        }
     }
     foreach ($item in $items) {
         [void]$libraryList.Items.Add($item, [bool]$item.Checked)
@@ -1294,8 +1298,6 @@ $driveCombo.Add_SelectedIndexChanged({
         $sizeGb = [math]::Round($disk.Size / 1GB, 1)
         $fileSystem = if ($disk.FileSystem) { $disk.FileSystem } else { L "unbekannt" "unknown" }
         $driveInfoLabel.Text = (L "{0:N1} GB gesamt · {1}" "{0:N1} GB total · {1}") -f $sizeGb, $fileSystem
-        $fat32Label.Visible = $fileSystem -eq "FAT32"
-        if ($restoreRadio.Checked) { $fat32Label.Visible = $false }
         $driveToolTip.SetToolTip($driveCombo, $(if (Test-IsKnownBackupDrive -Disk $disk) {
             L 'Bekanntes Sicherungslaufwerk – wird automatisch ausgewählt.' 'Known backup drive — selected automatically.'
         } else {
@@ -1314,10 +1316,10 @@ $refreshButton.Add_Click({
 })
 
 $backupRadio.Add_CheckedChanged({
-    if ($backupRadio.Checked) { Update-LibraryList; Update-BackupOptionState }
+    if ($backupRadio.Checked) { Update-LibraryList; Update-BackupOptionState; Update-BackupHealth }
 })
 $restoreRadio.Add_CheckedChanged({
-    if ($restoreRadio.Checked) { Update-LibraryList; Update-BackupOptionState }
+    if ($restoreRadio.Checked) { Update-LibraryList; Update-BackupOptionState; Update-BackupHealth }
 })
 
 $startButton.Add_Click({
