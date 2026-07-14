@@ -81,6 +81,17 @@ function Write-AtomicTextFile {
     }
 }
 
+function Exit-OperationLock {
+    if ($script:operationLockStream) {
+        try { $script:operationLockStream.Dispose() } catch {}
+        $script:operationLockStream = $null
+    }
+    if ($script:operationLockFile) {
+        Remove-Item -LiteralPath $script:operationLockFile -Force -ErrorAction SilentlyContinue
+        $script:operationLockFile = $null
+    }
+}
+
 trap {
     $trapLogFile = $null
     $logVariable = Get-Variable -Name logFile -ErrorAction SilentlyContinue
@@ -117,6 +128,7 @@ trap {
     Write-Host (M "Der Vorgang konnte nicht abgeschlossen werden." "The operation could not be completed.")
     Write-Host ((M "Grund: {0}" "Reason: {0}") -f $_.Exception.Message)
     Write-Host (M "Bitte pruefen Sie Laufwerk und Auswahl und starten Sie den Vorgang erneut." "Check the drive and selection, then start the operation again.")
+    Exit-OperationLock
     exit 10
 }
 
@@ -126,6 +138,17 @@ if (-not $Silent) {
 
 if ($Threads -lt 1 -or $Threads -gt 128) {
     throw (M "Der Parameter -Threads muss zwischen 1 und 128 liegen." "The -Threads parameter must be between 1 and 128.")
+}
+
+function Set-BackupResultMetadata {
+    param(
+        [string]$Path,
+        [string]$Result
+    )
+
+    $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop | Where-Object { $_ -notlike 'Ergebnis:*' })
+    $content = (@($lines) + "Ergebnis: $Result am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss').") -join [Environment]::NewLine
+    Write-AtomicTextFile -Path $Path -Content ($content + [Environment]::NewLine)
 }
 if ($DryRun -and $Mode -ne 'Backup') {
     throw (M "Dry-Run ist nur fuer Sicherungen verfuegbar." "Dry run is only available for backups.")
@@ -426,6 +449,17 @@ function Assert-BackupIdentity {
     }
 }
 
+function Assert-BackupCompletedSuccessfully {
+    param([string]$MetadataFile)
+
+    $resultLine = Get-Content -LiteralPath $MetadataFile -ErrorAction Stop |
+        Where-Object { $_ -like 'Ergebnis:*' } |
+        Select-Object -Last 1
+    if (-not $resultLine -or $resultLine -notmatch '^Ergebnis:\s*Erfolgreich abgeschlossen\s+am\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.?$') {
+        throw (M 'Die letzte Sicherung wurde nicht erfolgreich abgeschlossen. Eine sichere Wiederherstellung ist nicht moeglich.' 'The last backup did not complete successfully. A safe restore is not possible.')
+    }
+}
+
 function Test-IsReservedBackupName {
     param([string]$Name)
     if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
@@ -443,6 +477,43 @@ function Assert-ValidBackupFolderName {
             throw ((M "Der Ordnername '{0}' enthaelt ungueltige Zeichen." "Folder name '{0}' contains invalid characters.") -f $Name)
         }
     }
+}
+
+function Assert-SafeRestoreTargetPath {
+    param(
+        [string]$Name,
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Path]::IsPathRooted($Path)) {
+        throw ((M "Der Wiederherstellungspfad fuer '{0}' ist ungueltig." "The restore path for '{0}' is invalid.") -f $Name)
+    }
+
+    $normalized = Get-NormalizedFullPath $Path
+    $blockedTrees = @(
+        $env:APPDATA,
+        $env:LOCALAPPDATA,
+        $env:WINDIR,
+        $env:ProgramFiles,
+        ${env:ProgramFiles(x86)},
+        $env:ProgramData
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { Get-NormalizedFullPath $_ }
+
+    $pathRoot = [System.IO.Path]::GetPathRoot($normalized).TrimEnd('\')
+    if ($normalized.Equals($pathRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ((M "Das Laufwerk '{0}' darf nicht als Wiederherstellungsziel verwendet werden." "Drive '{0}' cannot be used as a restore target.") -f $normalized)
+    }
+    $profileRoot = Get-NormalizedFullPath $env:USERPROFILE
+    if ($normalized.Equals($profileRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw (M 'Das gesamte Benutzerprofil darf nicht als Wiederherstellungsziel verwendet werden.' 'The whole user profile cannot be used as a restore target.')
+    }
+    foreach ($blockedPath in $blockedTrees) {
+        if ($normalized.Equals($blockedPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $normalized.StartsWith("$blockedPath\", [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw ((M "Der Wiederherstellungspfad fuer '{0}' liegt in einem geschuetzten System- oder Profilbereich: {1}" "The restore path for '{0}' is in a protected system or profile location: {1}") -f $Name, $normalized)
+        }
+    }
+    return $normalized
 }
 
 function Read-SelectedFolderSpecs {
@@ -504,21 +575,27 @@ $metadataFile = Join-Path $destination '_Sicherungsinfo.txt'
 $folderMetadataFile = Join-Path $destination '_Ordner.json'
 $logDir = Join-Path $destination "_logs"
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$logInstance = "{0}_{1}" -f $PID, [guid]::NewGuid().ToString('N').Substring(0, 8)
 $logPrefix = if ($Mode -eq 'Restore') { 'restore' } else { 'robocopy' }
-$logFile = Join-Path $logDir ("{0}_{1}.log" -f $logPrefix, $stamp)
+$logFile = Join-Path $logDir ("{0}_{1}_{2}.log" -f $logPrefix, $stamp, $logInstance)
 $selectedFolderSpecs = @(Read-SelectedFolderSpecs)
 
 if ($Mode -eq 'Restore' -and (Test-Path -LiteralPath $destination -PathType Container)) {
     $restoreCustomDefinitions = @(Read-CustomFolderMetadata -Path $folderMetadataFile | ForEach-Object {
-        [pscustomobject]@{ Name = [string]$_.Name; Path = [string]$_.OriginalPath; IsCustom = $true }
+        $restoreName = [string]$_.Name
+        Assert-ValidBackupFolderName -Name $restoreName
+        $restorePath = Assert-SafeRestoreTargetPath -Name $restoreName -Path ([string]$_.OriginalPath)
+        [pscustomobject]@{ Name = $restoreName; Path = $restorePath; IsCustom = $true }
     })
     $folderDefinitions = @($folderDefinitions) + $restoreCustomDefinitions
     foreach ($selectedCustomSpec in @($selectedFolderSpecs | Where-Object { (Test-IsCustomFolderSpec $_) -and $_.Name -and $_.Path })) {
         $selectedName = [string]$selectedCustomSpec.Name
+        Assert-ValidBackupFolderName -Name $selectedName
+        $selectedPath = Assert-SafeRestoreTargetPath -Name $selectedName -Path ([string]$selectedCustomSpec.Path)
         if (@($folderDefinitions | Where-Object { $_.Name.Equals($selectedName, [System.StringComparison]::OrdinalIgnoreCase) }).Count -eq 0) {
             $folderDefinitions = @($folderDefinitions) + [pscustomobject]@{
                 Name = $selectedName
-                Path = [string]$selectedCustomSpec.Path
+                Path = $selectedPath
                 IsCustom = $true
             }
         }
@@ -569,8 +646,14 @@ if ($Mode -eq 'Backup') {
         throw ((M "Auf dem Laufwerk wurde keine Sicherung fuer diesen Computer und Benutzer gefunden: {0}" "No backup for this computer and user was found on the drive: {0}") -f $destination)
     }
     Assert-BackupIdentity -MetadataFile $metadataFile
+    Assert-BackupCompletedSuccessfully -MetadataFile $metadataFile
     $backupFolders = @($folderDefinitions | ForEach-Object {
         $restoreSource = Join-Path $destination $_.Name
+        $restoreSource = Get-NormalizedFullPath $restoreSource
+        $destinationRoot = Get-NormalizedFullPath $destination
+        if (-not $restoreSource.StartsWith("$destinationRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw ((M "Der Sicherungsordner '{0}' liegt ausserhalb des erwarteten Sicherungsverzeichnisses." "Backup folder '{0}' is outside the expected backup directory.") -f $_.Name)
+        }
         if (Test-Path -LiteralPath $restoreSource -PathType Container) {
             [pscustomobject]@{ Name = $_.Name; Path = $restoreSource; TargetPath = $_.Path; IsCustom = [bool]$_.IsCustom }
         }
@@ -733,14 +816,32 @@ if (-not $Silent) {
 
 # Erst nach der Bestaetigung wird auf das Ziellaufwerk geschrieben. Ein
 # abgelehnter Vorgang hinterlaesst so weder Ordner noch veraenderte Metadaten.
+New-Item -ItemType Directory -Path $destination -Force | Out-Null
+$script:operationLockFile = Join-Path $destination '_backup.lock'
+try {
+    $script:operationLockStream = [System.IO.File]::Open(
+        $script:operationLockFile,
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None
+    )
+    $lockText = [System.Text.Encoding]::UTF8.GetBytes("PID=$PID`r`nStarted=$(Get-Date -Format 'o')`r`n")
+    $script:operationLockStream.SetLength(0)
+    $script:operationLockStream.Write($lockText, 0, $lockText.Length)
+    $script:operationLockStream.Flush($true)
+} catch {
+    Exit-OperationLock
+    throw (M 'Fuer dieses Sicherungsziel laeuft bereits ein anderer Sicherungs- oder Wiederherstellungsvorgang.' 'Another backup or restore operation is already running for this destination.')
+}
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 if ($Mode -eq 'Backup' -and -not $DryRun) {
-    @(
+    $metadataContent = @(
         'Bibliothekssicherung', '', "Computer: $env:COMPUTERNAME", "Benutzer: $env:USERNAME",
         "Letzter Sicherungsversuch: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", "Quelle: $env:USERPROFILE",
         "Ziel: $destination", "Ordner: $($backupFolders.Name -join ', ')",
         'Sicherungsart: Fortlaufende Sicherheitskopie; am Ziel werden keine Dateien geloescht.'
-    ) | Set-Content -LiteralPath $metadataFile -Encoding UTF8
+    ) -join [Environment]::NewLine
+    Write-AtomicTextFile -Path $metadataFile -Content ($metadataContent + [Environment]::NewLine)
 }
 
 $maxCode = 0
@@ -772,7 +873,7 @@ $cancelMessage = if ($Mode -eq 'Restore') { M 'Wiederherstellung wurde auf Wunsc
 foreach ($folder in $backupFolders) {
     if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
         Write-BackupStatus -Type 'ABGEBROCHEN' -Text (M 'Vorgang wurde auf Wunsch beendet.' 'Operation was cancelled by request.')
-        if ($Mode -eq 'Backup' -and -not $DryRun) { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Vom Benutzer abgebrochen am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
+        if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen' }
         if ($ResultFile) {
             [pscustomobject]@{
                 Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $cancelMessage
@@ -781,6 +882,7 @@ foreach ($folder in $backupFolders) {
                 SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @()
             } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
         }
+        Exit-OperationLock
         exit 20
     }
     $folderNumber++
@@ -841,7 +943,7 @@ foreach ($folder in $backupFolders) {
 
 if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
     Write-BackupStatus -Type 'ABGEBROCHEN' -Text (M 'Vorgang wurde auf Wunsch beendet.' 'Operation was cancelled by request.')
-    if ($Mode -eq 'Backup' -and -not $DryRun) { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Vom Benutzer abgebrochen am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
+    if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen' }
     if ($ResultFile) {
         [pscustomobject]@{
             Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $cancelMessage
@@ -850,6 +952,7 @@ if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
             SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
         } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
     }
+    Exit-OperationLock
     exit 20
 }
 
@@ -857,7 +960,7 @@ Write-Host ""
 if ($maxCode -le 7) {
     $finishedAt = Get-Date
     $remainingDisk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drive) -ErrorAction SilentlyContinue
-    if ($Mode -eq 'Backup' -and -not $DryRun) { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Erfolgreich abgeschlossen am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
+    if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Erfolgreich abgeschlossen' }
     if ($Mode -eq 'Backup' -and -not $DryRun) {
         $customBackupFolders = @($backupFolders | Where-Object { $_.IsCustom })
         if ($customBackupFolders.Count -gt 0 -or (Test-Path -LiteralPath $folderMetadataFile -PathType Leaf)) {
@@ -876,7 +979,8 @@ if ($maxCode -le 7) {
                     BackedUpAt = $finishedAt.ToString('o')
                 }
             }
-            @($mergedMetadata.Values | Sort-Object Name) | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $folderMetadataFile -Encoding UTF8
+            $folderMetadataJson = @($mergedMetadata.Values | Sort-Object Name) | ConvertTo-Json -Depth 4
+            Write-AtomicTextFile -Path $folderMetadataFile -Content ($folderMetadataJson + [Environment]::NewLine)
         }
     }
     Write-BackupStatus -Type "FERTIG" -Text $successMessage
@@ -913,11 +1017,12 @@ if ($maxCode -le 7) {
             ScanWarnings = @($preflight.ScanWarnings)
         } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
     }
+    Exit-OperationLock
     exit 0
 }
 
 Write-Host $failureMessage
-if ($Mode -eq 'Backup' -and -not $DryRun) { Add-Content -LiteralPath $metadataFile -Value "Ergebnis: Mit Fehlern beendet am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')." -Encoding UTF8 }
+if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Mit Fehlern beendet' }
 Write-BackupStatus -Type "FEHLER" -Text ((M "Fehler in: {0}" "Errors in: {0}") -f ($failedFolders -join ", "))
 $localizedFailedFolders = @($failedFolders | ForEach-Object { Get-LocalizedFolderName $_ })
 Write-Host ((M "Betroffene Ordner: {0}" "Affected folders: {0}") -f ($localizedFailedFolders -join ", "))
@@ -941,4 +1046,5 @@ if ($ResultFile) {
         PlannedBytes = $preflight.RequiredBytes
     } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
 }
+Exit-OperationLock
 exit $maxCode

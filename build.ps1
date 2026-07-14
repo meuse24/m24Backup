@@ -249,6 +249,7 @@ function Convert-MarkdownToHelpHtml {
         InTable = $false
         TableRowCount = 0
     }
+    $pendingHeadingAnchor = $null
 
     function Close-Paragraph {
         if ($paragraph.Count -gt 0) {
@@ -319,7 +320,7 @@ function Convert-MarkdownToHelpHtml {
             Close-Paragraph
             Close-List
             Close-Table
-            $html.Add(('<a id="{0}"></a>' -f $matches[1]))
+            $pendingHeadingAnchor = $matches[1]
             continue
         }
 
@@ -330,12 +331,22 @@ function Convert-MarkdownToHelpHtml {
 
             $level = $matches[1].Length
             $headingText = $matches[2].Trim()
-            $anchor = Get-HelpSlug $headingText
+            if ($pendingHeadingAnchor) {
+                $anchor = $pendingHeadingAnchor
+                $pendingHeadingAnchor = $null
+            } else {
+                $anchor = Get-HelpSlug $headingText
+            }
             $html.Add(("<h{0} id=""{1}"">{2}</h{0}>" -f $level, $anchor, (Convert-InlineMarkdown $headingText)))
             if ($level -eq 2) {
                 $toc.Add([pscustomobject]@{ Anchor = $anchor; Text = $headingText })
             }
             continue
+        }
+
+        if ($pendingHeadingAnchor) {
+            $html.Add(('<a id="{0}"></a>' -f $pendingHeadingAnchor))
+            $pendingHeadingAnchor = $null
         }
 
         if ($line -match '^\s*---+\s*$') {
