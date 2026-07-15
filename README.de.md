@@ -164,10 +164,29 @@ verfügbar.
 
 ## Hinweise zur Veröffentlichung
 
-Die erzeugten Pakete sind derzeit nicht digital signiert. Windows SmartScreen
-kann deshalb bei Downloads aus dem Internet warnen. Für eine breitere
-öffentliche Verteilung sollten Setup-Datei und Skripte mit einem
-vertrauenswürdigen Code-Signing-Zertifikat signiert werden.
+Die Code-Signierung über die SignPath Foundation wird derzeit eingerichtet.
+Bis zum ersten signierten Release kann Windows SmartScreen bei Downloads aus
+dem Internet warnen. Downloads sollten anhand von `SHA256SUMS.txt` geprüft
+werden.
+
+## Code-Signing-Richtlinie
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate
+by [SignPath Foundation](https://signpath.org).
+
+Rollen im Projekt:
+
+- Committer und Reviewer: [Günther Meusburger (meuse24)](https://github.com/meuse24)
+- Freigabe von Signaturen: [Günther Meusburger (meuse24)](https://github.com/meuse24)
+
+Release-Binärdateien werden ausschließlich vom
+[Release-Build-Workflow](.github/workflows/release-build.yml) aus dem
+Quellcode gebaut und nur aus dieser Pipeline signiert.
+
+Dieses Programm überträgt keine Informationen an andere vernetzte Systeme,
+außer der Benutzer oder die installierende bzw. betreibende Person fordert
+dies ausdrücklich an. Siehe auch den Abschnitt
+[Datenschutz und Sicherheitsmodell](#datenschutz-und-sicherheitsmodell).
 
 ## Lizenz
 

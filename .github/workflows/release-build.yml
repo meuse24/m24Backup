@@ -1,0 +1,79 @@
+name: Release build
+
+# Baut die Release-Artefakte nachvollziehbar aus dem Quellcode und reicht sie
+# optional bei SignPath zum Signieren ein. Der Signierschritt laeuft erst,
+# wenn die SignPath-Zugangsdaten als Repository-Variablen und -Secret
+# hinterlegt sind (siehe docs/signpath-application.md).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Volle Historie inkl. Tags, damit build.ps1 die Version aus
+          # "git describe" ableiten kann, wenn kein Tag-Push vorliegt.
+          fetch-depth: 0
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup -y --no-progress
+
+      - name: Build artifacts
+        shell: powershell
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            .\build.ps1 -Version $env:GITHUB_REF_NAME -RequireInstaller
+          } else {
+            .\build.ps1 -RequireInstaller
+          }
+
+      - name: Upload unsigned artifacts
+        id: upload-unsigned
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-unsigned
+          path: dist/
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    # Laeuft nur, wenn die SignPath-Integration konfiguriert ist.
+    if: vars.SIGNPATH_ORGANIZATION_ID != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit signing request
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          output-artifact-directory: signed
+
+      - name: Regenerate checksums for signed artifacts
+        # Durch die Signatur aendern sich die Datei-Hashes; SHA256SUMS.txt
+        # muss deshalb fuer die signierten Artefakte neu erzeugt werden.
+        run: |
+          cd signed
+          rm -f SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-signed
+          path: signed/
+          if-no-files-found: error

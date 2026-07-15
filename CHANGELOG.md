@@ -10,6 +10,10 @@ dokumentiert. Die Versionierung orientiert sich an
 
 - Veröffentlichung unter der MIT-Lizenz; die Lizenzdatei ist Teil des
   Repositorys und aller Distributionen
+- Release-Build-Workflow, der die Artefakte nachvollziehbar in GitHub Actions
+  baut und eine vorbereitete SignPath-Signierung enthält, dazu die
+  Code-Signing-Richtlinie in beiden READMEs und eine Antragsanleitung unter
+  `docs/signpath-application.md`
 
 - Windows-Benachrichtigungen für abgeschlossene, fehlgeschlagene und
   abgebrochene Vorgänge im Hintergrund

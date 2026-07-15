@@ -159,10 +159,27 @@ branch behind its GitHub counterpart. Finished artifacts are written to
 
 ## Release notes
 
-Generated packages are not digitally signed yet. Windows SmartScreen may
-therefore show a warning for files downloaded from the internet. For wider
-public distribution, the setup file and scripts should be signed with a trusted
-code-signing certificate.
+Code signing via SignPath Foundation is being set up. Until the first signed
+release is published, Windows SmartScreen may show a warning for files
+downloaded from the internet. Verify downloads against `SHA256SUMS.txt`.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate
+by [SignPath Foundation](https://signpath.org).
+
+Team roles:
+
+- Committers and reviewers: [Günther Meusburger (meuse24)](https://github.com/meuse24)
+- Approvers: [Günther Meusburger (meuse24)](https://github.com/meuse24)
+
+Release binaries are built from source by the
+[release-build workflow](.github/workflows/release-build.yml) and signed only
+from that pipeline.
+
+This program will not transfer any information to other networked systems
+unless specifically requested by the user or the person installing or
+operating it. See the [privacy section](#privacy-and-safety-model) above.
 
 ## License
 
