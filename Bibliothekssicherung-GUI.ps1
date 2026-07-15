@@ -106,6 +106,8 @@ $script:lastDestination = $null
 $script:backupStartedAt = $null
 $script:backupCancelled = $false
 $script:driveMap = @{}
+$script:driveSnapshot = ''
+$script:driveDeviceIds = @()
 $script:activeDrive = $null
 $script:activeMode = $null
 $script:activeDryRun = $false
@@ -370,6 +372,47 @@ function Get-BackupRoot {
     return Join-Path $Drive ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
 }
 
+function Get-BackupMetadataIdentity {
+    param([string[]]$Lines)
+
+    return [pscustomobject]@{
+        Computer = (($Lines | Where-Object { $_ -like 'Computer:*' } | Select-Object -First 1) -replace '^Computer:\s*', '').Trim()
+        User = (($Lines | Where-Object { $_ -like 'Benutzer:*' } | Select-Object -First 1) -replace '^Benutzer:\s*', '').Trim()
+    }
+}
+
+function Test-BackupMetadataMatchesCurrentProfile {
+    param([string[]]$Lines)
+
+    $identity = Get-BackupMetadataIdentity -Lines $Lines
+    return $identity.Computer.Equals($env:COMPUTERNAME, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $identity.User.Equals($env:USERNAME, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-BackupMetadataHasSuccessfulResult {
+    param([string[]]$Lines)
+
+    $resultLine = $Lines | Where-Object { $_ -like 'Ergebnis:*' } | Select-Object -Last 1
+    return $resultLine -and $resultLine -match '^Ergebnis:\s*Erfolgreich abgeschlossen\s+am\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.?$'
+}
+
+function Test-DriveHasCurrentProfileBackup {
+    param($Disk)
+
+    if (-not $Disk -or -not $Disk.DeviceID) { return $false }
+
+    $metadataFile = Join-Path (Get-BackupRoot -Drive $Disk.DeviceID) '_Sicherungsinfo.txt'
+    if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) { return $false }
+
+    try {
+        $lines = @(Get-Content -LiteralPath $metadataFile -ErrorAction Stop)
+        return (Test-BackupMetadataMatchesCurrentProfile -Lines $lines) -and
+            (Test-BackupMetadataHasSuccessfulResult -Lines $lines)
+    } catch {
+        return $false
+    }
+}
+
 function Update-BackupArtifactActions {
     if (-not $driveCombo.SelectedItem) {
         $script:lastDestination = $null
@@ -531,10 +574,7 @@ function Get-BackupHealth {
 
     try {
         $lines = @(Get-Content -LiteralPath $metadataFile -ErrorAction Stop)
-        $computer = (($lines | Where-Object { $_ -like 'Computer:*' } | Select-Object -First 1) -replace '^Computer:\s*', '').Trim()
-        $user = (($lines | Where-Object { $_ -like 'Benutzer:*' } | Select-Object -First 1) -replace '^Benutzer:\s*', '').Trim()
-        if (-not $computer.Equals($env:COMPUTERNAME, [System.StringComparison]::OrdinalIgnoreCase) -or
-            -not $user.Equals($env:USERNAME, [System.StringComparison]::OrdinalIgnoreCase)) {
+        if (-not (Test-BackupMetadataMatchesCurrentProfile -Lines $lines)) {
             throw (L 'Die Sicherungsmetadaten gehören zu einem anderen Profil.' 'The backup metadata belongs to a different profile.')
         }
 
@@ -986,6 +1026,16 @@ $ejectCheckBox.Location = New-Object System.Drawing.Point(285, 426)
 $ejectCheckBox.BackColor = $surfaceColor
 $ejectCheckBox.TabIndex = 11
 $form.Controls.Add($ejectCheckBox)
+
+$checksumCheckBox = New-Object System.Windows.Forms.CheckBox
+$checksumCheckBox.Text = L "Prüfsummen" "Checksums"
+$checksumCheckBox.AutoSize = $true
+$checksumCheckBox.Location = New-Object System.Drawing.Point(570, 426)
+$checksumCheckBox.BackColor = $surfaceColor
+$checksumCheckBox.Checked = $true
+$checksumCheckBox.TabIndex = 12
+$checksumCheckBox.Anchor = "Top, Right"
+$form.Controls.Add($checksumCheckBox)
 $activitySurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 460)) -Size (New-Object System.Drawing.Size(692, 148))
 
 $statusCaption = New-Object System.Windows.Forms.Label
@@ -1000,7 +1050,7 @@ $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = L "Bereit." "Ready."
 $statusLabel.AutoEllipsis = $true
 $statusLabel.Location = New-Object System.Drawing.Point(82, 470)
-$statusLabel.Size = New-Object System.Drawing.Size(455, 22)
+$statusLabel.Size = New-Object System.Drawing.Size(480, 22)
 $statusLabel.BackColor = $surfaceColor
 $statusLabel.Anchor = "Top, Left, Right"
 $form.Controls.Add($statusLabel)
@@ -1009,15 +1059,15 @@ $durationCaption = New-Object System.Windows.Forms.Label
 $durationCaption.Text = L "Dauer:" "Elapsed:"
 $durationCaption.AutoSize = $true
 $durationCaption.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$durationCaption.Location = New-Object System.Drawing.Point(552, 470)
+$durationCaption.Location = New-Object System.Drawing.Point(574, 470)
 $durationCaption.BackColor = $surfaceColor
 $durationCaption.Anchor = "Top, Right"
 $form.Controls.Add($durationCaption)
 
 $durationLabel = New-Object System.Windows.Forms.Label
 $durationLabel.Text = "--:--"
-$durationLabel.Location = New-Object System.Drawing.Point(612, 470)
-$durationLabel.Size = New-Object System.Drawing.Size(78, 22)
+$durationLabel.Location = New-Object System.Drawing.Point(632, 470)
+$durationLabel.Size = New-Object System.Drawing.Size(58, 22)
 $durationLabel.TextAlign = 'TopRight'
 $durationLabel.BackColor = $surfaceColor
 $durationLabel.Anchor = "Top, Right"
@@ -1145,6 +1195,15 @@ $form.Controls.Add($cancelButton)
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 500
 
+$driveWatchTimer = New-Object System.Windows.Forms.Timer
+$driveWatchTimer.Interval = 2500
+$driveWatchTimer.Add_Tick({
+    if ($script:backupProcess -or $script:pendingEjectDrive -or $script:verificationAsyncResult) { return }
+    if (-not $form.Visible -or $form.IsDisposed -or -not $form.IsHandleCreated) { return }
+    if ($driveCombo.DroppedDown) { return }
+    Update-DriveList
+})
+
 $ejectTimer = New-Object System.Windows.Forms.Timer
 $ejectTimer.Interval = 3500
 $ejectTimer.Add_Tick({
@@ -1210,6 +1269,7 @@ function Set-VerificationControlsEnabled {
         $removeFolderButton.Enabled = $false
         $dryRunCheckBox.Enabled = $false
         $ejectCheckBox.Enabled = $false
+        $checksumCheckBox.Enabled = $false
         $verifyButton.Enabled = $false
     }
 }
@@ -1350,8 +1410,10 @@ function Update-BackupOptionState {
     $dryRunCheckBox.Enabled = $isBackup -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
     if (-not $isBackup) { $dryRunCheckBox.Checked = $false }
 
-    $ejectCheckBox.Enabled = $isBackup -and -not $isInternalDrive -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
-    if (-not $isBackup -or $isInternalDrive) { $ejectCheckBox.Checked = $false }
+    $ejectCheckBox.Enabled = $isBackup -and -not $dryRunCheckBox.Checked -and -not $isInternalDrive -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
+    if (-not $isBackup -or $dryRunCheckBox.Checked -or $isInternalDrive) { $ejectCheckBox.Checked = $false }
+
+    $checksumCheckBox.Enabled = $isBackup -and -not $dryRunCheckBox.Checked -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
 
     $addFolderButton.Enabled = $isBackup -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
     $removeFolderButton.Visible = $isBackup
@@ -1463,38 +1525,94 @@ $libraryList.Add_ItemCheck({
 $libraryList.Add_SelectedIndexChanged({ Update-SelectionState })
 
 function Update-DriveList {
-    $driveCombo.Items.Clear()
-    $script:driveMap.Clear()
+    param([switch]$Force)
+
     $systemDrive = $env:SystemDrive
+    $selectedDeviceId = $null
+    if ($driveCombo.SelectedItem) {
+        $selectedDisk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+        if ($selectedDisk) { $selectedDeviceId = [string]$selectedDisk.DeviceID }
+    }
 
     try {
         $drives = @(Get-CimInstance Win32_LogicalDisk |
             Where-Object { $_.DriveType -in 2, 3 -and $_.DeviceID -ne $systemDrive -and $_.Size -gt 0 } |
             Sort-Object DriveType, DeviceID)
 
+        $knownDriveSnapshot = if ($script:knownDrive) { [string]$script:knownDrive.SerialNumber } else { '' }
+        $currentSnapshot = @($drives | ForEach-Object {
+            "{0}|{1}|{2}|{3}|{4}|{5}" -f $_.DeviceID, $_.DriveType, $_.Size, $_.VolumeSerialNumber, $_.VolumeName, $_.FileSystem
+        }) -join "`n"
+        $currentSnapshot = "{0}`n{1}" -f $knownDriveSnapshot, $currentSnapshot
+
+        if (-not $Force -and $script:driveSnapshot -eq $currentSnapshot) {
+            return
+        }
+
+        $previousDeviceIds = @($script:driveDeviceIds)
+        $currentDeviceIds = @($drives | ForEach-Object { [string]$_.DeviceID })
+
+        $driveCombo.Items.Clear()
+        $script:driveMap.Clear()
+        $script:driveSnapshot = $currentSnapshot
+        $script:driveDeviceIds = $currentDeviceIds
+
         $preferredIndex = -1
+        $backupIndex = -1
+        $newBackupIndex = -1
+        $selectedIndex = -1
+        $selectedHasBackup = $false
         foreach ($disk in $drives) {
             $label = if ($disk.VolumeName) { $disk.VolumeName } else { L "ohne Namen" "unnamed" }
             $type = if ($disk.DriveType -eq 2) { L "Wechseldatenträger" "Removable drive" } else { L "Lokaler Datenträger" "Local drive" }
             $freeGb = [math]::Round($disk.FreeSpace / 1GB, 1)
             $display = "{0}  -  {1}  ({2:N1} GB frei, {3})" -f $disk.DeviceID, $label, $freeGb, $type
-            if (Test-IsKnownBackupDrive -Disk $disk) {
+            $isKnownBackupDrive = Test-IsKnownBackupDrive -Disk $disk
+            $hasCurrentProfileBackup = Test-DriveHasCurrentProfileBackup -Disk $disk
+            if ($isKnownBackupDrive) {
                 $display = "★ {0}" -f $display
                 $preferredIndex = $driveCombo.Items.Count
+            }
+            if ($backupIndex -lt 0 -and $hasCurrentProfileBackup) {
+                $backupIndex = $driveCombo.Items.Count
+            }
+            if ($newBackupIndex -lt 0 -and $hasCurrentProfileBackup -and $previousDeviceIds -notcontains [string]$disk.DeviceID) {
+                $newBackupIndex = $driveCombo.Items.Count
+            }
+            if ($selectedDeviceId -and $disk.DeviceID -eq $selectedDeviceId) {
+                $selectedIndex = $driveCombo.Items.Count
+                $selectedHasBackup = $hasCurrentProfileBackup -or $isKnownBackupDrive
             }
             $script:driveMap[$display] = $disk
             [void]$driveCombo.Items.Add($display)
         }
 
         if ($driveCombo.Items.Count -gt 0) {
-            $driveCombo.SelectedIndex = if ($preferredIndex -ge 0) { $preferredIndex } else { 0 }
+            if ($selectedIndex -ge 0 -and $selectedHasBackup) {
+                $driveCombo.SelectedIndex = $selectedIndex
+            } elseif ($selectedIndex -ge 0 -and $newBackupIndex -ge 0) {
+                $driveCombo.SelectedIndex = $newBackupIndex
+            } elseif ($selectedIndex -ge 0) {
+                $driveCombo.SelectedIndex = $selectedIndex
+            } elseif ($preferredIndex -ge 0) {
+                $driveCombo.SelectedIndex = $preferredIndex
+            } elseif ($backupIndex -ge 0) {
+                $driveCombo.SelectedIndex = $backupIndex
+            } else {
+                $driveCombo.SelectedIndex = 0
+            }
         } else {
             $driveInfoLabel.Text = L "Kein geeignetes Ziellaufwerk gefunden." "No suitable drive was found."
             Update-BackupArtifactActions
             $startButton.Enabled = $false
         }
     } catch {
+        $script:driveSnapshot = $null
+        $script:driveDeviceIds = @()
+        $driveCombo.Items.Clear()
+        $script:driveMap.Clear()
         $driveInfoLabel.Text = (L "Laufwerke konnten nicht ermittelt werden: {0}" "Drives could not be detected: {0}") -f $_.Exception.Message
+        Update-BackupArtifactActions
         $startButton.Enabled = $false
     }
 }
@@ -1522,7 +1640,7 @@ $driveCombo.Add_SelectedIndexChanged({
 $refreshButton.Add_Click({
     if ($script:pendingEjectDrive) { return }
     $script:artifactCache.Clear()
-    Update-DriveList
+    Update-DriveList -Force
 })
 
 $backupRadio.Add_CheckedChanged({
@@ -1531,6 +1649,7 @@ $backupRadio.Add_CheckedChanged({
 $restoreRadio.Add_CheckedChanged({
     if ($restoreRadio.Checked) { Update-BackupSelectionSnapshot -CaptureCurrentList; Update-LibraryList; Update-BackupOptionState; Update-BackupHealth }
 })
+$dryRunCheckBox.Add_CheckedChanged({ Update-BackupOptionState })
 
 $startButton.Add_Click({
     if ($script:verificationAsyncResult) { return }
@@ -1628,6 +1747,7 @@ $startButton.Add_Click({
     $removeFolderButton.Enabled = $false
     $dryRunCheckBox.Enabled = $false
     $ejectCheckBox.Enabled = $false
+    $checksumCheckBox.Enabled = $false
     $closeButton.Visible = $false
     $startButton.Visible = $false
     $cancelButton.Enabled = $true
@@ -1656,6 +1776,9 @@ $startButton.Add_Click({
             '-SelectedFoldersFile', $script:selectedFoldersFile
         )
         if ($script:activeDryRun) { $argumentList += '-DryRun' }
+        if ($backupRadio.Checked -and -not $script:activeDryRun -and -not $checksumCheckBox.Checked) {
+            $argumentList += '-SkipChecksums'
+        }
         $arguments = ($argumentList | ForEach-Object { ConvertTo-QuotedArgument ([string]$_) }) -join ' '
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
         $startInfo.FileName = $powershellExe
@@ -1882,10 +2005,11 @@ $timer.Add_Tick({
                     $plannedGb = [math]::Round(([double]$result.PlannedBytes / 1GB), 2)
                     $displayHints = @($result.HintFolders | ForEach-Object { Get-FolderDisplayName $_ })
                     $hints = if ($displayHints.Count) { (L " Hinweise: {0}." " Notes: {0}.") -f ($displayHints -join ', ') } else { "" }
+                    $checksumNote = if ($result.PSObject.Properties['ChecksumSkipped'] -and [bool]$result.ChecksumSkipped) { L " Prüfsummen übersprungen." " Checksums skipped." } else { "" }
                     $resultBox.Text = if ($script:isGerman) {
-                        "$(if ($isRestore) { 'Wiederhergestellt' } elseif ($isDryRun) { 'Simuliert' } else { 'Gesichert' }): $(@($result.SuccessfulFolders).Count) Ordner. Geplant: $($result.PlannedFiles) Dateien / $plannedGb GB. Dauer: $duration.$hints"
+                        "$(if ($isRestore) { 'Wiederhergestellt' } elseif ($isDryRun) { 'Simuliert' } else { 'Gesichert' }): $(@($result.SuccessfulFolders).Count) Ordner. Geplant: $($result.PlannedFiles) Dateien / $plannedGb GB. Dauer: $duration.$hints$checksumNote"
                     } else {
-                        "$(if ($isRestore) { 'Restored' } elseif ($isDryRun) { 'Simulated' } else { 'Backed up' }): $(@($result.SuccessfulFolders).Count) folders. Planned: $($result.PlannedFiles) files / $plannedGb GB. Duration: $duration.$hints"
+                        "$(if ($isRestore) { 'Restored' } elseif ($isDryRun) { 'Simulated' } else { 'Backed up' }): $(@($result.SuccessfulFolders).Count) folders. Planned: $($result.PlannedFiles) files / $plannedGb GB. Duration: $duration.$hints$checksumNote"
                     }
                 } else {
                     $resultBox.Text = L "Vorgang erfolgreich abgeschlossen." "Operation completed successfully."
@@ -2143,12 +2267,14 @@ $form.Add_FormClosing({
 })
 
 $form.Add_FormClosed({
+    $driveWatchTimer.Stop()
     try { Save-FolderSelection } catch {}
 })
 
 # Beim Start liegt der Fokus auf "Sicherung starten", damit die Sicherung
 # direkt mit Enter beginnen kann.
 $form.Add_Shown({
+    $driveWatchTimer.Start()
     if ($startButton.Enabled) { $startButton.Select() }
 })
 
@@ -2177,7 +2303,7 @@ if ($savedSelection) {
 }
 $libraryList.Items.Clear()
 Update-LibraryList
-Update-DriveList
+Update-DriveList -Force
 Update-BackupOptionState
 Update-SelectionState
 
@@ -2192,7 +2318,7 @@ if ($form.Height -gt $workingArea.Height) {
 } finally {
     if ($logoBox -and $logoBox.Image) { try { $logoBox.Image.Dispose() } catch {} }
     if ($notifyIcon) { try { $notifyIcon.Visible = $false; $notifyIcon.Dispose() } catch {} }
-    foreach ($resource in @($appIcon, $healthToolTip, $driveToolTip, $resultContextMenu, $timer, $ejectTimer, $notificationTimer, $verificationTimer)) {
+    foreach ($resource in @($appIcon, $healthToolTip, $driveToolTip, $resultContextMenu, $timer, $driveWatchTimer, $ejectTimer, $notificationTimer, $verificationTimer)) {
         if ($resource) { try { $resource.Dispose() } catch {} }
     }
     if ($form) { try { $form.Dispose() } catch {} }

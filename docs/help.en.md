@@ -38,18 +38,20 @@ window is useful.
 
 1. Select **Back up** at the top.
 2. Connect a USB drive or external disk.
-3. Click **Refresh** if needed.
+3. Wait until the drive appears in the list, or click **Refresh**.
 4. Select the destination drive.
 5. Select the folders to include.
 6. Optionally add more folders.
-7. Optionally enable dry-run or safe eject.
+7. Optionally adjust dry-run, safe eject, or checksum settings.
 8. Click **Start backup**.
 9. Wait for the completion message.
 
 The backup folder and existing technical logs can be opened directly after
-selecting a drive. The summary can be copied from its context menu. `F1` opens
-Help, `F5` refreshes drives, `Ctrl+L` opens the log, and `Ctrl+O` opens the
-backup folder. Never remove the destination drive while an operation is running.
+selecting a drive. The summary can be copied from its context menu. The drive
+list updates automatically; a drive with an existing backup for this profile is
+preferred. `F5` forces an immediate refresh. `F1` opens Help, `Ctrl+L` opens the
+log, and `Ctrl+O` opens the backup folder. Never remove the destination drive
+while an operation is running.
 
 The app remembers selected standard and custom folders for the next start.
 **History** lists the ten most recent logs. **Verify backup** reads every data
@@ -66,6 +68,11 @@ an older backup without a manifest, **Verify backup** offers to record the
 current contents as an initial baseline. This initial recording cannot detect
 damage that already existed beforehand. Excluded temporary files are neither
 backed up nor included in the manifest.
+
+The **Checksums** option is enabled by default. If it is turned off, the backup
+runs faster, but the manifest remains at its previous state. **Verify backup**
+may then report missing or outdated checksum entries until another backup
+finishes with checksums enabled.
 
 The first backup run after the manifest is introduced reads the complete
 existing destination data once more. Later runs only rehash files whose size or
@@ -192,7 +199,7 @@ above indicate copy errors.
 
 | Problem | Recommendation |
 | --- | --- |
-| No drive visible | Connect the drive and click **Refresh**. |
+| No drive visible | Connect the drive, wait briefly, or click **Refresh**. |
 | Not enough space | Remove data from the destination or use a larger drive. |
 | FAT32 warning | Use NTFS or exFAT for the backup drive. |
 | File cannot be read | Check whether it is open in another program. |

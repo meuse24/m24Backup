@@ -40,18 +40,20 @@ wenn ein sichtbares Konsolenfenster hilfreich ist.
 
 1. Oben den Modus **Sichern** wählen.
 2. USB-Stick oder externe Festplatte anschließen.
-3. Bei Bedarf **Aktualisieren** klicken.
+3. Warten, bis das Laufwerk in der Liste erscheint, oder **Aktualisieren** klicken.
 4. Ziellaufwerk auswählen.
 5. Gewünschte Ordner markieren.
 6. Optional weitere Ordner hinzufügen.
-7. Optional Dry-Run oder sicheren Auswurf aktivieren.
+7. Optional Dry-Run, sicheren Auswurf oder Prüfsummen-Option anpassen.
 8. **Sicherung starten** klicken.
 9. Warten, bis der Status den Abschluss meldet.
 
 Sicherungsordner und vorhandene technische Protokolle können direkt nach der
 Laufwerkswahl aus der App geöffnet werden. Die Ergebnisübersicht lässt sich
-über ihr Kontextmenü kopieren. `F1` öffnet die Hilfe, `F5` aktualisiert die
-Laufwerke, `Strg+L` öffnet das Protokoll und `Strg+O` den Sicherungsordner.
+über ihr Kontextmenü kopieren. Die Laufwerksliste aktualisiert sich automatisch;
+ein Laufwerk mit vorhandener Sicherung für dieses Profil wird bevorzugt
+ausgewählt. `F5` erzwingt eine sofortige Aktualisierung. `F1` öffnet die Hilfe,
+`Strg+L` öffnet das Protokoll und `Strg+O` den Sicherungsordner.
 Entfernen Sie das Ziellaufwerk niemals, solange der Vorgang läuft.
 
 Die App merkt sich die gewählten Standard- und Zusatzordner für den nächsten
@@ -71,6 +73,11 @@ aktuellen Inhalt einmalig als Ausgangszustand zu erfassen. Diese erstmalige
 Erfassung kann bereits vorher vorhandene Beschädigungen naturgemäß nicht
 erkennen. Ausgeschlossene temporäre Dateien werden weder gesichert noch in das
 Manifest aufgenommen.
+
+Die Option **Prüfsummen** ist standardmäßig aktiv. Wenn sie abgeschaltet wird,
+läuft die Sicherung schneller, das Manifest bleibt aber auf dem vorherigen
+Stand. **Backup prüfen** kann danach fehlende oder veraltete Prüfsummeneinträge
+melden, bis wieder eine Sicherung mit aktivierten Prüfsummen abgeschlossen wurde.
 
 Der erste Backup-Lauf nach Einführung des Manifests liest den gesamten
 vorhandenen Zielbestand zusätzlich. Spätere Läufe hashen nur Dateien erneut,
@@ -204,7 +211,7 @@ Code 8 liegt ein Kopierfehler vor.
 
 | Problem | Empfehlung |
 | --- | --- |
-| Kein Laufwerk sichtbar | Laufwerk anschließen und **Aktualisieren** klicken. |
+| Kein Laufwerk sichtbar | Laufwerk anschließen, kurz warten oder **Aktualisieren** klicken. |
 | Nicht genügend Speicherplatz | Daten auf dem Zielmedium entfernen oder größeres Laufwerk verwenden. |
 | FAT32-Warnung | NTFS oder exFAT für das Sicherungslaufwerk verwenden. |
 | Datei kann nicht gelesen werden | Prüfen, ob sie in einem anderen Programm geöffnet ist. |
