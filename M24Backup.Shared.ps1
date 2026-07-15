@@ -1,3 +1,12 @@
+function Test-M24GermanUiCulture {
+    try {
+        $culture = [System.Globalization.CultureInfo]::CurrentUICulture
+        return [bool]($culture -and $culture.TwoLetterISOLanguageName -eq 'de')
+    } catch {
+        return $false
+    }
+}
+
 function Get-ReservedBackupNames {
     return @('_logs', '_Sicherungsinfo.txt', '_Ordner.json', '_Pruefsummen.tsv')
 }

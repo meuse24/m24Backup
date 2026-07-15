@@ -40,6 +40,12 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ### Geändert
 
+- Speicherarme, iterative Vorprüfung großer Ordnerstrukturen mit derselben
+  Junction-/Symlink-Semantik wie Robocopy
+- Atomare UTF-8-BOM-Kommunikationsdateien und präzisere Kennzeichnung
+  unvollständiger Robocopy-Läufe
+- Ressourcenschonenderes Status-Polling und sofortiger BitLocker-Fallback bei
+  nicht erhöht gestarteten Prozessen
 - Neues M24-Backup-Logo und daraus neu erzeugtes Mehrgrößen-App-/Installer-Icon
 - Icon-Hintergrundentfernung bewahrt eingeschlossene weiße Motivflächen und
   funktioniert dadurch auch auf dunklen Windows-Hintergründen korrekt

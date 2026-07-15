@@ -46,7 +46,7 @@ if (Test-Path -LiteralPath $sharedScript -PathType Leaf) {
     throw "Shared helper script not found: $sharedScript"
 }
 
-$script:isGerman = [System.Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq 'de'
+$script:isGerman = Test-M24GermanUiCulture
 function M {
     param([string]$German, [string]$English)
     if ($script:isGerman) { return $German }
@@ -79,6 +79,19 @@ function Write-AtomicTextFile {
     } finally {
         Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Write-AtomicJsonFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline = $true)]$Value,
+        [string]$Path,
+        [int]$Depth = 4
+    )
+    process {
+        $json = $Value | ConvertTo-Json -Depth $Depth
+        Write-AtomicTextFile -Path $Path -Content ($json + [Environment]::NewLine)
     }
 }
 
@@ -122,7 +135,7 @@ trap {
     if ($ResultFile) {
         try {
             [pscustomobject]@{ Success = $false; Cancelled = $false; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $_.Exception.Message; LogFile = $trapLogFile; FinishedAt = (Get-Date).ToString('o') } |
-                ConvertTo-Json | Set-Content -LiteralPath $ResultFile -Encoding UTF8 -ErrorAction SilentlyContinue
+                Write-AtomicJsonFile -Path $ResultFile
         } catch {}
     }
     if ($Mode -eq 'Backup' -and -not $DryRun -and $script:backupMetadataStarted) {
@@ -196,7 +209,7 @@ function Wait-GuiApproval {
         if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
             if ($ResultFile) {
                 [pscustomobject]@{ Success = $false; Cancelled = $true; Mode = $Mode; Message = $CancelMessage } |
-                    ConvertTo-Json | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+                    Write-AtomicJsonFile -Path $ResultFile
             }
             Write-BackupStatus -Type 'ABGEBROCHEN' -Text $CancelMessage
             exit 20
@@ -205,7 +218,7 @@ function Wait-GuiApproval {
             if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) {
                 if ($ResultFile) {
                     [pscustomobject]@{ Success = $false; Cancelled = $true; Mode = $Mode; Message = $ClosedMessage } |
-                        ConvertTo-Json | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+                        Write-AtomicJsonFile -Path $ResultFile
                 }
                 Write-BackupStatus -Type 'ABGEBROCHEN' -Text $ClosedMessage
                 exit 20
@@ -242,47 +255,67 @@ function Get-BackupPreflight {
         $index++
         Write-BackupStatus -Type 'PRUEFUNG' -Text ("{0}|{1}|{2}" -f $index, @($Folders).Count, $folder.Name)
         try {
-            $scanErrors = @()
-            $files = Get-ChildItem -LiteralPath $folder.Path -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors
-            foreach ($file in $files) {
-                $excluded = $false
-                foreach ($pattern in $ExcludedFiles) {
-                    if ($file.Name -like $pattern) { $excluded = $true; break }
+            $folderScanWarnings = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            # Pro Verzeichnis wird nur die unmittelbare Ebene materialisiert.
+            # Das bleibt speicherarm, laesst den PowerShell-Provider aber nach
+            # einzelnen Lesefehlern weiterarbeiten. /XJ schliesst nur Junctions
+            # aus; symbolische Verzeichnislinks werden wie von Robocopy verfolgt.
+            $pendingDirectories = New-Object 'System.Collections.Generic.Stack[System.IO.DirectoryInfo]'
+            $pendingDirectories.Push((New-Object System.IO.DirectoryInfo($folder.Path)))
+            while ($pendingDirectories.Count -gt 0) {
+                $directory = $pendingDirectories.Pop()
+                $directoryErrors = @()
+                $entries = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction SilentlyContinue -ErrorVariable +directoryErrors)
+                foreach ($directoryError in $directoryErrors) {
+                    [void]$folderScanWarnings.Add($directoryError.Exception.Message)
                 }
-                if ($excluded) { continue }
-
-                $fileCount++
-                $totalBytes += $file.Length
-                if ($file.Length -ge 4GB) { $largeFiles += $file.FullName }
-
-                $relative = $file.FullName.Substring($folder.Path.TrimEnd('\').Length).TrimStart('\')
-                $targetFile = Join-Path $folder.TargetPath $relative
-                $needsCopy = $true
-                if (Test-Path -LiteralPath $targetFile -PathType Leaf) {
-                    try {
-                        $existing = Get-Item -LiteralPath $targetFile -Force
-                        $timeDifference = ($file.LastWriteTimeUtc - $existing.LastWriteTimeUtc).TotalSeconds
-                        $needsCopy = ($timeDifference -gt 2) -or (([math]::Abs($timeDifference) -le 2) -and ($file.Length -ne $existing.Length))
-                        if ($needsCopy) {
-                            $overwriteFileCount++
-                            if ($overwriteExamples.Count -lt 10) { $overwriteExamples += $targetFile }
-                        } elseif ($timeDifference -lt -2) {
-                            $protectedNewerFileCount++
+                foreach ($entry in $entries) {
+                    if ($entry.PSIsContainer) {
+                        if ([string]$entry.LinkType -ne 'Junction') {
+                            $pendingDirectories.Push([System.IO.DirectoryInfo]$entry)
                         }
-                    } catch { $needsCopy = $true }
-                } else {
-                    $missingFileCount++
-                }
-                if ($needsCopy) {
-                    $requiredFileCount++
-                    $requiredBytes += $file.Length
-                    $targetRoot = [System.IO.Path]::GetPathRoot($folder.TargetPath).TrimEnd('\')
-                    if (-not $requiredByRoot.ContainsKey($targetRoot)) { $requiredByRoot[$targetRoot] = [int64]0 }
-                    $requiredByRoot[$targetRoot] = [int64]$requiredByRoot[$targetRoot] + $file.Length
+                        continue
+                    }
+                    $file = [System.IO.FileInfo]$entry
+                    try {
+                        if (Test-M24ExcludedFileName -Name $file.Name -Patterns $ExcludedFiles) { continue }
+
+                        $fileCount++
+                        $totalBytes += $file.Length
+                        if ($file.Length -ge 4GB) { $largeFiles += $file.FullName }
+
+                        $relative = $file.FullName.Substring($folder.Path.TrimEnd('\').Length).TrimStart('\')
+                        $targetFile = Join-Path $folder.TargetPath $relative
+                        $needsCopy = $true
+                        if ([System.IO.File]::Exists($targetFile)) {
+                            try {
+                                $existing = New-Object System.IO.FileInfo($targetFile)
+                                $timeDifference = ($file.LastWriteTimeUtc - $existing.LastWriteTimeUtc).TotalSeconds
+                                $needsCopy = ($timeDifference -gt 2) -or (([math]::Abs($timeDifference) -le 2) -and ($file.Length -ne $existing.Length))
+                                if ($needsCopy) {
+                                    $overwriteFileCount++
+                                    if ($overwriteExamples.Count -lt 10) { $overwriteExamples += $targetFile }
+                                } elseif ($timeDifference -lt -2) {
+                                    $protectedNewerFileCount++
+                                }
+                            } catch { $needsCopy = $true }
+                        } else {
+                            $missingFileCount++
+                        }
+                        if ($needsCopy) {
+                            $requiredFileCount++
+                            $requiredBytes += $file.Length
+                            $targetRoot = [System.IO.Path]::GetPathRoot($folder.TargetPath).TrimEnd('\')
+                            if (-not $requiredByRoot.ContainsKey($targetRoot)) { $requiredByRoot[$targetRoot] = [int64]0 }
+                            $requiredByRoot[$targetRoot] = [int64]$requiredByRoot[$targetRoot] + $file.Length
+                        }
+                    } catch {
+                        [void]$folderScanWarnings.Add($_.Exception.Message)
+                    }
                 }
             }
-            foreach ($scanError in $scanErrors) {
-                $scanWarnings += ("{0}: {1}" -f $folder.Name, $scanError.Exception.Message)
+            foreach ($scanWarning in $folderScanWarnings) {
+                $scanWarnings += ("{0}: {1}" -f $folder.Name, $scanWarning)
             }
         } catch {
             $scanWarnings += ("{0}: {1}" -f $folder.Name, $_.Exception.Message)
@@ -414,9 +447,23 @@ function Resolve-UsbDrive {
 function Get-BitLockerStatusText {
     param([string]$Drive)
 
+    $unknownStatus = M 'BitLocker-Status konnte nicht ermittelt werden. Dies bedeutet nicht, dass BitLocker deaktiviert ist.' 'BitLocker status could not be determined. This does not mean that BitLocker is disabled.'
+    $identity = $null
+    try {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+        if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            return $unknownStatus
+        }
+    } catch {
+        return $unknownStatus
+    } finally {
+        if ($identity) { $identity.Dispose() }
+    }
+
     $cmd = Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue
     if (-not $cmd) {
-        return "BitLocker-Status konnte nicht ermittelt werden. Dies bedeutet nicht, dass BitLocker deaktiviert ist."
+        return $unknownStatus
     }
 
     # Die Abfrage kann trotz Admin-Konto scheitern, wenn PowerShell nicht
@@ -425,7 +472,7 @@ function Get-BitLockerStatusText {
         $volume = Get-BitLockerVolume -MountPoint $Drive -ErrorAction Stop
         return "BitLocker: $($volume.ProtectionStatus)"
     } catch {
-        return "BitLocker-Status konnte nicht ermittelt werden. Dies bedeutet nicht, dass BitLocker deaktiviert ist."
+        return $unknownStatus
     }
 }
 
@@ -738,7 +785,7 @@ if ($preflight.ScanWarnings.Count -gt 0) {
         [pscustomobject]@{
             WarningCount = $preflight.ScanWarnings.Count
             Warnings = @($preflight.ScanWarnings | Select-Object -First 10)
-        } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $PreviewFile -Encoding UTF8
+        } | Write-AtomicJsonFile -Path $PreviewFile -Depth 3
         Write-BackupStatus -Type 'SCANWARNUNG' -Text (M 'Warnungen der Vorpruefung warten auf Freigabe.' 'Preflight warnings are awaiting approval.')
         Wait-GuiApproval -CancelMessage (M 'Sicherung vor dem Kopieren abgebrochen.' 'Backup cancelled before copying.') -ClosedMessage (M 'Die Bedienoberflaeche wurde geschlossen.' 'The user interface was closed.')
     } else {
@@ -773,7 +820,7 @@ if ($Mode -eq 'Restore') {
             PlannedFiles = $preflight.RequiredFileCount
             PlannedBytes = $preflight.RequiredBytes
             OverwriteExamples = @($preflight.OverwriteExamples)
-        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $PreviewFile -Encoding UTF8
+        } | Write-AtomicJsonFile -Path $PreviewFile -Depth 4
     }
     if ($Silent) {
         if (-not $ApprovalFile) { throw (M 'Im stillen Restore-Modus ist eine Freigabedatei erforderlich.' 'Silent restore mode requires an approval file.') }
@@ -857,6 +904,7 @@ $maxCode = 0
 $failedFolders = @()
 $successfulFolders = @()
 $foldersWithHints = @()
+$filesCopiedThisRun = $false
 $folderNumber = 0
 $folderCount = @($backupFolders).Count
 $backupStartedAt = Get-Date
@@ -889,7 +937,7 @@ foreach ($folder in $backupFolders) {
                 Destination = $destination; LogFile = $logFile
                 StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o')
                 SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @()
-            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+            } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
         }
         Exit-OperationLock
         exit 20
@@ -930,6 +978,7 @@ foreach ($folder in $backupFolders) {
 
     $null = & robocopy @robocopyArgs
     $code = $LASTEXITCODE
+    if (($code -band 1) -ne 0) { $filesCopiedThisRun = $true }
 
     # Robocopy verwendet die Codes 0 bis 7 fuer erfolgreiche Laeufe bzw.
     # Ergebnisse mit Hinweisen. Erst ab Code 8 liegt ein Kopierfehler vor.
@@ -959,7 +1008,7 @@ if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
             Destination = $destination; LogFile = $logFile
             StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o')
             SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
-        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+        } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
     }
     Exit-OperationLock
     exit 20
@@ -985,7 +1034,7 @@ if ($maxCode -le 7) {
             Write-BackupStatus -Type 'ABGEBROCHEN' -Text $cancelMessage
             if ($ResultFile) {
                 [pscustomobject]@{ Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $false; Message = $cancelMessage; Destination = $destination; LogFile = $logFile; StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o'); SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @() } |
-                    ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+                    Write-AtomicJsonFile -Path $ResultFile -Depth 4
             }
             Exit-OperationLock
             exit 20
@@ -1052,7 +1101,7 @@ if ($maxCode -le 7) {
             ChecksumFiles = if ($checksumResult) { $checksumResult.Files } else { 0 }
             HashedFiles = if ($checksumResult) { $checksumResult.HashedFiles } else { 0 }
             ReusedChecksums = if ($checksumResult) { $checksumResult.ReusedFiles } else { 0 }
-        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+        } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
     }
     Exit-OperationLock
     exit 0
@@ -1065,12 +1114,20 @@ $localizedFailedFolders = @($failedFolders | ForEach-Object { Get-LocalizedFolde
 Write-Host ((M "Betroffene Ordner: {0}" "Affected folders: {0}") -f ($localizedFailedFolders -join ", "))
 Write-Host ((M "Bitte Log pruefen: {0}" "Review the log: {0}") -f $logFile)
 if ($ResultFile) {
+    $partialCopy = $filesCopiedThisRun
+    $failureResultMessage = if ($partialCopy -and $Mode -eq 'Backup') {
+        M 'Die Sicherung ist unvollständig: Ein Teil der Dateien wurde kopiert, mindestens eine Datei konnte jedoch nicht kopiert werden. Eine sichere Wiederherstellung ist erst nach einem erfolgreichen neuen Lauf möglich.' 'The backup is incomplete: Some files were copied, but at least one file could not be copied. Safe restore requires a new successful run.'
+    } elseif ($partialCopy -and $Mode -eq 'Restore') {
+        M 'Die Wiederherstellung ist unvollständig: Ein Teil der Dateien wurde wiederhergestellt, mindestens eine Datei konnte jedoch nicht kopiert werden.' 'The restore is incomplete: Some files were restored, but at least one file could not be copied.'
+    } else {
+        M 'Vorgang mit Kopierfehlern beendet.' 'Operation finished with copy errors.'
+    }
     [pscustomobject]@{
         Success = $false
         Cancelled = $false
         Mode = $Mode
         DryRun = $DryRun.IsPresent
-        Message = (M 'Vorgang mit Kopierfehlern beendet.' 'Operation finished with copy errors.')
+        Message = $failureResultMessage
         Destination = $destination
         LogFile = $logFile
         StartedAt = $backupStartedAt.ToString('o')
@@ -1078,10 +1135,11 @@ if ($ResultFile) {
         SuccessfulFolders = @($successfulFolders)
         HintFolders = @($foldersWithHints)
         FailedFolders = @($failedFolders)
+        PartialCopy = $partialCopy
         ScannedFiles = $preflight.FileCount
         PlannedFiles = $preflight.RequiredFileCount
         PlannedBytes = $preflight.RequiredBytes
-    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+    } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
 }
 Exit-OperationLock
 exit $maxCode

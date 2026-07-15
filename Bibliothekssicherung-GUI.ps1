@@ -18,11 +18,25 @@ if (Test-Path -LiteralPath $sharedScript -PathType Leaf) {
     throw "Shared helper script not found: $sharedScript"
 }
 
-$script:isGerman = [System.Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq 'de'
+$script:isGerman = Test-M24GermanUiCulture
 function L {
     param([string]$German, [string]$English)
     if ($script:isGerman) { return $German }
     return $English
+}
+
+function Write-AtomicUtf8BomTextFile {
+    param([string]$Path, [string]$Content)
+    $temporaryFile = "{0}.{1}.tmp" -f $Path, [guid]::NewGuid().ToString('N')
+    $backupFile = "{0}.{1}.bak" -f $Path, [guid]::NewGuid().ToString('N')
+    try {
+        [System.IO.File]::WriteAllText($temporaryFile, $Content, (New-Object System.Text.UTF8Encoding($true)))
+        if ([System.IO.File]::Exists($Path)) { [System.IO.File]::Replace($temporaryFile, $Path, $backupFile, $true) }
+        else { [System.IO.File]::Move($temporaryFile, $Path) }
+    } finally {
+        Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Open-HelpTopic {
@@ -415,7 +429,7 @@ function Save-AppSettings {
     $temporaryFile = Join-Path $settingsDirectory ("settings.{0}.tmp" -f [guid]::NewGuid().ToString('N'))
     $backupFile = Join-Path $settingsDirectory ("settings.{0}.bak" -f [guid]::NewGuid().ToString('N'))
     try {
-        [System.IO.File]::WriteAllText($temporaryFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText($temporaryFile, $json, (New-Object System.Text.UTF8Encoding($true)))
         if ([System.IO.File]::Exists($settingsFile)) { [System.IO.File]::Replace($temporaryFile, $settingsFile, $backupFile, $true) }
         else { [System.IO.File]::Move($temporaryFile, $settingsFile) }
     } finally {
@@ -597,6 +611,7 @@ function Get-BackupHealth {
     }
 }
 
+try {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = L "Bibliothekssicherung" "Library Backup"
 if ($appVersion) { $form.Text = "{0} {1}" -f $form.Text, $appVersion }
@@ -665,7 +680,7 @@ function New-SurfacePanel {
 }
 
 $titleLabel = New-Object System.Windows.Forms.Label
-$titleLabel.Text = L "Persönliche Dateien sichern" "Back up personal files"
+$titleLabel.Text = L "Dateien sichern" "Back up files"
 $titleLabel.Font = New-Object System.Drawing.Font($displayFontName, 18)
 $titleLabel.AutoSize = $true
 $titleLabel.Location = New-Object System.Drawing.Point(30, 16)
@@ -1128,7 +1143,7 @@ $cancelButton.Visible = $false
 $form.Controls.Add($cancelButton)
 
 $timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 350
+$timer.Interval = 500
 
 $ejectTimer = New-Object System.Windows.Forms.Timer
 $ejectTimer.Interval = 3500
@@ -1138,7 +1153,7 @@ $ejectTimer.Add_Tick({
 })
 
 $verificationTimer = New-Object System.Windows.Forms.Timer
-$verificationTimer.Interval = 350
+$verificationTimer.Interval = 500
 $verificationTimer.Add_Tick({
     if (-not $script:verificationAsyncResult -or -not $script:verificationAsyncResult.IsCompleted) { return }
     $verificationTimer.Stop()
@@ -1357,7 +1372,7 @@ function Update-LibraryList {
             })
             $items += @(Get-RestoreCustomFolders -BackupRoot $backupRoot)
         }
-        $titleLabel.Text = L "Persönliche Dateien wiederherstellen" "Restore personal files"
+        $titleLabel.Text = L "Dateien wiederherstellen" "Restore files"
         $descriptionLabel.Text = L "Neuere lokale Dateien bleiben erhalten; es wird nichts gelöscht." "Newer local files are kept; nothing is deleted."
         $driveLabel.Text = L "Sicherungslaufwerk:" "Backup drive:"
         $libraryLabel.Text = L "Diese Ordner sind in der Sicherung verfügbar:" "These folders are available in the backup:"
@@ -1368,7 +1383,7 @@ function Update-LibraryList {
             New-FolderListItem -Name $_.Name -DisplayName (Get-FolderDisplayName $_.Name) -Path $_.Path -IsCustom $false -Checked $checked
         })
         $items += @($script:customFolders)
-        $titleLabel.Text = L "Persönliche Dateien sichern" "Back up personal files"
+        $titleLabel.Text = L "Dateien sichern" "Back up files"
         $descriptionLabel.Text = L "Wählen Sie Ziel und Ordner. Vorhandene Dateien werden nicht gelöscht." "Choose a destination and folders. Existing files are not deleted."
         $driveLabel.Text = L "Ziellaufwerk:" "Destination drive:"
         $libraryLabel.Text = L "Diese Ordner werden gesichert:" "These folders will be backed up:"
@@ -1620,7 +1635,7 @@ $startButton.Add_Click({
     $form.AcceptButton = $null
 
     try {
-        $selectedFolders | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:selectedFoldersFile -Encoding UTF8
+        Write-AtomicUtf8BomTextFile -Path $script:selectedFoldersFile -Content (($selectedFolders | ConvertTo-Json -Depth 4) + [Environment]::NewLine)
         $powershellExe = Join-Path $PSHOME "powershell.exe"
         $mode = if ($restoreRadio.Checked) { 'Restore' } else { 'Backup' }
         $script:activeMode = $mode
@@ -1893,7 +1908,12 @@ $timer.Add_Tick({
                 }
             } else {
                 $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
-                $statusLabel.Text = (L "Vorgang mit Fehlern beendet (Exit-Code {0})." "Operation finished with errors (exit code {0}).") -f $exitCode
+                $partialCopy = $result -and $result.PSObject.Properties['PartialCopy'] -and [bool]$result.PartialCopy
+                $statusLabel.Text = if ($partialCopy) {
+                    (L "Vorgang unvollständig (Exit-Code {0})." "Operation incomplete (exit code {0}).") -f $exitCode
+                } else {
+                    (L "Vorgang mit Fehlern beendet (Exit-Code {0})." "Operation finished with errors (exit code {0}).") -f $exitCode
+                }
                 $resultBox.Text = if ($result -and $result.Message) {
                     $result.Message
                 } elseif ($newestLog) {
@@ -2122,18 +2142,8 @@ $form.Add_FormClosing({
     }
 })
 
-# Das Logo-Bitmap gehoert dem Formular und wird mit ihm entsorgt.
 $form.Add_FormClosed({
     try { Save-FolderSelection } catch {}
-    if ($logoBox.Image) { $logoBox.Image.Dispose() }
-    if ($appIcon) { $appIcon.Dispose() }
-    if ($healthToolTip) { $healthToolTip.Dispose() }
-    if ($driveToolTip) { $driveToolTip.Dispose() }
-    if ($resultContextMenu) { $resultContextMenu.Dispose() }
-    if ($notifyIcon) { $notifyIcon.Visible = $false; $notifyIcon.Dispose() }
-    if ($ejectTimer) { $ejectTimer.Dispose() }
-    if ($notificationTimer) { $notificationTimer.Dispose() }
-    if ($verificationTimer) { $verificationTimer.Dispose() }
 })
 
 # Beim Start liegt der Fokus auf "Sicherung starten", damit die Sicherung
@@ -2179,3 +2189,11 @@ if ($form.Height -gt $workingArea.Height) {
 }
 
 [void]$form.ShowDialog()
+} finally {
+    if ($logoBox -and $logoBox.Image) { try { $logoBox.Image.Dispose() } catch {} }
+    if ($notifyIcon) { try { $notifyIcon.Visible = $false; $notifyIcon.Dispose() } catch {} }
+    foreach ($resource in @($appIcon, $healthToolTip, $driveToolTip, $resultContextMenu, $timer, $ejectTimer, $notificationTimer, $verificationTimer)) {
+        if ($resource) { try { $resource.Dispose() } catch {} }
+    }
+    if ($form) { try { $form.Dispose() } catch {} }
+}
