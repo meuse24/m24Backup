@@ -53,9 +53,30 @@ backup folder. Never remove the destination drive while an operation is running.
 
 The app remembers selected standard and custom folders for the next start.
 **History** lists the ten most recent logs. **Verify backup** reads every data
-file in the latest successful backup completely to detect unreadable files and
-media errors. When the window is in the background, Windows also displays a
-notification for completion, failure, or cancellation.
+file completely and compares its SHA-256 checksum with `_Pruefsummen.tsv` to
+detect unreadable, missing, or modified files. When the window is in the
+background, Windows also displays a notification for completion, failure, or
+cancellation.
+
+The worker updates one checksum per file after a successful copy and before it
+marks the backup successful. Entries are reused using relative path, size, and
+the exact timestamp from the backup destination; new or changed files are read
+again. Old entries remain in the manifest to match the no-delete strategy. For
+an older backup without a manifest, **Verify backup** offers to record the
+current contents as an initial baseline. This initial recording cannot detect
+damage that already existed beforehand. Excluded temporary files are neither
+backed up nor included in the manifest.
+
+The first backup run after the manifest is introduced reads the complete
+existing destination data once more. Later runs only rehash files whose size or
+exact destination timestamp changed. **Verify backup** still reads every file
+completely because a reliable comparison requires the current contents. Use
+**Cancel verification** to stop a running check. Cancelling an initial baseline
+does not save an incomplete manifest.
+
+Checksums detect accidental corruption and unexpected modifications. They are
+not cryptographically signed, so an attacker with write access could alter both
+the backup and its manifest consistently.
 
 <a id="dry-run"></a>
 ## Simulate only: dry run

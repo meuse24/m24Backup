@@ -56,10 +56,33 @@ Entfernen Sie das Ziellaufwerk niemals, solange der Vorgang läuft.
 
 Die App merkt sich die gewählten Standard- und Zusatzordner für den nächsten
 Start. **Verlauf** zeigt die letzten zehn vorhandenen Protokolle. Mit **Backup
-prüfen** wird jede Nutzdatei der letzten erfolgreichen Sicherung vollständig
-gelesen; dadurch werden nicht lesbare Dateien und Medienfehler erkannt. Wenn
-das Fenster im Hintergrund liegt, meldet Windows Abschluss, Fehler oder
-Abbruch zusätzlich als Benachrichtigung.
+prüfen** wird jede Nutzdatei vollständig gelesen und ihre SHA-256-Prüfsumme mit
+`_Pruefsummen.tsv` verglichen. Dadurch werden nicht lesbare, fehlende und
+inhaltlich veränderte Dateien erkannt. Wenn das Fenster im Hintergrund liegt,
+meldet Windows Abschluss, Fehler oder Abbruch zusätzlich als Benachrichtigung.
+
+Das Manifest enthält eine Prüfsumme pro Datei und wird nach einem erfolgreichen
+Backup im Worker aktualisiert, bevor die Sicherung als erfolgreich markiert
+wird. Unveränderte Einträge werden über relativen Pfad, Größe und den exakten
+Zeitstempel des Backup-Ziels wiederverwendet; neue oder geänderte Dateien werden
+erneut gelesen. Alte Einträge bleiben passend zur No-Delete-Strategie erhalten.
+Bei einer älteren Sicherung ohne Manifest bietet **Backup prüfen** an, den
+aktuellen Inhalt einmalig als Ausgangszustand zu erfassen. Diese erstmalige
+Erfassung kann bereits vorher vorhandene Beschädigungen naturgemäß nicht
+erkennen. Ausgeschlossene temporäre Dateien werden weder gesichert noch in das
+Manifest aufgenommen.
+
+Der erste Backup-Lauf nach Einführung des Manifests liest den gesamten
+vorhandenen Zielbestand zusätzlich. Spätere Läufe hashen nur Dateien erneut,
+deren Größe oder exakter Zielzeitstempel sich geändert hat. **Backup prüfen**
+liest unabhängig davon immer alle Dateien vollständig, weil nur so der aktuelle
+Inhalt sicher verglichen werden kann. Die laufende Prüfung lässt sich über
+**Prüfung abbrechen** beenden. Bei einer abgebrochenen Initialisierung wird kein
+unvollständiges Manifest gespeichert.
+
+Die Prüfsummen erkennen zufällige Beschädigungen und unerwartete Änderungen.
+Sie sind nicht kryptografisch signiert; ein Angreifer mit Schreibzugriff auf
+Backup und Manifest könnte deshalb beide passend verändern.
 
 <a id="dry-run"></a>
 ## Dry-Run: Sicherung nur simulieren

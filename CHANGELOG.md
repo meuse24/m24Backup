@@ -11,8 +11,8 @@ dokumentiert. Die Versionierung orientiert sich an
 - Windows-Benachrichtigungen für abgeschlossene, fehlgeschlagene und
   abgebrochene Vorgänge im Hintergrund
 - Dauerhaft gespeicherte Auswahl von Standard- und Zusatzordnern
-- Verlauf der letzten zehn Protokolle und vollständige Lesbarkeitsprüfung
-  einer erfolgreich abgeschlossenen Sicherung
+- Verlauf der letzten zehn Protokolle und vollständige Integritätsprüfung gegen
+  dateiweise SHA-256-Prüfsummen mit Initialisierung bestehender Sicherungen
 - Backup-Ampel für das ausgewählte Laufwerk mit Abschlussstatus, Alter,
   Laufzeit und Anzahl der zuletzt erfolgreich gesicherten Ordner
 - Wiedererkennung und automatische Auswahl des zuletzt erfolgreich verwendeten

@@ -25,8 +25,8 @@ Windows systems and in English on all other systems.
 - Shows progress and a clear result directly in the application window.
 - Opens existing logs and backup folders immediately after drive selection and
   can copy the result summary.
-- Remembers folder selections, shows recent operations, and can verify a
-  successful backup by reading every file completely.
+- Remembers folder selections, shows recent operations, and verifies complete
+  file contents against per-file SHA-256 checksums.
 - Shows a Windows notification after operations while the app is in the
   background.
 - Shows a traffic-light health indicator with the age, duration, and folder

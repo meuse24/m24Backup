@@ -38,6 +38,7 @@ param(
 
 # Behandelt auch Fehler ausserhalb einzelner Funktionen als Abbruch.
 $ErrorActionPreference = 'Stop'
+$script:backupMetadataStarted = $false
 $sharedScript = Join-Path $PSScriptRoot 'M24Backup.Shared.ps1'
 if (Test-Path -LiteralPath $sharedScript -PathType Leaf) {
     . $sharedScript
@@ -123,6 +124,18 @@ trap {
             [pscustomobject]@{ Success = $false; Cancelled = $false; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $_.Exception.Message; LogFile = $trapLogFile; FinishedAt = (Get-Date).ToString('o') } |
                 ConvertTo-Json | Set-Content -LiteralPath $ResultFile -Encoding UTF8 -ErrorAction SilentlyContinue
         } catch {}
+    }
+    if ($Mode -eq 'Backup' -and -not $DryRun -and $script:backupMetadataStarted) {
+        # Auch Fehler nach einem erfolgreichen Robocopy-Lauf (zum Beispiel bei
+        # der Manifestpflege) muessen einen alten Erfolgsstatus entwerten.
+        try {
+            $metadataVariable = Get-Variable -Name metadataFile -ErrorAction SilentlyContinue
+            if ($metadataVariable -and $metadataVariable.Value -and (Test-Path -LiteralPath $metadataVariable.Value -PathType Leaf)) {
+                Set-BackupResultMetadata -Path $metadataVariable.Value -Result 'Mit Fehlern beendet'
+            }
+        } catch {
+            # Der urspruengliche Fehler bleibt fuer Status und Exitcode massgeblich.
+        }
     }
     Write-Host ""
     Write-Host (M "Der Vorgang konnte nicht abgeschlossen werden." "The operation could not be completed.")
@@ -573,6 +586,7 @@ $drive = Resolve-UsbDrive -Drive $UsbDrive -Silent:$Silent
 $destination = Join-Path $drive ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
 $metadataFile = Join-Path $destination '_Sicherungsinfo.txt'
 $folderMetadataFile = Join-Path $destination '_Ordner.json'
+$checksumManifestFile = Join-Path $destination (Get-M24ChecksumManifestName)
 $logDir = Join-Path $destination "_logs"
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $logInstance = "{0}_{1}" -f $PID, [guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -700,13 +714,7 @@ $fileSystem = if ($targetDisk.FileSystem) { $targetDisk.FileSystem } else { "unb
 $fat32Warning = $fileSystem -eq "FAT32"
 
 # Unwichtige Windows-Metadaten und typische temporaere Dateien auslassen.
-$excludedFiles = @(
-    "thumbs.db",
-    "desktop.ini",
-    "*.tmp",
-    "*.temp",
-    "~$*"
-)
+$excludedFiles = @(Get-M24DefaultExcludedFiles)
 
 $preflight = Get-BackupPreflight -Folders $backupFolders -ExcludedFiles $excludedFiles
 if ($preflight.ScanWarnings.Count -gt 0) {
@@ -842,6 +850,7 @@ if ($Mode -eq 'Backup' -and -not $DryRun) {
         'Sicherungsart: Fortlaufende Sicherheitskopie; am Ziel werden keine Dateien geloescht.'
     ) -join [Environment]::NewLine
     Write-AtomicTextFile -Path $metadataFile -Content ($metadataContent + [Environment]::NewLine)
+    $script:backupMetadataStarted = $true
 }
 
 $maxCode = 0
@@ -958,9 +967,33 @@ if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
 
 Write-Host ""
 if ($maxCode -le 7) {
+    $checksumResult = $null
+    if ($Mode -eq 'Backup' -and -not $DryRun) {
+        # Das Manifest beschreibt den gesamten additiven Zielbestand, nicht nur
+        # die in diesem Lauf ausgewaehlten Ordner.
+        $checksumFolders = @(Get-ChildItem -LiteralPath $destination -Directory -Force -ErrorAction Stop |
+            Where-Object { -not $_.Name.StartsWith('_') } |
+            ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.FullName } })
+        $checksumResult = Update-M24ChecksumManifest `
+            -Folders $checksumFolders `
+            -ManifestPath $checksumManifestFile `
+            -ExcludedFiles $excludedFiles `
+            -StatusCallback { param($current, $total, $name) Write-BackupStatus -Type 'PRUEFSUMME' -Text ("{0}|{1}|{2}" -f $current, $total, $name) } `
+            -CancelCallback { return $CancelFile -and (Test-Path -LiteralPath $CancelFile) }
+        if ($checksumResult.Cancelled) {
+            Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen'
+            Write-BackupStatus -Type 'ABGEBROCHEN' -Text $cancelMessage
+            if ($ResultFile) {
+                [pscustomobject]@{ Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $false; Message = $cancelMessage; Destination = $destination; LogFile = $logFile; StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o'); SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @() } |
+                    ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+            }
+            Exit-OperationLock
+            exit 20
+        }
+        Add-Content -LiteralPath $logFile -Encoding Unicode -Value ((M "Pruefsummen: {0} Dateien; {1} neu berechnet; {2} wiederverwendet." "Checksums: {0} files; {1} recalculated; {2} reused.") -f $checksumResult.Files, $checksumResult.HashedFiles, $checksumResult.ReusedFiles)
+    }
     $finishedAt = Get-Date
     $remainingDisk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drive) -ErrorAction SilentlyContinue
-    if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Erfolgreich abgeschlossen' }
     if ($Mode -eq 'Backup' -and -not $DryRun) {
         $customBackupFolders = @($backupFolders | Where-Object { $_.IsCustom })
         if ($customBackupFolders.Count -gt 0 -or (Test-Path -LiteralPath $folderMetadataFile -PathType Leaf)) {
@@ -983,6 +1016,7 @@ if ($maxCode -le 7) {
             Write-AtomicTextFile -Path $folderMetadataFile -Content ($folderMetadataJson + [Environment]::NewLine)
         }
     }
+    if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Erfolgreich abgeschlossen' }
     Write-BackupStatus -Type "FERTIG" -Text $successMessage
     Write-Host $successMessage
     $folderSummaryLabel = if ($Mode -eq 'Restore') { M 'Wiederhergestellte Ordner' 'Restored folders' } else { M 'Gesicherte Ordner' 'Backed-up folders' }
@@ -1015,6 +1049,9 @@ if ($maxCode -le 7) {
             PlannedBytes = $preflight.RequiredBytes
             RemainingBytes = if ($remainingDisk) { [int64]$remainingDisk.FreeSpace } else { $null }
             ScanWarnings = @($preflight.ScanWarnings)
+            ChecksumFiles = if ($checksumResult) { $checksumResult.Files } else { 0 }
+            HashedFiles = if ($checksumResult) { $checksumResult.HashedFiles } else { 0 }
+            ReusedChecksums = if ($checksumResult) { $checksumResult.ReusedFiles } else { 0 }
         } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
     }
     Exit-OperationLock

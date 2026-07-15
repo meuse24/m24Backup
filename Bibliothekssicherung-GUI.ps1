@@ -101,6 +101,7 @@ $script:ejectAttemptsRemaining = 0
 $script:ejectDialogOpen = $false
 $script:verificationPowerShell = $null
 $script:verificationAsyncResult = $null
+$script:verificationCancelFile = $null
 $script:lastProgressCurrent = 0
 $script:lastProgressTotal = 1
 $script:preCancelStatusText = $null
@@ -1145,13 +1146,21 @@ $verificationTimer.Add_Tick({
         $output = @($script:verificationPowerShell.EndInvoke($script:verificationAsyncResult))
         $verification = $output | Select-Object -Last 1
         $gb = [math]::Round(([double]$verification.Bytes / 1GB), 2)
-        if ([int]$verification.ErrorCount -eq 0) {
-            $statusLabel.Text = L 'Backup erfolgreich geprüft.' 'Backup verified successfully.'
-            $resultBox.Text = (L '{0} Dateien ({1:N2} GB) wurden vollständig und ohne Lesefehler geprüft.' '{0} files ({1:N2} GB) were read completely without errors.') -f $verification.Files, $gb
+        if ($verification.Cancelled) {
+            $statusLabel.Text = L 'Backup-Prüfung abgebrochen.' 'Backup verification cancelled.'
+            $resultBox.Text = L 'Die Prüfsummenprüfung wurde auf Wunsch beendet.' 'Checksum verification was cancelled by request.'
+        } elseif ([int]$verification.ErrorCount -eq 0) {
+            if ($verification.Initialized) {
+                $statusLabel.Text = L 'Prüfsummen-Manifest erstellt.' 'Checksum manifest created.'
+                $resultBox.Text = (L 'Prüfsummen für {0} Dateien ({1:N2} GB) wurden erstellt.' 'Checksums were created for {0} files ({1:N2} GB).') -f $verification.Files, $gb
+            } else {
+                $statusLabel.Text = L 'Backup erfolgreich geprüft.' 'Backup verified successfully.'
+                $resultBox.Text = (L '{0} Dateien ({1:N2} GB) stimmen mit ihren SHA-256-Prüfsummen überein.' '{0} files ({1:N2} GB) match their SHA-256 checksums.') -f $verification.Files, $gb
+            }
             Show-CompletionNotification -Title (L 'Backup geprüft' 'Backup verified') -Text $resultBox.Text -Icon Info
         } else {
-            $statusLabel.Text = L 'Backup-Prüfung mit Lesefehlern beendet.' 'Backup verification found read errors.'
-            $resultBox.Text = (L '{0} Lesefehler gefunden.' '{0} read errors found.') -f $verification.ErrorCount
+            $statusLabel.Text = L 'Backup-Prüfung mit Integritätsfehlern beendet.' 'Backup verification found integrity errors.'
+            $resultBox.Text = (L '{0} Integritätsfehler gefunden.' '{0} integrity errors found.') -f $verification.ErrorCount
             [System.Windows.Forms.MessageBox]::Show(($verification.Errors -join [Environment]::NewLine), $form.Text, 'OK', 'Warning') | Out-Null
         }
     } catch {
@@ -1161,7 +1170,13 @@ $verificationTimer.Add_Tick({
         if ($script:verificationPowerShell) { $script:verificationPowerShell.Dispose() }
         $script:verificationPowerShell = $null
         $script:verificationAsyncResult = $null
+        if ($script:verificationCancelFile) { Remove-Item -LiteralPath $script:verificationCancelFile -Force -ErrorAction SilentlyContinue }
+        $script:verificationCancelFile = $null
         Stop-BusyProgress
+        $closeButton.Visible = $true
+        $startButton.Visible = $true
+        $cancelButton.Visible = $false
+        $form.AcceptButton = $closeButton
         Set-VerificationControlsEnabled -Enabled $true
     }
 })
@@ -1752,6 +1767,12 @@ $timer.Add_Tick({
                         $statusLabel.Text = if ($script:isGerman) { "Prüfe Ordner $($parts[1]) von $($parts[2]): $displayFolder" } else { "Checking folder $($parts[1]) of $($parts[2]): $displayFolder" }
                         $resultBox.Text = L "Dateien und benötigter Speicherplatz werden geprüft ..." "Checking files and required disk space ..."
                     }
+                    "PRUEFSUMME" {
+                        Start-BusyProgress
+                        $displayFolder = Get-FolderDisplayName $parts[3]
+                        $statusLabel.Text = if ($script:isGerman) { "Prüfsummen für Ordner $($parts[1]) von $($parts[2]): $displayFolder" } else { "Checksums for folder $($parts[1]) of $($parts[2]): $displayFolder" }
+                        $resultBox.Text = L "Neue und geänderte Backup-Dateien werden mit SHA-256 erfasst ..." "New and changed backup files are being recorded with SHA-256 ..."
+                    }
                     "FORTSCHRITT" {
                         Start-BusyProgress
                         $current = [int]$parts[1]
@@ -1970,37 +1991,52 @@ $verifyButton.Add_Click({
         return
     }
 
+    $manifestPath = Join-Path $script:lastDestination (Get-M24ChecksumManifestName)
+    $initializeManifest = -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)
+    if ($initializeManifest) {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            (L 'Diese ältere Sicherung besitzt noch keine Prüfsummen. Jetzt ein initiales SHA-256-Manifest aus dem aktuellen Backup-Inhalt erstellen?' 'This older backup has no checksums yet. Create an initial SHA-256 manifest from its current contents now?'),
+            (L 'Prüfsummen initialisieren' 'Initialize checksums'), 'YesNo', 'Information')
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    }
+
     Set-VerificationControlsEnabled -Enabled $false
-    $statusLabel.Text = L 'Backup wird vollständig gelesen ...' 'Reading the complete backup ...'
+    $script:verificationCancelFile = Join-Path ([System.IO.Path]::GetTempPath()) ("M24Backup.verify-cancel.{0}.{1}.tmp" -f $PID, [guid]::NewGuid().ToString('N'))
+    $statusLabel.Text = if ($initializeManifest) { L 'Prüfsummen werden initial erstellt ...' 'Creating initial checksums ...' } else { L 'SHA-256-Prüfsummen werden verglichen ...' 'Comparing SHA-256 checksums ...' }
     Start-BusyProgress
+    $closeButton.Visible = $false
+    $startButton.Visible = $false
+    $cancelButton.Text = L 'Prüfung abbrechen' 'Cancel verification'
+    $cancelButton.Enabled = $true
+    $cancelButton.Visible = $true
+    $form.AcceptButton = $null
     $verificationScript = {
-        param([string]$root, [string]$missingFoldersMessage)
-        [int64]$count = 0; [int64]$bytes = 0; [int]$errorCount = 0; $errors = @(); $scanErrors = @()
-        $buffer = New-Object byte[] (1MB)
+        param([string]$root, [string]$sharedScript, [string]$manifestPath, [bool]$initialize, [string]$cancelFile, [string]$missingFoldersMessage)
+        . $sharedScript
         $dataFolders = @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction Stop | Where-Object { -not $_.Name.StartsWith('_') })
         if ($dataFolders.Count -eq 0) {
-            $errorCount++
-            $errors += $missingFoldersMessage
+            return [pscustomobject]@{ Initialized = $initialize; Files = 0; Bytes = 0; ErrorCount = 1; Errors = @($missingFoldersMessage) }
         }
-        foreach ($file in @($dataFolders | Get-ChildItem -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors)) {
-            $stream = $null
-            try {
-                $stream = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
-                while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) { $bytes += $read }
-                $count++
-            } catch {
-                $errorCount++
-                if ($errors.Count -lt 10) { $errors += "${file}: $($_.Exception.Message)" }
-            } finally { if ($stream) { $stream.Dispose() } }
+        $folders = @($dataFolders | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.FullName } })
+        $excluded = @(Get-M24DefaultExcludedFiles)
+        $lockFile = Join-Path $root '_backup.lock'; $lockStream = $null; $lockAcquired = $false
+        try {
+            $lockStream = [System.IO.File]::Open($lockFile, 'OpenOrCreate', 'ReadWrite', 'None'); $lockAcquired = $true
+            if ($initialize) {
+                $created = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles $excluded -ForceRehash `
+                    -CancelCallback { Test-Path -LiteralPath $cancelFile }
+                return [pscustomobject]@{ Initialized = $true; Cancelled = $created.Cancelled; Files = $created.Files; Bytes = $created.Bytes; ErrorCount = 0; Errors = @() }
+            }
+            $checked = Test-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles $excluded `
+                -CancelCallback { Test-Path -LiteralPath $cancelFile }
+            return [pscustomobject]@{ Initialized = $false; Cancelled = $checked.Cancelled; Files = $checked.Files; Bytes = $checked.Bytes; ErrorCount = $checked.ErrorCount; Errors = @($checked.Errors) }
+        } finally {
+            if ($lockStream) { $lockStream.Dispose() }
+            if ($lockAcquired) { Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue }
         }
-        foreach ($scanError in $scanErrors) {
-            $errorCount++
-            if ($errors.Count -lt 10) { $errors += $scanError.Exception.Message }
-        }
-        [pscustomobject]@{ Folders = $dataFolders.Count; Files = $count; Bytes = $bytes; ErrorCount = $errorCount; Errors = @($errors) }
     }
     $script:verificationPowerShell = [System.Management.Automation.PowerShell]::Create()
-    [void]$script:verificationPowerShell.AddScript($verificationScript.ToString()).AddArgument($script:lastDestination).AddArgument((L 'Keine Sicherungsordner mit Nutzdaten gefunden.' 'No backup data folders were found.'))
+    [void]$script:verificationPowerShell.AddScript($verificationScript.ToString()).AddArgument($script:lastDestination).AddArgument($sharedScript).AddArgument($manifestPath).AddArgument($initializeManifest).AddArgument($script:verificationCancelFile).AddArgument((L 'Keine Sicherungsordner mit Nutzdaten gefunden.' 'No backup data folders were found.'))
     $script:verificationAsyncResult = $script:verificationPowerShell.BeginInvoke()
     $verificationTimer.Start()
 })
@@ -2012,6 +2048,17 @@ $destinationButton.Add_Click({
 })
 
 $cancelButton.Add_Click({
+    if ($script:verificationAsyncResult -and -not $script:verificationAsyncResult.IsCompleted) {
+        $cancelButton.Enabled = $false
+        $statusLabel.Text = L 'Abbruch der Backup-Prüfung angefordert ...' 'Cancelling backup verification ...'
+        try {
+            Set-Content -LiteralPath $script:verificationCancelFile -Value 'cancel' -Encoding ASCII -ErrorAction Stop
+        } catch {
+            $cancelButton.Enabled = $true
+            [System.Windows.Forms.MessageBox]::Show((L 'Der Abbruch konnte nicht angefordert werden.' 'Cancellation could not be requested.'), $form.Text, 'OK', 'Error') | Out-Null
+        }
+        return
+    }
     if (-not $script:backupProcess -or $script:backupProcess.HasExited) { return }
     $answer = [System.Windows.Forms.MessageBox]::Show(
         (L "Möchten Sie den laufenden Vorgang wirklich abbrechen?`r`n`r`nBereits kopierte Dateien bleiben erhalten." "Do you really want to cancel the current operation?`r`n`r`nFiles already copied will remain in place."),
