@@ -12,7 +12,7 @@ GitHub-Actions-Integration danach aktiviert wird.
 | Öffentliches Repository mit aktiver Pflege und vorhandenen Releases | Erfüllt (GitHub, Release v1.0.0) |
 | Binärdateien werden nachvollziehbar aus dem Quellcode gebaut | Erfüllt (`.github/workflows/release-build.yml`) |
 | Abschnitt „Code signing policy" mit Attribution, Teamrollen und Datenschutzerklärung | Erfüllt (README.md und README.de.md) |
-| Multi-Faktor-Authentifizierung für alle Teammitglieder | **Offen:** 2FA im GitHub-Konto `meuse24` aktivieren (Settings → Password and authentication), falls noch nicht geschehen; später auch im SignPath-Konto |
+| Multi-Faktor-Authentifizierung für alle Teammitglieder | Erfüllt für GitHub (`meuse24`: Passkey und Authenticator-App); nach der Zusage auch im SignPath-Konto aktivieren |
 
 ## 2. Antrag stellen
 
