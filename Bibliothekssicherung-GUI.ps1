@@ -99,15 +99,22 @@ $script:autoEjectRequested = $false
 $script:pendingEjectDrive = $null
 $script:ejectAttemptsRemaining = 0
 $script:ejectDialogOpen = $false
+$script:verificationPowerShell = $null
+$script:verificationAsyncResult = $null
 $script:lastProgressCurrent = 0
 $script:lastProgressTotal = 1
 $script:preCancelStatusText = $null
 $script:preCancelResultText = $null
 $script:customFolders = @()
 $script:folderCheckStates = @{}
+$script:backupSelectionSnapshot = $null
+$script:artifactCache = @{}
+$script:suppressArtifactRetarget = $false
 $settingsDirectory = Join-Path $env:LOCALAPPDATA 'M24Backup'
 $settingsFile = Join-Path $settingsDirectory 'settings.json'
 $script:knownDrive = $null
+$script:settingsWritable = $true
+$script:settings = $null
 
 function Get-UserShellFolder {
     param(
@@ -203,7 +210,7 @@ function Get-ExistingCustomFolderMetadataForSelectedDrive {
     if (-not $driveCombo.SelectedItem) { return @() }
     try {
         $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
-        $backupRoot = Join-Path $disk.DeviceID ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
+        $backupRoot = Get-BackupRoot -Drive $disk.DeviceID
         $metadataFile = Get-FolderMetadataFile -BackupRoot $backupRoot
         if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) { return @() }
         return @(Get-Content -LiteralPath $metadataFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop | Where-Object { $_.Name -and $_.OriginalPath })
@@ -343,28 +350,91 @@ function Get-NewestLogFile {
         Select-Object -First 1
 }
 
+function Get-BackupRoot {
+    param([string]$Drive)
+    return Join-Path $Drive ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
+}
+
+function Update-BackupArtifactActions {
+    if (-not $driveCombo.SelectedItem) {
+        $script:lastDestination = $null
+        $script:lastLogDir = $null
+        $script:lastLogFile = $null
+        $script:backupStartedAt = $null
+        $logButton.Enabled = $false
+        $destinationButton.Enabled = $false
+        $historyButton.Enabled = $false
+        $verifyButton.Enabled = $false
+        return
+    }
+
+    $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+    $script:lastDestination = Get-BackupRoot -Drive $disk.DeviceID
+    $script:lastLogDir = Join-Path $script:lastDestination '_logs'
+    $script:lastLogFile = $null
+    $script:backupStartedAt = $null
+    $cacheKey = "{0}|{1}" -f $disk.DeviceID, (Get-NormalizedVolumeSerial -Disk $disk)
+    if (-not $script:artifactCache.ContainsKey($cacheKey)) {
+        $destinationExists = Test-Path -LiteralPath $script:lastDestination -PathType Container
+        $newestLog = if ($destinationExists) { Get-NewestLogFile } else { $null }
+        $script:artifactCache[$cacheKey] = [pscustomobject]@{ DestinationExists = $destinationExists; LogFile = if ($newestLog) { $newestLog.FullName } else { $null } }
+    }
+    $artifactState = $script:artifactCache[$cacheKey]
+    $script:lastLogFile = [string]$artifactState.LogFile
+    $destinationButton.Enabled = [bool]$artifactState.DestinationExists
+    $logButton.Enabled = -not [string]::IsNullOrWhiteSpace([string]$artifactState.LogFile)
+    $historyButton.Enabled = $logButton.Enabled
+    $verifyButton.Enabled = $destinationButton.Enabled
+}
+
 function Get-NormalizedVolumeSerial {
     param($Disk)
     if (-not $Disk -or -not $Disk.VolumeSerialNumber) { return '' }
     return ([string]$Disk.VolumeSerialNumber).Trim().Replace('-', '').ToUpperInvariant()
 }
 
-function Get-KnownBackupDrive {
-    if (-not (Test-Path -LiteralPath $settingsFile -PathType Leaf)) { return $null }
+function Get-AppSettings {
+    if (-not (Test-Path -LiteralPath $settingsFile -PathType Leaf)) {
+        return [ordered]@{ Version = 2; KnownBackupDrive = $null; FolderSelection = $null }
+    }
     try {
-        $settings = Get-Content -LiteralPath $settingsFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        if (-not $settings.KnownBackupDrive -or -not $settings.KnownBackupDrive.SerialNumber) { return $null }
-        return [pscustomobject]@{
-            SerialNumber = ([string]$settings.KnownBackupDrive.SerialNumber).Trim().Replace('-', '').ToUpperInvariant()
-            VolumeName = [string]$settings.KnownBackupDrive.VolumeName
-            LastDeviceId = [string]$settings.KnownBackupDrive.LastDeviceId
-            SavedAt = [string]$settings.KnownBackupDrive.SavedAt
-        }
+        $parsed = Get-Content -LiteralPath $settingsFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return [ordered]@{ Version = 2; KnownBackupDrive = $parsed.KnownBackupDrive; FolderSelection = $parsed.FolderSelection }
     } catch {
-        # Eine defekte Komforteinstellung darf Sicherung und Restore nie blockieren.
-        return $null
+        # Eine nur voruebergehend nicht lesbare Datei darf nicht ueberschrieben werden.
+        $script:settingsWritable = $false
+        return [ordered]@{ Version = 2; KnownBackupDrive = $null; FolderSelection = $null }
     }
 }
+
+function Save-AppSettings {
+    if (-not $script:settingsWritable) { throw (L 'Die vorhandenen Einstellungen konnten nicht sicher gelesen werden.' 'Existing settings could not be read safely.') }
+    $json = $script:settings | ConvertTo-Json -Depth 6
+    New-Item -ItemType Directory -Path $settingsDirectory -Force | Out-Null
+    $temporaryFile = Join-Path $settingsDirectory ("settings.{0}.tmp" -f [guid]::NewGuid().ToString('N'))
+    $backupFile = Join-Path $settingsDirectory ("settings.{0}.bak" -f [guid]::NewGuid().ToString('N'))
+    try {
+        [System.IO.File]::WriteAllText($temporaryFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+        if ([System.IO.File]::Exists($settingsFile)) { [System.IO.File]::Replace($temporaryFile, $settingsFile, $backupFile, $true) }
+        else { [System.IO.File]::Move($temporaryFile, $settingsFile) }
+    } finally {
+        Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-KnownBackupDrive {
+    $known = $script:settings.KnownBackupDrive
+    if (-not $known -or -not $known.SerialNumber) { return $null }
+    return [pscustomobject]@{
+        SerialNumber = ([string]$known.SerialNumber).Trim().Replace('-', '').ToUpperInvariant()
+        VolumeName = [string]$known.VolumeName
+        LastDeviceId = [string]$known.LastDeviceId
+        SavedAt = [string]$known.SavedAt
+    }
+}
+
+function Get-SavedFolderSelection { return $script:settings.FolderSelection }
 
 function Test-IsKnownBackupDrive {
     param($Disk)
@@ -387,23 +457,16 @@ function Save-KnownBackupDrive {
         LastDeviceId = [string]$Disk.DeviceID
         SavedAt = (Get-Date).ToString('o')
     }
-    $settings = [ordered]@{ Version = 1; KnownBackupDrive = $knownDrive }
-    $json = $settings | ConvertTo-Json -Depth 4
-    New-Item -ItemType Directory -Path $settingsDirectory -Force | Out-Null
-    $temporaryFile = Join-Path $settingsDirectory ("settings.{0}.tmp" -f [guid]::NewGuid().ToString('N'))
-    $backupFile = Join-Path $settingsDirectory ("settings.{0}.bak" -f [guid]::NewGuid().ToString('N'))
-    try {
-        [System.IO.File]::WriteAllText($temporaryFile, $json, (New-Object System.Text.UTF8Encoding($false)))
-        if ([System.IO.File]::Exists($settingsFile)) {
-            [System.IO.File]::Replace($temporaryFile, $settingsFile, $backupFile, $true)
-        } else {
-            [System.IO.File]::Move($temporaryFile, $settingsFile)
-        }
-        $script:knownDrive = $knownDrive
-    } finally {
-        Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
-    }
+    $script:knownDrive = $knownDrive
+    $script:settings.KnownBackupDrive = $knownDrive
+    Save-AppSettings
+}
+
+function Save-FolderSelection {
+    if ($backupRadio.Checked) { Update-BackupSelectionSnapshot }
+    if (-not $script:backupSelectionSnapshot) { return }
+    $script:settings.FolderSelection = $script:backupSelectionSnapshot
+    Save-AppSettings
 }
 
 function Dismount-BackupDriveSafely {
@@ -441,7 +504,7 @@ function Dismount-BackupDriveSafely {
 function Get-BackupHealth {
     param([string]$Drive)
 
-    $backupDirectory = Join-Path $Drive ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
+    $backupDirectory = Get-BackupRoot -Drive $Drive
     $metadataFile = Join-Path $backupDirectory '_Sicherungsinfo.txt'
     if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) {
         return [pscustomobject]@{
@@ -548,6 +611,7 @@ $form.SizeGripStyle = [System.Windows.Forms.SizeGripStyle]::Hide
 # Groessenaenderung, die automatische Anpassung bleibt aber moeglich.
 $form.MinimumSize = New-Object System.Drawing.Size(736, 560)
 $form.AutoScroll = $true
+$form.KeyPreview = $true
 $form.Font = New-Object System.Drawing.Font($textFontName, 9.5)
 $form.BackColor = [System.Drawing.Color]::FromArgb(243, 246, 249)
 $appIconFile = Join-Path $PSScriptRoot 'app.ico'
@@ -561,6 +625,21 @@ if (Test-Path -LiteralPath $appIconFile -PathType Leaf) {
     } catch { $appIcon = $null }
 }
 $form.Icon = if ($appIcon) { $appIcon } else { [System.Drawing.SystemIcons]::Shield }
+$notifyIcon = New-Object System.Windows.Forms.NotifyIcon
+$notifyIcon.Icon = $form.Icon
+$notifyIcon.Text = L 'Bibliothekssicherung' 'Library Backup'
+$notificationTimer = New-Object System.Windows.Forms.Timer
+$notificationTimer.Interval = 6500
+$notificationTimer.Add_Tick({ $notificationTimer.Stop(); $notifyIcon.Visible = $false })
+
+function Show-CompletionNotification {
+    param([string]$Title, [string]$Text, [System.Windows.Forms.ToolTipIcon]$Icon)
+    if ($form.ContainsFocus -and $form.WindowState -ne [System.Windows.Forms.FormWindowState]::Minimized) { return }
+    $notifyIcon.Visible = $true
+    $notifyIcon.ShowBalloonTip(5000, $Title, $Text, $Icon)
+    $notificationTimer.Stop()
+    $notificationTimer.Start()
+}
 $surfaceColor = [System.Drawing.Color]::FromArgb(255, 255, 255)
 $borderColor = [System.Drawing.Color]::FromArgb(222, 226, 230)
 $buttonBorderColor = [System.Drawing.Color]::FromArgb(185, 193, 202)
@@ -830,6 +909,26 @@ $removeFolderButton.Enabled = $false
 $removeFolderButton.TabIndex = 9
 $form.Controls.Add($removeFolderButton)
 
+$historyButton = New-Object System.Windows.Forms.Button
+$historyButton.Text = L 'Verlauf' 'History'
+$historyButton.Location = New-Object System.Drawing.Point(384, 329)
+$historyButton.Size = New-Object System.Drawing.Size(106, 27)
+$historyButton.FlatStyle = 'Flat'
+$historyButton.FlatAppearance.BorderColor = $buttonBorderColor
+$historyButton.BackColor = $surfaceColor
+$historyButton.Enabled = $false
+$form.Controls.Add($historyButton)
+
+$verifyButton = New-Object System.Windows.Forms.Button
+$verifyButton.Text = L 'Backup prüfen' 'Verify backup'
+$verifyButton.Location = New-Object System.Drawing.Point(384, 366)
+$verifyButton.Size = New-Object System.Drawing.Size(106, 27)
+$verifyButton.FlatStyle = 'Flat'
+$verifyButton.FlatAppearance.BorderColor = $buttonBorderColor
+$verifyButton.BackColor = $surfaceColor
+$verifyButton.Enabled = $false
+$form.Controls.Add($verifyButton)
+
 # Das Logo nutzt den freien Bereich rechts neben Ordnerliste und Buttons
 # in voller Hoehe von Beschriftung und Liste.
 # Es ist optional: Fehlt die Datei, bleibt die Flaeche einfach leer.
@@ -937,6 +1036,17 @@ $script:resultSummary = L "Noch keine Sicherung ausgeführt." "No backup has bee
 $resultBox.Text = $script:resultSummary
 $form.Controls.Add($resultBox)
 
+$resultContextMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$copyResultMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$copyResultMenuItem.Text = L 'Ergebnis kopieren' 'Copy summary'
+$copyResultMenuItem.Add_Click({
+    if (-not [string]::IsNullOrWhiteSpace($resultBox.Text)) {
+        try { [System.Windows.Forms.Clipboard]::SetText($resultBox.Text) } catch {}
+    }
+})
+[void]$resultContextMenu.Items.Add($copyResultMenuItem)
+$resultBox.ContextMenuStrip = $resultContextMenu
+
 $footerSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(0, 616)) -Size (New-Object System.Drawing.Size(720, 82)) -Anchor 'Top, Left, Right'
 
 $startButton = New-Object System.Windows.Forms.Button
@@ -1026,6 +1136,54 @@ $ejectTimer.Add_Tick({
     Complete-DelayedAutoEject
 })
 
+$verificationTimer = New-Object System.Windows.Forms.Timer
+$verificationTimer.Interval = 350
+$verificationTimer.Add_Tick({
+    if (-not $script:verificationAsyncResult -or -not $script:verificationAsyncResult.IsCompleted) { return }
+    $verificationTimer.Stop()
+    try {
+        $output = @($script:verificationPowerShell.EndInvoke($script:verificationAsyncResult))
+        $verification = $output | Select-Object -Last 1
+        $gb = [math]::Round(([double]$verification.Bytes / 1GB), 2)
+        if ([int]$verification.ErrorCount -eq 0) {
+            $statusLabel.Text = L 'Backup erfolgreich geprüft.' 'Backup verified successfully.'
+            $resultBox.Text = (L '{0} Dateien ({1:N2} GB) wurden vollständig und ohne Lesefehler geprüft.' '{0} files ({1:N2} GB) were read completely without errors.') -f $verification.Files, $gb
+            Show-CompletionNotification -Title (L 'Backup geprüft' 'Backup verified') -Text $resultBox.Text -Icon Info
+        } else {
+            $statusLabel.Text = L 'Backup-Prüfung mit Lesefehlern beendet.' 'Backup verification found read errors.'
+            $resultBox.Text = (L '{0} Lesefehler gefunden.' '{0} read errors found.') -f $verification.ErrorCount
+            [System.Windows.Forms.MessageBox]::Show(($verification.Errors -join [Environment]::NewLine), $form.Text, 'OK', 'Warning') | Out-Null
+        }
+    } catch {
+        $statusLabel.Text = L 'Backup-Prüfung fehlgeschlagen.' 'Backup verification failed.'
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, $form.Text, 'OK', 'Error') | Out-Null
+    } finally {
+        if ($script:verificationPowerShell) { $script:verificationPowerShell.Dispose() }
+        $script:verificationPowerShell = $null
+        $script:verificationAsyncResult = $null
+        Stop-BusyProgress
+        Set-VerificationControlsEnabled -Enabled $true
+    }
+})
+
+function Set-VerificationControlsEnabled {
+    param([bool]$Enabled)
+    foreach ($control in @($startButton, $driveCombo, $refreshButton, $backupRadio, $restoreRadio, $libraryList, $allButton, $noneButton, $historyButton, $logButton, $destinationButton, $closeButton)) {
+        $control.Enabled = $Enabled
+    }
+    if ($Enabled) {
+        Update-BackupArtifactActions
+        Update-BackupOptionState
+        Update-SelectionState
+    } else {
+        $addFolderButton.Enabled = $false
+        $removeFolderButton.Enabled = $false
+        $dryRunCheckBox.Enabled = $false
+        $ejectCheckBox.Enabled = $false
+        $verifyButton.Enabled = $false
+    }
+}
+
 function Update-ResultOverview {
     # Ergaenzt die Ergebnisuebersicht im Leerlauf um die aktuelle Auswahl.
     # Waehrend eines laufenden Vorgangs gehoert die Anzeige dem Fortschritt.
@@ -1085,7 +1243,15 @@ function Complete-DelayedAutoEject {
         $script:ejectAttemptsRemaining = 0
         $statusLabel.Text = L "Sicherung erfolgreich abgeschlossen. Laufwerk kann entfernt werden." "Backup completed successfully. The drive can be removed."
         Add-ResultLine $ejectResult.Message
-        Update-DriveList
+        $script:suppressArtifactRetarget = $true
+        try { Update-DriveList } finally { $script:suppressArtifactRetarget = $false }
+        $script:lastDestination = $null
+        $script:lastLogDir = $null
+        $script:lastLogFile = $null
+        $logButton.Enabled = $false
+        $destinationButton.Enabled = $false
+        $historyButton.Enabled = $false
+        $verifyButton.Enabled = $false
     } else {
         $script:ejectAttemptsRemaining--
         if ($script:ejectAttemptsRemaining -gt 0) {
@@ -1124,11 +1290,23 @@ function Complete-DelayedAutoEject {
 
 function Update-SelectionState {
     $count = $libraryList.CheckedItems.Count
-    $startButton.Enabled = ($count -gt 0 -and $null -ne $driveCombo.SelectedItem -and -not $script:backupProcess -and -not $script:pendingEjectDrive)
+    $startButton.Enabled = ($count -gt 0 -and $null -ne $driveCombo.SelectedItem -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult)
     $selectedItem = $libraryList.SelectedItem
     $removeFolderButton.Enabled = $backupRadio.Checked -and $selectedItem -and
-        $selectedItem.PSObject.Properties['IsCustom'] -and $selectedItem.IsCustom -and -not $script:backupProcess -and -not $script:pendingEjectDrive
+        $selectedItem.PSObject.Properties['IsCustom'] -and $selectedItem.IsCustom -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
+    if ($backupRadio.Checked) { Update-BackupSelectionSnapshot }
     Update-ResultOverview
+}
+
+function Update-BackupSelectionSnapshot {
+    param([switch]$CaptureCurrentList)
+    if (-not $backupRadio.Checked -and -not $CaptureCurrentList) { return }
+    Sync-FolderCheckState
+    $selectedNames = @($libraryList.CheckedItems | ForEach-Object { [string]$_.Name })
+    $savedCustomFolders = @($script:customFolders | ForEach-Object {
+        [ordered]@{ Name = [string]$_.Name; Path = [string]$_.Path; Checked = $selectedNames -contains [string]$_.Name }
+    })
+    $script:backupSelectionSnapshot = [ordered]@{ SelectedNames = $selectedNames; CustomFolders = $savedCustomFolders }
 }
 
 function Update-BackupOptionState {
@@ -1139,26 +1317,25 @@ function Update-BackupOptionState {
         $isInternalDrive = $selectedDisk -and $selectedDisk.DriveType -eq 3
     }
 
-    $dryRunCheckBox.Enabled = $isBackup -and -not $script:backupProcess -and -not $script:pendingEjectDrive
+    $dryRunCheckBox.Enabled = $isBackup -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
     if (-not $isBackup) { $dryRunCheckBox.Checked = $false }
 
-    $ejectCheckBox.Enabled = $isBackup -and -not $isInternalDrive -and -not $script:backupProcess -and -not $script:pendingEjectDrive
+    $ejectCheckBox.Enabled = $isBackup -and -not $isInternalDrive -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
     if (-not $isBackup -or $isInternalDrive) { $ejectCheckBox.Checked = $false }
 
-    $addFolderButton.Enabled = $isBackup -and -not $script:backupProcess -and -not $script:pendingEjectDrive
+    $addFolderButton.Enabled = $isBackup -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
     $removeFolderButton.Visible = $isBackup
     $addFolderButton.Visible = $isBackup
     Update-SelectionState
 }
 
 function Update-LibraryList {
-    Sync-FolderCheckState
     $libraryList.Items.Clear()
     $items = @()
     if ($restoreRadio.Checked) {
         if ($driveCombo.SelectedItem) {
             $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
-            $backupRoot = Join-Path $disk.DeviceID ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
+            $backupRoot = Get-BackupRoot -Drive $disk.DeviceID
             $items += @(Get-LibraryDefinitions -IncludeMissing | Where-Object { Test-Path -LiteralPath (Join-Path $backupRoot $_.Name) -PathType Container } | ForEach-Object {
                 $checked = if ($script:folderCheckStates.ContainsKey([string]$_.Name)) { [bool]$script:folderCheckStates[[string]$_.Name] } else { $true }
                 New-FolderListItem -Name $_.Name -DisplayName (Get-FolderDisplayName $_.Name) -Path $_.Path -IsCustom $false -Checked $checked
@@ -1200,7 +1377,7 @@ $noneButton.Add_Click({
 })
 
 $addFolderButton.Add_Click({
-    Sync-FolderCheckState
+    Update-BackupSelectionSnapshot
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
     $dialog.Description = L "Weiteren Ordner für die Sicherung auswählen" "Select another folder to back up"
     $dialog.ShowNewFolderButton = $false
@@ -1249,7 +1426,7 @@ $libraryList.Add_ItemCheck({
     # Beim initialen Befüllen existiert das Fensterhandle noch nicht. In diesem
     # Fall aktualisiert Update-LibraryList den Zustand nach dem Befüllen selbst.
     if ($form.IsHandleCreated -and -not $form.IsDisposed) {
-        $form.BeginInvoke([Action]{ Sync-FolderCheckState; Update-SelectionState }) | Out-Null
+        $form.BeginInvoke([Action]{ Update-SelectionState }) | Out-Null
     }
 })
 
@@ -1283,6 +1460,7 @@ function Update-DriveList {
             $driveCombo.SelectedIndex = if ($preferredIndex -ge 0) { $preferredIndex } else { 0 }
         } else {
             $driveInfoLabel.Text = L "Kein geeignetes Ziellaufwerk gefunden." "No suitable drive was found."
+            Update-BackupArtifactActions
             $startButton.Enabled = $false
         }
     } catch {
@@ -1303,6 +1481,7 @@ $driveCombo.Add_SelectedIndexChanged({
         } else {
             L 'Dieses Laufwerk ist noch nicht als Sicherungslaufwerk gespeichert.' 'This drive is not currently remembered as the backup drive.'
         }))
+        if (-not $script:suppressArtifactRetarget) { Update-BackupArtifactActions }
         Update-BackupHealth
         Update-LibraryList
         Update-BackupOptionState
@@ -1312,6 +1491,7 @@ $driveCombo.Add_SelectedIndexChanged({
 
 $refreshButton.Add_Click({
     if ($script:pendingEjectDrive) { return }
+    $script:artifactCache.Clear()
     Update-DriveList
 })
 
@@ -1319,10 +1499,11 @@ $backupRadio.Add_CheckedChanged({
     if ($backupRadio.Checked) { Update-LibraryList; Update-BackupOptionState; Update-BackupHealth }
 })
 $restoreRadio.Add_CheckedChanged({
-    if ($restoreRadio.Checked) { Update-LibraryList; Update-BackupOptionState; Update-BackupHealth }
+    if ($restoreRadio.Checked) { Update-BackupSelectionSnapshot -CaptureCurrentList; Update-LibraryList; Update-BackupOptionState; Update-BackupHealth }
 })
 
 $startButton.Add_Click({
+    if ($script:verificationAsyncResult) { return }
     if ($script:pendingEjectDrive) {
         [System.Windows.Forms.MessageBox]::Show((L "Der automatische Auswurf läuft noch. Bitte warten Sie einen Moment." "Automatic eject is still in progress. Please wait a moment."), $form.Text, "OK", "Information") | Out-Null
         return
@@ -1341,6 +1522,8 @@ $startButton.Add_Click({
     }
 
     $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+    $artifactCacheKey = "{0}|{1}" -f $disk.DeviceID, (Get-NormalizedVolumeSerial -Disk $disk)
+    [void]$script:artifactCache.Remove($artifactCacheKey)
     if ($backupRadio.Checked -and $script:knownDrive -and -not (Test-IsKnownBackupDrive -Disk $disk)) {
         $knownName = if ($script:knownDrive.VolumeName) { $script:knownDrive.VolumeName } else { $script:knownDrive.LastDeviceId }
         $answer = [System.Windows.Forms.MessageBox]::Show(
@@ -1374,9 +1557,9 @@ $startButton.Add_Click({
     $script:previewFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.preview.json" -f [guid]::NewGuid().ToString("N"))
     $script:approvalFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.approve" -f [guid]::NewGuid().ToString("N"))
     $script:selectedFoldersFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.folders.json" -f [guid]::NewGuid().ToString("N"))
-    $script:lastLogDir = Join-Path $drive ("Bibliothekssicherung\{0}_{1}\_logs" -f $env:COMPUTERNAME, $env:USERNAME)
+    $script:lastLogDir = Join-Path (Get-BackupRoot -Drive $drive) '_logs'
     $script:lastLogFile = $null
-    $script:lastDestination = Join-Path $drive ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
+    $script:lastDestination = Get-BackupRoot -Drive $drive
     $script:backupStartedAt = Get-Date
     $script:backupCancelled = $false
     $script:preCancelStatusText = $null
@@ -1390,6 +1573,8 @@ $startButton.Add_Click({
     $cancelButton.Text = if ($restoreRadio.Checked) { L "Wiederherstellung abbrechen" "Cancel restore" } else { L "Sicherung abbrechen" "Cancel backup" }
     $logButton.Enabled = $false
     $destinationButton.Enabled = $false
+    $historyButton.Enabled = $false
+    $verifyButton.Enabled = $false
     $resultBox.Text = L "Vorprüfung wird gestartet ..." "Starting preflight checks ..."
     $statusLabel.ForeColor = [System.Drawing.SystemColors]::ControlText
     $statusLabel.Text = if ($restoreRadio.Checked) {
@@ -1636,6 +1821,8 @@ $timer.Add_Tick({
             $newestLog = Get-NewestLogFile
             $logButton.Enabled = $null -ne $newestLog
             $destinationButton.Enabled = $script:lastDestination -and (Test-Path -LiteralPath $script:lastDestination)
+            $historyButton.Enabled = $logButton.Enabled
+            $verifyButton.Enabled = $destinationButton.Enabled
 
             if ($script:backupCancelled) {
                 $statusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
@@ -1702,6 +1889,14 @@ $timer.Add_Tick({
                 [System.Windows.Forms.MessageBox]::Show($errorText, (L "Fehler" "Error"), "OK", "Error") | Out-Null
             }
 
+            if ($script:backupCancelled) {
+                Show-CompletionNotification -Title (L 'Vorgang abgebrochen' 'Operation cancelled') -Text $resultBox.Text -Icon Warning
+            } elseif ($exitCode -eq 0) {
+                Show-CompletionNotification -Title (L 'Vorgang abgeschlossen' 'Operation completed') -Text $resultBox.Text -Icon Info
+            } else {
+                Show-CompletionNotification -Title (L 'Vorgang fehlgeschlagen' 'Operation failed') -Text $resultBox.Text -Icon Error
+            }
+
             # Nach dem Abschluss genuegt ein Enter zum Beenden: "Schliessen"
             # erhaelt Default-Status und den Tastaturfokus.
             if ($closeButton.Visible -and $closeButton.Enabled) { $closeButton.Select() }
@@ -1752,6 +1947,64 @@ $helpButton.Add_Click({
     Open-HelpTopic
 })
 
+$historyButton.Add_Click({
+    $logs = @(Get-ChildItem -LiteralPath $script:lastLogDir -Filter '*.log' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 10)
+    if (-not $logs) { return }
+    $lines = @($logs | ForEach-Object {
+        $kind = if ($_.BaseName -like 'restore_*') { L 'Wiederherstellung' 'Restore' } else { L 'Sicherung' 'Backup' }
+        '{0}  ·  {1}  ·  {2:N1} KB' -f $_.LastWriteTime.ToString('dd.MM.yyyy HH:mm'), $kind, ($_.Length / 1KB)
+    })
+    [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), (L 'Letzte Vorgänge' 'Recent operations'), 'OK', 'Information') | Out-Null
+})
+
+$verifyButton.Add_Click({
+    if ($script:backupProcess -or $script:verificationAsyncResult) { return }
+    if (-not $script:lastDestination -or -not (Test-Path -LiteralPath $script:lastDestination -PathType Container)) { return }
+    $metadataFile = Join-Path $script:lastDestination '_Sicherungsinfo.txt'
+    $resultLine = if (Test-Path -LiteralPath $metadataFile -PathType Leaf) {
+        Get-Content -LiteralPath $metadataFile -ErrorAction SilentlyContinue | Where-Object { $_ -like 'Ergebnis:*' } | Select-Object -Last 1
+    }
+    if (-not $resultLine -or $resultLine -notmatch '^Ergebnis:\s*Erfolgreich abgeschlossen') {
+        [System.Windows.Forms.MessageBox]::Show((L 'Nur eine erfolgreich abgeschlossene Sicherung kann geprüft werden.' 'Only a successfully completed backup can be verified.'), $form.Text, 'OK', 'Warning') | Out-Null
+        return
+    }
+
+    Set-VerificationControlsEnabled -Enabled $false
+    $statusLabel.Text = L 'Backup wird vollständig gelesen ...' 'Reading the complete backup ...'
+    Start-BusyProgress
+    $verificationScript = {
+        param([string]$root, [string]$missingFoldersMessage)
+        [int64]$count = 0; [int64]$bytes = 0; [int]$errorCount = 0; $errors = @(); $scanErrors = @()
+        $buffer = New-Object byte[] (1MB)
+        $dataFolders = @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction Stop | Where-Object { -not $_.Name.StartsWith('_') })
+        if ($dataFolders.Count -eq 0) {
+            $errorCount++
+            $errors += $missingFoldersMessage
+        }
+        foreach ($file in @($dataFolders | Get-ChildItem -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors)) {
+            $stream = $null
+            try {
+                $stream = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
+                while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) { $bytes += $read }
+                $count++
+            } catch {
+                $errorCount++
+                if ($errors.Count -lt 10) { $errors += "${file}: $($_.Exception.Message)" }
+            } finally { if ($stream) { $stream.Dispose() } }
+        }
+        foreach ($scanError in $scanErrors) {
+            $errorCount++
+            if ($errors.Count -lt 10) { $errors += $scanError.Exception.Message }
+        }
+        [pscustomobject]@{ Folders = $dataFolders.Count; Files = $count; Bytes = $bytes; ErrorCount = $errorCount; Errors = @($errors) }
+    }
+    $script:verificationPowerShell = [System.Management.Automation.PowerShell]::Create()
+    [void]$script:verificationPowerShell.AddScript($verificationScript.ToString()).AddArgument($script:lastDestination).AddArgument((L 'Keine Sicherungsordner mit Nutzdaten gefunden.' 'No backup data folders were found.'))
+    $script:verificationAsyncResult = $script:verificationPowerShell.BeginInvoke()
+    $verificationTimer.Start()
+})
+
 $destinationButton.Add_Click({
     if ($script:lastDestination -and (Test-Path -LiteralPath $script:lastDestination)) {
         Start-Process -FilePath "explorer.exe" -ArgumentList $script:lastDestination
@@ -1786,6 +2039,24 @@ $cancelButton.Add_Click({
     }
 })
 
+$form.Add_KeyDown({
+    param($sender, $eventArgs)
+
+    if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::F1) {
+        Open-HelpTopic
+        $eventArgs.SuppressKeyPress = $true
+    } elseif ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::F5 -and $refreshButton.Enabled) {
+        $refreshButton.PerformClick()
+        $eventArgs.SuppressKeyPress = $true
+    } elseif ($eventArgs.Control -and $eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::L -and $logButton.Enabled) {
+        $logButton.PerformClick()
+        $eventArgs.SuppressKeyPress = $true
+    } elseif ($eventArgs.Control -and $eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::O -and $destinationButton.Enabled) {
+        $destinationButton.PerformClick()
+        $eventArgs.SuppressKeyPress = $true
+    }
+})
+
 $closeButton.Add_Click({ $form.Close() })
 
 $form.Add_FormClosing({
@@ -1795,6 +2066,9 @@ $form.Add_FormClosing({
     } elseif ($script:backupProcess -and -not $script:backupProcess.HasExited) {
         $eventArgs.Cancel = $true
         [System.Windows.Forms.MessageBox]::Show((L "Der Vorgang läuft noch. Bitte warten Sie bis zum Abschluss." "The operation is still running. Please wait until it finishes."), $form.Text, "OK", "Warning") | Out-Null
+    } elseif ($script:verificationAsyncResult -and -not $script:verificationAsyncResult.IsCompleted) {
+        $eventArgs.Cancel = $true
+        [System.Windows.Forms.MessageBox]::Show((L 'Die Backup-Prüfung läuft noch. Bitte warten Sie bis zum Abschluss.' 'Backup verification is still running. Wait until it completes.'), $form.Text, 'OK', 'Information') | Out-Null
     } elseif ($script:pendingEjectDrive) {
         $eventArgs.Cancel = $true
         [System.Windows.Forms.MessageBox]::Show((L "Der automatische Auswurf wird gerade vorbereitet. Bitte warten Sie einen Moment." "Automatic eject is being prepared. Please wait a moment."), $form.Text, "OK", "Information") | Out-Null
@@ -1803,11 +2077,16 @@ $form.Add_FormClosing({
 
 # Das Logo-Bitmap gehoert dem Formular und wird mit ihm entsorgt.
 $form.Add_FormClosed({
+    try { Save-FolderSelection } catch {}
     if ($logoBox.Image) { $logoBox.Image.Dispose() }
     if ($appIcon) { $appIcon.Dispose() }
     if ($healthToolTip) { $healthToolTip.Dispose() }
     if ($driveToolTip) { $driveToolTip.Dispose() }
+    if ($resultContextMenu) { $resultContextMenu.Dispose() }
+    if ($notifyIcon) { $notifyIcon.Visible = $false; $notifyIcon.Dispose() }
     if ($ejectTimer) { $ejectTimer.Dispose() }
+    if ($notificationTimer) { $notificationTimer.Dispose() }
+    if ($verificationTimer) { $verificationTimer.Dispose() }
 })
 
 # Beim Start liegt der Fokus auf "Sicherung starten", damit die Sicherung
@@ -1823,7 +2102,24 @@ foreach ($surface in @($targetSurface, $folderSurface, $optionsSurface, $activit
     $surface.SendToBack()
 }
 
+$script:settings = Get-AppSettings
 $script:knownDrive = Get-KnownBackupDrive
+$savedSelection = Get-SavedFolderSelection
+if ($savedSelection) {
+    $savedNames = @($savedSelection.SelectedNames | ForEach-Object { [string]$_ })
+    foreach ($definition in Get-LibraryDefinitions) {
+        $script:folderCheckStates[[string]$definition.Name] = $savedNames -contains [string]$definition.Name
+    }
+    foreach ($savedCustom in @($savedSelection.CustomFolders)) {
+        if ($savedCustom.Name -and $savedCustom.Path -and (Test-Path -LiteralPath ([string]$savedCustom.Path) -PathType Container)) {
+            $script:customFolders += New-FolderListItem -Name ([string]$savedCustom.Name) -DisplayName ("{0} ({1})" -f $savedCustom.Name, $savedCustom.Path) -Path ([string]$savedCustom.Path) -IsCustom $true -Checked ([bool]$savedCustom.Checked)
+            $script:folderCheckStates[[string]$savedCustom.Name] = [bool]$savedCustom.Checked
+        }
+    }
+    $script:backupSelectionSnapshot = [ordered]@{ SelectedNames = $savedNames; CustomFolders = @($savedSelection.CustomFolders) }
+}
+$libraryList.Items.Clear()
+Update-LibraryList
 Update-DriveList
 Update-BackupOptionState
 Update-SelectionState

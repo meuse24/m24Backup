@@ -48,9 +48,18 @@ wenn ein sichtbares Konsolenfenster hilfreich ist.
 8. **Sicherung starten** klicken.
 9. Warten, bis der Status den Abschluss meldet.
 
-Nach dem Abschluss können der Sicherungsordner und das technische Protokoll
-direkt aus der App geöffnet werden. Entfernen Sie das Ziellaufwerk niemals,
-solange der Vorgang läuft.
+Sicherungsordner und vorhandene technische Protokolle können direkt nach der
+Laufwerkswahl aus der App geöffnet werden. Die Ergebnisübersicht lässt sich
+über ihr Kontextmenü kopieren. `F1` öffnet die Hilfe, `F5` aktualisiert die
+Laufwerke, `Strg+L` öffnet das Protokoll und `Strg+O` den Sicherungsordner.
+Entfernen Sie das Ziellaufwerk niemals, solange der Vorgang läuft.
+
+Die App merkt sich die gewählten Standard- und Zusatzordner für den nächsten
+Start. **Verlauf** zeigt die letzten zehn vorhandenen Protokolle. Mit **Backup
+prüfen** wird jede Nutzdatei der letzten erfolgreichen Sicherung vollständig
+gelesen; dadurch werden nicht lesbare Dateien und Medienfehler erkannt. Wenn
+das Fenster im Hintergrund liegt, meldet Windows Abschluss, Fehler oder
+Abbruch zusätzlich als Benachrichtigung.
 
 <a id="dry-run"></a>
 ## Dry-Run: Sicherung nur simulieren
@@ -65,7 +74,7 @@ kopiert oder überschrieben würden.
 <a id="custom-folders"></a>
 ## Eigene Ordner hinzufügen
 
-Mit **Weiteren Ordner...** können Sie Arbeitsordner außerhalb der
+Mit **Hinzufügen** können Sie Arbeitsordner außerhalb der
 Windows-Standardordner in die Sicherung aufnehmen. Die App verhindert
 überlappende Ordner und reservierte interne Namen.
 

@@ -24,6 +24,12 @@ auf Englisch.
 - Kann ein erfolgreich verwendetes USB-Sicherungslaufwerk anschließend sicher
   auswerfen.
 - Zeigt Fortschritt und ein verständliches Ergebnis direkt im Fenster an.
+- Öffnet vorhandene Protokolle und Sicherungsordner direkt nach der
+  Laufwerkswahl und kann die Ergebnisübersicht kopieren.
+- Merkt sich die Ordnerauswahl, zeigt einen Verlauf und kann eine erfolgreiche
+  Sicherung durch vollständiges Lesen aller Dateien prüfen.
+- Informiert nach Vorgängen über eine Windows-Benachrichtigung, wenn die App im
+  Hintergrund liegt.
 - Zeigt eine Backup-Ampel mit Alter, Dauer und Ordnerzahl der letzten Sicherung
   auf dem ausgewählten Laufwerk.
 - Erkennt das zuletzt erfolgreich verwendete Sicherungslaufwerk anhand seiner

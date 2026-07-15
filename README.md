@@ -23,6 +23,12 @@ Windows systems and in English on all other systems.
   stored folder metadata.
 - Can safely eject a successfully used USB backup drive after completion.
 - Shows progress and a clear result directly in the application window.
+- Opens existing logs and backup folders immediately after drive selection and
+  can copy the result summary.
+- Remembers folder selections, shows recent operations, and can verify a
+  successful backup by reading every file completely.
+- Shows a Windows notification after operations while the app is in the
+  background.
 - Shows a traffic-light health indicator with the age, duration, and folder
   count of the latest backup on the selected drive.
 - Recognizes the last successfully used backup drive by its volume identifier,

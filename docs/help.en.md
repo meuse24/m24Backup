@@ -46,9 +46,16 @@ window is useful.
 8. Click **Start backup**.
 9. Wait for the completion message.
 
-After completion, the backup folder and technical log can be opened directly
-from the app. Never remove the destination drive while an operation is
-running.
+The backup folder and existing technical logs can be opened directly after
+selecting a drive. The summary can be copied from its context menu. `F1` opens
+Help, `F5` refreshes drives, `Ctrl+L` opens the log, and `Ctrl+O` opens the
+backup folder. Never remove the destination drive while an operation is running.
+
+The app remembers selected standard and custom folders for the next start.
+**History** lists the ten most recent logs. **Verify backup** reads every data
+file in the latest successful backup completely to detect unreadable files and
+media errors. When the window is in the background, Windows also displays a
+notification for completion, failure, or cancellation.
 
 <a id="dry-run"></a>
 ## Simulate only: dry run
@@ -63,7 +70,7 @@ before taking any risk.
 <a id="custom-folders"></a>
 ## Add custom folders
 
-Use **Add folder...** to include work folders outside the Windows standard
+Use **Add folder** to include work folders outside the Windows standard
 folders. The app rejects overlapping folders and reserved internal names.
 
 Additional folders are stored under unique names in the backup destination.
