@@ -53,6 +53,11 @@ preferred. `F5` forces an immediate refresh. `F1` opens Help, `Ctrl+L` opens the
 log, and `Ctrl+O` opens the backup folder. Never remove the destination drive
 while an operation is running.
 
+A star (`★`) marks the drive used for the last successful backup. The app
+recognizes it by its volume identifier. Before backing up to a different drive,
+the app asks for confirmation; the new drive is remembered only after a
+successful run.
+
 The app remembers selected standard and custom folders for the next start.
 **History** lists the ten most recent logs. **Verify backup** reads every data
 file completely and compares its SHA-256 checksum with `_Pruefsummen.tsv` to
@@ -291,8 +296,12 @@ used.
 | --- | --- |
 | `0` | Operation completed successfully. |
 | `1` | Interactive operation declined before starting. |
+| `8` and above | Robocopy reported at least one copy error. |
 | `10` | Validation, preflight, approval, or general script error. |
-| `20` | Robocopy reported at least one copy error. |
+| `20` | Operation was cancelled by the user or GUI. |
+
+Because the raw Robocopy value is returned unchanged, code `10` can also come
+from Robocopy. The result file and log show which phase produced the error.
 
 ## Privacy and safety
 

@@ -55,35 +55,6 @@ function M {
     return $English
 }
 
-function Get-LocalizedFolderName {
-    param([string]$Name)
-    if ($script:isGerman) { return $Name }
-    $names = @{
-        'Desktop'='Desktop'; 'Dokumente'='Documents'; 'Downloads'='Downloads'; 'Bilder'='Pictures'
-        'Musik'='Music'; 'Videos'='Videos'; 'Favoriten'='Favorites'; 'Gespeicherte Spiele'='Saved Games'; 'Kontakte'='Contacts'
-    }
-    if ($names.ContainsKey($Name)) { return $names[$Name] }
-    return $Name
-}
-
-function Write-AtomicTextFile {
-    param([string]$Path, [string]$Content)
-
-    $temporaryFile = "{0}.{1}.tmp" -f $Path, [guid]::NewGuid().ToString('N')
-    $backupFile = "{0}.{1}.bak" -f $Path, [guid]::NewGuid().ToString('N')
-    try {
-        [System.IO.File]::WriteAllText($temporaryFile, $Content, (New-Object System.Text.UTF8Encoding($true)))
-        if ([System.IO.File]::Exists($Path)) {
-            [System.IO.File]::Replace($temporaryFile, $Path, $backupFile, $true)
-        } else {
-            [System.IO.File]::Move($temporaryFile, $Path)
-        }
-    } finally {
-        Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
-    }
-}
-
 function Write-AtomicJsonFile {
     [CmdletBinding()]
     param(
@@ -93,7 +64,7 @@ function Write-AtomicJsonFile {
     )
     process {
         $json = $Value | ConvertTo-Json -Depth $Depth
-        Write-AtomicTextFile -Path $Path -Content ($json + [Environment]::NewLine)
+        Write-M24AtomicTextFile -Path $Path -Content ($json + [Environment]::NewLine)
     }
 }
 
@@ -129,7 +100,7 @@ trap {
     }
     if ($StatusFile) {
         try {
-            Write-AtomicTextFile -Path $StatusFile -Content ("FEHLER|{0}" -f $_.Exception.Message)
+            Write-M24AtomicTextFile -Path $StatusFile -Content ("FEHLER|{0}" -f $_.Exception.Message)
         } catch {
             # Ein Fehler beim optionalen GUI-Status darf den Originalfehler nicht verdecken.
         }
@@ -176,7 +147,7 @@ function Set-BackupResultMetadata {
 
     $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop | Where-Object { $_ -notlike 'Ergebnis:*' })
     $content = (@($lines) + "Ergebnis: $Result am $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss').") -join [Environment]::NewLine
-    Write-AtomicTextFile -Path $Path -Content ($content + [Environment]::NewLine)
+    Write-M24AtomicTextFile -Path $Path -Content ($content + [Environment]::NewLine)
 }
 if ($DryRun -and $Mode -ne 'Backup') {
     throw (M "Dry-Run ist nur fuer Sicherungen verfuegbar." "Dry run is only available for backups.")
@@ -190,10 +161,84 @@ function Write-BackupStatus {
 
     if ($StatusFile) {
         try {
-            Write-AtomicTextFile -Path $StatusFile -Content ("{0}|{1}" -f $Type, $Text)
+            Write-M24AtomicTextFile -Path $StatusFile -Content ("{0}|{1}" -f $Type, $Text)
         } catch {
             # Die Sicherung laeuft weiter, falls nur die GUI-Statusdatei nicht schreibbar ist.
         }
+    }
+}
+
+function Set-ProcessArguments {
+    param(
+        [System.Diagnostics.ProcessStartInfo]$StartInfo,
+        [string[]]$Arguments
+    )
+
+    $argumentListProperty = $StartInfo.PSObject.Properties['ArgumentList']
+    if ($argumentListProperty -and $null -ne $StartInfo.ArgumentList) {
+        foreach ($argument in $Arguments) {
+            [void]$StartInfo.ArgumentList.Add([string]$argument)
+        }
+    } else {
+        $StartInfo.Arguments = ($Arguments | ForEach-Object { ConvertTo-M24ProcessArgument ([string]$_) }) -join ' '
+    }
+}
+
+function Invoke-RobocopyWithCancel {
+    param(
+        [string[]]$Arguments,
+        [string]$CancelFile,
+        [int]$CurrentFolder,
+        [int]$TotalFolders,
+        [string]$FolderName
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = 'robocopy.exe'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    Set-ProcessArguments -StartInfo $startInfo -Arguments $Arguments
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    $lastStatusAt = [datetime]::MinValue
+    try {
+        if (-not $process.Start()) {
+            throw (M 'Robocopy konnte nicht gestartet werden.' 'Robocopy could not be started.')
+        }
+
+        while (-not $process.WaitForExit(500)) {
+            if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
+                Write-BackupStatus -Type 'ABBRUCHLAEUFT' -Text ("{0}|{1}|{2}" -f $CurrentFolder, $TotalFolders, $FolderName)
+                try {
+                    if (-not $process.HasExited) { $process.Kill() }
+                } catch {
+                    # Der Worker behandelt den Abbruch auch dann als angefordert,
+                    # wenn Robocopy zwischen Pruefung und Kill bereits beendet wurde.
+                }
+                $waitedSeconds = 0
+                while (-not $process.WaitForExit(1000)) {
+                    $waitedSeconds++
+                    if (($waitedSeconds % 5) -eq 0) {
+                        try {
+                            if (-not $process.HasExited) { $process.Kill() }
+                        } catch {}
+                    }
+                    Write-BackupStatus -Type 'ABBRUCHWARTET' -Text ("{0}|{1}|{2}|{3}" -f $CurrentFolder, $TotalFolders, $FolderName, $waitedSeconds)
+                }
+                return [pscustomobject]@{ Cancelled = $true; ExitCode = 20; HardStopped = $true }
+            }
+
+            $now = Get-Date
+            if (($now - $lastStatusAt).TotalSeconds -ge 2) {
+                Write-BackupStatus -Type 'KOPIERVORGANG' -Text ("{0}|{1}|{2}" -f $CurrentFolder, $TotalFolders, $FolderName)
+                $lastStatusAt = $now
+            }
+        }
+
+        return [pscustomobject]@{ Cancelled = $false; ExitCode = $process.ExitCode; HardStopped = $false }
+    } finally {
+        if ($process) { try { $process.Dispose() } catch {} }
     }
 }
 
@@ -258,6 +303,10 @@ function Get-BackupPreflight {
         Write-BackupStatus -Type 'PRUEFUNG' -Text ("{0}|{1}|{2}" -f $index, @($Folders).Count, $folder.Name)
         try {
             $folderScanWarnings = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $sourceRoot = [string]$folder.Path
+            $sourceRootLength = $sourceRoot.TrimEnd('\').Length
+            $targetRootPath = [string]$folder.TargetPath
+            $targetDriveRoot = [System.IO.Path]::GetPathRoot($targetRootPath).TrimEnd('\')
             # Pro Verzeichnis wird nur die unmittelbare Ebene materialisiert.
             # Das bleibt speicherarm, laesst den PowerShell-Provider aber nach
             # einzelnen Lesefehlern weiterarbeiten. /XJ schliesst nur Junctions
@@ -286,8 +335,8 @@ function Get-BackupPreflight {
                         $totalBytes += $file.Length
                         if ($file.Length -ge 4GB) { $largeFiles += $file.FullName }
 
-                        $relative = $file.FullName.Substring($folder.Path.TrimEnd('\').Length).TrimStart('\')
-                        $targetFile = Join-Path $folder.TargetPath $relative
+                        $relative = $file.FullName.Substring($sourceRootLength).TrimStart('\')
+                        $targetFile = Join-Path $targetRootPath $relative
                         $needsCopy = $true
                         if ([System.IO.File]::Exists($targetFile)) {
                             try {
@@ -307,9 +356,8 @@ function Get-BackupPreflight {
                         if ($needsCopy) {
                             $requiredFileCount++
                             $requiredBytes += $file.Length
-                            $targetRoot = [System.IO.Path]::GetPathRoot($folder.TargetPath).TrimEnd('\')
-                            if (-not $requiredByRoot.ContainsKey($targetRoot)) { $requiredByRoot[$targetRoot] = [int64]0 }
-                            $requiredByRoot[$targetRoot] = [int64]$requiredByRoot[$targetRoot] + $file.Length
+                            if (-not $requiredByRoot.ContainsKey($targetDriveRoot)) { $requiredByRoot[$targetDriveRoot] = [int64]0 }
+                            $requiredByRoot[$targetDriveRoot] = [int64]$requiredByRoot[$targetDriveRoot] + $file.Length
                         }
                     } catch {
                         [void]$folderScanWarnings.Add($_.Exception.Message)
@@ -478,22 +526,6 @@ function Get-BitLockerStatusText {
     }
 }
 
-function Get-UserShellFolder {
-    param(
-        [string]$Name,
-        [string]$Fallback
-    )
-
-    # Beruecksichtigt auch Ordner, die beispielsweise nach OneDrive umgeleitet wurden.
-    $registryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
-    $value = (Get-ItemProperty -Path $registryPath -Name $Name -ErrorAction SilentlyContinue).$Name
-    if ($value) {
-        return [Environment]::ExpandEnvironmentVariables($value)
-    }
-
-    return $Fallback
-}
-
 function Assert-BackupIdentity {
     param([string]$MetadataFile)
 
@@ -615,20 +647,7 @@ function Test-IsCustomFolderSpec {
 
 # AppData ist bewusst nicht Teil der Sicherung. Ein Pfad, der direkt dem
 # gesamten Benutzerprofil entspricht, wird ebenfalls ausgeschlossen.
-$folderDefinitions = @(
-    [pscustomobject]@{ Name = "Desktop";   Path = [Environment]::GetFolderPath("Desktop") },
-    [pscustomobject]@{ Name = "Dokumente"; Path = [Environment]::GetFolderPath("MyDocuments") },
-    [pscustomobject]@{ Name = "Downloads"; Path = Get-UserShellFolder -Name "{374DE290-123F-4565-9164-39C4925E467B}" -Fallback (Join-Path $env:USERPROFILE "Downloads") },
-    [pscustomobject]@{ Name = "Bilder";    Path = [Environment]::GetFolderPath("MyPictures") },
-    [pscustomobject]@{ Name = "Musik";     Path = [Environment]::GetFolderPath("MyMusic") },
-    [pscustomobject]@{ Name = "Videos";    Path = [Environment]::GetFolderPath("MyVideos") },
-    [pscustomobject]@{ Name = "Favoriten"; Path = [Environment]::GetFolderPath("Favorites") },
-    [pscustomobject]@{ Name = "Gespeicherte Spiele"; Path = Join-Path $env:USERPROFILE "Saved Games" },
-    [pscustomobject]@{ Name = "Kontakte"; Path = Join-Path $env:USERPROFILE "Contacts" }
-) | Where-Object {
-    $_.Path -and
-    ([System.IO.Path]::GetFullPath($_.Path).TrimEnd('\') -ne [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\'))
-}
+$folderDefinitions = @(Get-M24StandardFolderDefinitions)
 
 $drive = Resolve-UsbDrive -Drive $UsbDrive -Silent:$Silent
 # Jeder Computer und Benutzer erhaelt am Ziel einen eigenen Sicherungsordner.
@@ -836,7 +855,7 @@ $bitLockerStatus = Get-BitLockerStatusText -Drive $drive
 Write-Host ""
 Write-Host $(if ($Mode -eq 'Restore') { M 'Wiederhergestellt werden diese Benutzerordner:' 'These user folders will be restored:' } else { M 'Gesichert werden nur diese Benutzerordner:' 'Only these user folders will be backed up:' })
 foreach ($folder in $backupFolders) {
-    Write-Host ("- {0}" -f (Get-LocalizedFolderName $folder.Name))
+    Write-Host ("- {0}" -f (Get-M24FolderDisplayName $folder.Name $script:isGerman))
 }
 Write-Host ""
 Write-Host $(if ($Mode -eq 'Restore') { (M "Sicherungsquelle: {0}" "Backup source: {0}") -f $destination } else { (M "Ziel:   {0}" "Destination: {0}") -f $destination })
@@ -898,7 +917,7 @@ if ($Mode -eq 'Backup' -and -not $DryRun) {
         "Ziel: $destination", "Ordner: $($backupFolders.Name -join ', ')",
         'Sicherungsart: Fortlaufende Sicherheitskopie; am Ziel werden keine Dateien geloescht.'
     ) -join [Environment]::NewLine
-    Write-AtomicTextFile -Path $metadataFile -Content ($metadataContent + [Environment]::NewLine)
+    Write-M24AtomicTextFile -Path $metadataFile -Content ($metadataContent + [Environment]::NewLine)
     $script:backupMetadataStarted = $true
 }
 
@@ -906,6 +925,7 @@ $maxCode = 0
 $failedFolders = @()
 $successfulFolders = @()
 $foldersWithHints = @()
+$robocopyWarnings = @()
 $filesCopiedThisRun = $false
 $folderNumber = 0
 $folderCount = @($backupFolders).Count
@@ -938,7 +958,8 @@ foreach ($folder in $backupFolders) {
                 Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $cancelMessage
                 Destination = $destination; LogFile = $logFile
                 StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o')
-                SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @()
+                SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
+                RobocopyWarnings = @($robocopyWarnings)
             } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
         }
         Exit-OperationLock
@@ -946,7 +967,7 @@ foreach ($folder in $backupFolders) {
     }
     $folderNumber++
     $target = $folder.TargetPath
-    $displayFolderName = Get-LocalizedFolderName $folder.Name
+    $displayFolderName = Get-M24FolderDisplayName $folder.Name $script:isGerman
     Write-Host $(if ($Mode -eq 'Restore') { (M "Stelle {0} wieder her..." "Restoring {0}...") -f $displayFolderName } else { (M "Sichere {0}..." "Backing up {0}...") -f $displayFolderName })
     Write-BackupStatus -Type "FORTSCHRITT" -Text ("{0}|{1}|{2}" -f $folderNumber, $folderCount, $folder.Name)
 
@@ -978,8 +999,30 @@ foreach ($folder in $backupFolders) {
     }
     $robocopyArgs += @("/XF") + $excludedFiles
 
-    $null = & robocopy @robocopyArgs
-    $code = $LASTEXITCODE
+    $robocopyResult = Invoke-RobocopyWithCancel -Arguments $robocopyArgs -CancelFile $CancelFile -CurrentFolder $folderNumber -TotalFolders $folderCount -FolderName $folder.Name
+    if ($robocopyResult.Cancelled) {
+        Write-BackupStatus -Type 'ABGEBROCHEN' -Text (M 'Vorgang wurde auf Wunsch beendet.' 'Operation was cancelled by request.')
+        if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen' }
+        if ($ResultFile) {
+            [pscustomobject]@{
+                Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $cancelMessage
+                Destination = $destination; LogFile = $logFile
+                StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o')
+                SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
+                RobocopyWarnings = @($robocopyWarnings)
+                InterruptedFolder = $folder.Name
+                HardStopped = [bool]$robocopyResult.HardStopped
+                PartialFilesMayRemain = [bool]$robocopyResult.HardStopped
+            } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
+        }
+        Add-Content -LiteralPath $logFile -Encoding Unicode -Value ((M "Abbruch: Robocopy wurde waehrend '{0}' beendet." "Cancellation: Robocopy was stopped while processing '{0}'.") -f $displayFolderName)
+        if ($robocopyResult.HardStopped) {
+            Add-Content -LiteralPath $logFile -Encoding Unicode -Value (M "Warnung: Die zuletzt aktive Datei kann unvollstaendig im Ziel liegen. Starten Sie die Sicherung erneut oder pruefen Sie das Backup." "Warning: The last active file may remain incomplete at the destination. Run the backup again or verify the backup.")
+        }
+        Exit-OperationLock
+        exit 20
+    }
+    $code = [int]$robocopyResult.ExitCode
     if (($code -band 1) -ne 0) { $filesCopiedThisRun = $true }
 
     # Robocopy verwendet die Codes 0 bis 7 fuer erfolgreiche Laeufe bzw.
@@ -989,6 +1032,11 @@ foreach ($folder in $backupFolders) {
         if ($code -ge 2) {
             $foldersWithHints += $folder.Name
             Write-Host ((M "  OK mit Hinweisen ({0}), Robocopy-Code {1}" "  OK with notes ({0}), Robocopy code {1}") -f $displayFolderName, $code)
+            if (($code -band 4) -ne 0) {
+                $warning = (M "Robocopy meldet nicht uebereinstimmende Dateien in '{0}'. Moeglicherweise waren Dateien geoeffnet oder wurden waehrend des Kopierens geaendert." "Robocopy reported mismatched files in '{0}'. Files may have been open or changed during copying.") -f $displayFolderName
+                $robocopyWarnings += $warning
+                Write-Host ("  {0}" -f $warning)
+            }
         } else {
             Write-Host ("  OK ({0})" -f $displayFolderName)
         }
@@ -1010,6 +1058,7 @@ if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
             Destination = $destination; LogFile = $logFile
             StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o')
             SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
+            RobocopyWarnings = @($robocopyWarnings)
         } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
     }
     Exit-OperationLock
@@ -1068,17 +1117,17 @@ if ($maxCode -le 7) {
                 }
             }
             $folderMetadataJson = @($mergedMetadata.Values | Sort-Object Name) | ConvertTo-Json -Depth 4
-            Write-AtomicTextFile -Path $folderMetadataFile -Content ($folderMetadataJson + [Environment]::NewLine)
+            Write-M24AtomicTextFile -Path $folderMetadataFile -Content ($folderMetadataJson + [Environment]::NewLine)
         }
     }
     if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Erfolgreich abgeschlossen' }
     Write-BackupStatus -Type "FERTIG" -Text $successMessage
     Write-Host $successMessage
     $folderSummaryLabel = if ($Mode -eq 'Restore') { M 'Wiederhergestellte Ordner' 'Restored folders' } else { M 'Gesicherte Ordner' 'Backed-up folders' }
-    $localizedSuccessfulFolders = @($successfulFolders | ForEach-Object { Get-LocalizedFolderName $_ })
+    $localizedSuccessfulFolders = @($successfulFolders | ForEach-Object { Get-M24FolderDisplayName $_ $script:isGerman })
     Write-Host ("{0}: {1}" -f $folderSummaryLabel, ($localizedSuccessfulFolders -join ", "))
     if ($foldersWithHints) {
-        $localizedHintFolders = @($foldersWithHints | ForEach-Object { Get-LocalizedFolderName $_ })
+        $localizedHintFolders = @($foldersWithHints | ForEach-Object { Get-M24FolderDisplayName $_ $script:isGerman })
         Write-Host ((M "Ordner mit Hinweisen: {0}" "Folders with notes: {0}") -f ($localizedHintFolders -join ", "))
     }
     Write-Host $(if ($Mode -eq 'Restore') { (M "Sicherungsquelle: {0}" "Backup source: {0}") -f $destination } else { (M "Ziel: {0}" "Destination: {0}") -f $destination })
@@ -1099,6 +1148,7 @@ if ($maxCode -le 7) {
             SuccessfulFolders = @($successfulFolders)
             HintFolders = @($foldersWithHints)
             FailedFolders = @()
+            RobocopyWarnings = @($robocopyWarnings)
             ScannedFiles = $preflight.FileCount
             PlannedFiles = $preflight.RequiredFileCount
             PlannedBytes = $preflight.RequiredBytes
@@ -1117,7 +1167,7 @@ if ($maxCode -le 7) {
 Write-Host $failureMessage
 if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Mit Fehlern beendet' }
 Write-BackupStatus -Type "FEHLER" -Text ((M "Fehler in: {0}" "Errors in: {0}") -f ($failedFolders -join ", "))
-$localizedFailedFolders = @($failedFolders | ForEach-Object { Get-LocalizedFolderName $_ })
+$localizedFailedFolders = @($failedFolders | ForEach-Object { Get-M24FolderDisplayName $_ $script:isGerman })
 Write-Host ((M "Betroffene Ordner: {0}" "Affected folders: {0}") -f ($localizedFailedFolders -join ", "))
 Write-Host ((M "Bitte Log pruefen: {0}" "Review the log: {0}") -f $logFile)
 if ($ResultFile) {
@@ -1142,6 +1192,7 @@ if ($ResultFile) {
         SuccessfulFolders = @($successfulFolders)
         HintFolders = @($foldersWithHints)
         FailedFolders = @($failedFolders)
+        RobocopyWarnings = @($robocopyWarnings)
         PartialCopy = $partialCopy
         ScannedFiles = $preflight.FileCount
         PlannedFiles = $preflight.RequiredFileCount

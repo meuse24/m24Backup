@@ -56,6 +56,12 @@ ausgewählt. `F5` erzwingt eine sofortige Aktualisierung. `F1` öffnet die Hilfe
 `Strg+L` öffnet das Protokoll und `Strg+O` den Sicherungsordner.
 Entfernen Sie das Ziellaufwerk niemals, solange der Vorgang läuft.
 
+Ein Stern (`★`) kennzeichnet das zuletzt erfolgreich verwendete
+Sicherungslaufwerk. Die App erkennt es anhand seiner Datenträger-ID wieder. Vor
+einer Sicherung auf ein anderes Laufwerk fragt sie nach; erst nach einem
+erfolgreichen Lauf wird das neue Laufwerk für die künftige Wiedererkennung
+gespeichert.
+
 Die App merkt sich die gewählten Standard- und Zusatzordner für den nächsten
 Start. **Verlauf** zeigt die letzten zehn vorhandenen Protokolle. Mit **Backup
 prüfen** wird jede Nutzdatei vollständig gelesen und ihre SHA-256-Prüfsumme mit
@@ -307,8 +313,13 @@ absichtlich nie verwendet.
 | --- | --- |
 | `0` | Vorgang erfolgreich abgeschlossen. |
 | `1` | Interaktiver Vorgang wurde vor dem Start abgelehnt. |
+| `8` und höher | Robocopy hat mindestens einen Kopierfehler gemeldet. |
 | `10` | Validierung, Vorprüfung, Freigabe oder allgemeiner Skriptfehler. |
-| `20` | Robocopy hat mindestens einen Kopierfehler gemeldet. |
+| `20` | Vorgang wurde durch den Benutzer oder die GUI abgebrochen. |
+
+Da der Robocopy-Rohwert unverändert zurückgegeben wird, kann Code `10` auch
+von Robocopy stammen. Ergebnisdatei und Protokoll zeigen, in welcher Phase der
+Fehler auftrat.
 
 ## Datenschutz und Sicherheit
 

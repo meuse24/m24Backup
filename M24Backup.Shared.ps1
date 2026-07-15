@@ -19,6 +19,86 @@ function Get-M24DefaultExcludedFiles {
     return @('thumbs.db', 'desktop.ini', '*.tmp', '*.temp', '~$*')
 }
 
+function Get-M24UserShellFolder {
+    param(
+        [string]$Name,
+        [string]$Fallback
+    )
+
+    # Beruecksichtigt auch Ordner, die beispielsweise nach OneDrive umgeleitet wurden.
+    $registryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+    $value = (Get-ItemProperty -Path $registryPath -Name $Name -ErrorAction SilentlyContinue).$Name
+    if ($value) {
+        return [Environment]::ExpandEnvironmentVariables($value)
+    }
+
+    return $Fallback
+}
+
+function Get-M24StandardFolderDefinitions {
+    $folders = @(
+        [pscustomobject]@{ Name = 'Desktop'; Path = [Environment]::GetFolderPath('Desktop') },
+        [pscustomobject]@{ Name = 'Dokumente'; Path = [Environment]::GetFolderPath('MyDocuments') },
+        [pscustomobject]@{ Name = 'Downloads'; Path = Get-M24UserShellFolder -Name '{374DE290-123F-4565-9164-39C4925E467B}' -Fallback (Join-Path $env:USERPROFILE 'Downloads') },
+        [pscustomobject]@{ Name = 'Bilder'; Path = [Environment]::GetFolderPath('MyPictures') },
+        [pscustomobject]@{ Name = 'Musik'; Path = [Environment]::GetFolderPath('MyMusic') },
+        [pscustomobject]@{ Name = 'Videos'; Path = [Environment]::GetFolderPath('MyVideos') },
+        [pscustomobject]@{ Name = 'Favoriten'; Path = [Environment]::GetFolderPath('Favorites') },
+        [pscustomobject]@{ Name = 'Gespeicherte Spiele'; Path = Join-Path $env:USERPROFILE 'Saved Games' },
+        [pscustomobject]@{ Name = 'Kontakte'; Path = Join-Path $env:USERPROFILE 'Contacts' }
+    )
+
+    $profilePath = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
+    return @($folders | Where-Object {
+        $_.Path -and [System.IO.Path]::GetFullPath($_.Path).TrimEnd('\') -ne $profilePath
+    })
+}
+
+function Get-M24FolderDisplayName {
+    param([string]$CanonicalName, [bool]$German = (Test-M24GermanUiCulture))
+
+    if ($German) { return $CanonicalName }
+    $englishNames = @{
+        'Desktop' = 'Desktop'; 'Dokumente' = 'Documents'; 'Downloads' = 'Downloads'
+        'Bilder' = 'Pictures'; 'Musik' = 'Music'; 'Videos' = 'Videos'
+        'Favoriten' = 'Favorites'; 'Gespeicherte Spiele' = 'Saved Games'; 'Kontakte' = 'Contacts'
+    }
+    if ($englishNames.ContainsKey($CanonicalName)) { return $englishNames[$CanonicalName] }
+    return $CanonicalName
+}
+
+function ConvertTo-M24ProcessArgument {
+    param([string]$Argument)
+
+    if ($null -eq $Argument) { return '""' }
+    if ($Argument -notmatch '[\s"]') { return $Argument }
+    $escaped = $Argument -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
+function Write-M24AtomicTextFile {
+    param(
+        [string]$Path,
+        [string]$Content,
+        [bool]$Utf8Bom = $true
+    )
+
+    $temporaryFile = "{0}.{1}.tmp" -f $Path, [guid]::NewGuid().ToString('N')
+    $backupFile = "{0}.{1}.bak" -f $Path, [guid]::NewGuid().ToString('N')
+    try {
+        [System.IO.File]::WriteAllText($temporaryFile, $Content, (New-Object System.Text.UTF8Encoding($Utf8Bom)))
+        if ([System.IO.File]::Exists($Path)) {
+            [System.IO.File]::Replace($temporaryFile, $Path, $backupFile, $true)
+        } else {
+            [System.IO.File]::Move($temporaryFile, $Path)
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-M24ExcludedFileName {
     param([string]$Name, [string[]]$Patterns)
     foreach ($pattern in $Patterns) {
@@ -114,13 +194,12 @@ function Update-M24ChecksumManifest {
         $folderIndex++
         if ($StatusCallback) { & $StatusCallback $folderIndex @($Folders).Count $folder.Name }
         $scanErrors = @()
-        $files = Get-ChildItem -LiteralPath $folder.Path -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors
-        # Ein unvollstaendiger Scan darf niemals als neues gueltiges Manifest
-        # geschrieben werden. Der Worker markiert den gesamten Lauf als Fehler.
-        if ($scanErrors.Count) { throw $scanErrors[0].Exception }
-        foreach ($file in $files) {
-            if ($CancelCallback -and (& $CancelCallback)) { return [pscustomobject]@{ Cancelled = $true } }
-            if (Test-M24ExcludedFileName -Name $file.Name -Patterns $ExcludedFiles) { continue }
+        $cancelled = $false
+        Get-ChildItem -LiteralPath $folder.Path -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors | ForEach-Object {
+            $file = $_
+            if ($cancelled) { return }
+            if ($CancelCallback -and (& $CancelCallback)) { $cancelled = $true; return }
+            if (Test-M24ExcludedFileName -Name $file.Name -Patterns $ExcludedFiles) { return }
             $relative = $file.FullName.Substring($folder.Path.TrimEnd('\').Length).TrimStart('\')
             $entryPath = "{0}\{1}" -f $folder.Name, $relative
             $existing = if ($entries.ContainsKey($entryPath)) { $entries[$entryPath] } else { $null }
@@ -131,12 +210,16 @@ function Update-M24ChecksumManifest {
                 $hash = $existing.Sha256; $reusedFiles++
             } else {
                 $hash = Get-M24FileSha256 -Path $file.FullName -CancelCallback $CancelCallback
-                if ($null -eq $hash) { return [pscustomobject]@{ Cancelled = $true } }
+                if ($null -eq $hash) { $cancelled = $true; return }
                 $hashedFiles++
             }
             $entries[$entryPath] = [pscustomobject]@{ Path = $entryPath; Length = [int64]$file.Length; LastWriteUtcTicks = [int64]$file.LastWriteTimeUtc.Ticks; Sha256 = $hash }
             $fileCount++; $totalBytes += $file.Length
         }
+        # Ein unvollstaendiger Scan darf niemals als neues gueltiges Manifest
+        # geschrieben werden. Der Worker markiert den gesamten Lauf als Fehler.
+        if ($scanErrors.Count) { throw $scanErrors[0].Exception }
+        if ($cancelled) { return [pscustomobject]@{ Cancelled = $true } }
     }
     Write-M24ChecksumManifest -Path $ManifestPath -Entries $entries
     return [pscustomobject]@{ Cancelled = $false; Files = $fileCount; HashedFiles = $hashedFiles; ReusedFiles = $reusedFiles; Bytes = $totalBytes }
@@ -160,18 +243,23 @@ function Test-M24ChecksumManifest {
         $folderIndex++
         if ($StatusCallback) { & $StatusCallback $folderIndex @($Folders).Count $folder.Name }
         $scanErrors = @()
-        foreach ($file in @(Get-ChildItem -LiteralPath $folder.Path -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors)) {
+        $cancelled = $false
+        Get-ChildItem -LiteralPath $folder.Path -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors | ForEach-Object {
+            $file = $_
+            if ($cancelled) { return }
             if ($CancelCallback -and (& $CancelCallback)) {
-                return [pscustomobject]@{ Cancelled = $true; MissingManifest = $false; Files = $files; Bytes = $bytes; ErrorCount = $errorCount; Errors = @($errors) }
+                $cancelled = $true
+                return
             }
-            if (Test-M24ExcludedFileName -Name $file.Name -Patterns $ExcludedFiles) { continue }
+            if (Test-M24ExcludedFileName -Name $file.Name -Patterns $ExcludedFiles) { return }
             $relative = $file.FullName.Substring($folder.Path.TrimEnd('\').Length).TrimStart('\')
             $path = "{0}\{1}" -f $folder.Name, $relative
             [void]$seen.Add($path)
             try {
                 $hash = Get-M24FileSha256 -Path $file.FullName -CancelCallback $CancelCallback
                 if ($null -eq $hash) {
-                    return [pscustomobject]@{ Cancelled = $true; MissingManifest = $false; Files = $files; Bytes = $bytes; ErrorCount = $errorCount; Errors = @($errors) }
+                    $cancelled = $true
+                    return
                 }
                 $files++; $bytes += $file.Length
                 if (-not $manifest.Entries.ContainsKey($path)) { throw "Checksum entry missing: $path" }
@@ -179,6 +267,9 @@ function Test-M24ChecksumManifest {
             } catch {
                 $errorCount++; if ($errors.Count -lt 10) { $errors += $_.Exception.Message }
             }
+        }
+        if ($cancelled) {
+            return [pscustomobject]@{ Cancelled = $true; MissingManifest = $false; Files = $files; Bytes = $bytes; ErrorCount = $errorCount; Errors = @($errors) }
         }
         foreach ($scanError in $scanErrors) { $errorCount++; if ($errors.Count -lt 10) { $errors += $scanError.Exception.Message } }
     }

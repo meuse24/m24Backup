@@ -25,20 +25,6 @@ function L {
     return $English
 }
 
-function Write-AtomicUtf8BomTextFile {
-    param([string]$Path, [string]$Content)
-    $temporaryFile = "{0}.{1}.tmp" -f $Path, [guid]::NewGuid().ToString('N')
-    $backupFile = "{0}.{1}.bak" -f $Path, [guid]::NewGuid().ToString('N')
-    try {
-        [System.IO.File]::WriteAllText($temporaryFile, $Content, (New-Object System.Text.UTF8Encoding($true)))
-        if ([System.IO.File]::Exists($Path)) { [System.IO.File]::Replace($temporaryFile, $Path, $backupFile, $true) }
-        else { [System.IO.File]::Move($temporaryFile, $Path) }
-    } finally {
-        Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
-    }
-}
-
 function Open-HelpTopic {
     param([string]$Anchor)
 
@@ -65,18 +51,6 @@ function Open-HelpTopic {
         "OK",
         "Error"
     ) | Out-Null
-}
-
-function Get-FolderDisplayName {
-    param([string]$CanonicalName)
-    if ($script:isGerman) { return $CanonicalName }
-    $englishNames = @{
-        'Desktop' = 'Desktop'; 'Dokumente' = 'Documents'; 'Downloads' = 'Downloads'
-        'Bilder' = 'Pictures'; 'Musik' = 'Music'; 'Videos' = 'Videos'
-        'Favoriten' = 'Favorites'; 'Gespeicherte Spiele' = 'Saved Games'; 'Kontakte' = 'Contacts'
-    }
-    if ($englishNames.ContainsKey($CanonicalName)) { return $englishNames[$CanonicalName] }
-    return $CanonicalName
 }
 
 $installedFontNames = @([System.Drawing.FontFamily]::Families | ForEach-Object { $_.Name })
@@ -133,20 +107,6 @@ $script:knownDrive = $null
 $script:settingsWritable = $true
 $script:settings = $null
 
-function Get-UserShellFolder {
-    param(
-        [string]$Name,
-        [string]$Fallback
-    )
-
-    $registryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
-    $value = (Get-ItemProperty -Path $registryPath -Name $Name -ErrorAction SilentlyContinue).$Name
-    if ($value) {
-        return [Environment]::ExpandEnvironmentVariables($value)
-    }
-    return $Fallback
-}
-
 function Get-LibraryNames {
     param([switch]$IncludeMissing)
     return @(Get-LibraryDefinitions -IncludeMissing:$IncludeMissing | ForEach-Object { $_.Name })
@@ -154,19 +114,7 @@ function Get-LibraryNames {
 
 function Get-LibraryDefinitions {
     param([switch]$IncludeMissing)
-    $folders = @(
-        [pscustomobject]@{ Name = "Desktop"; Path = [Environment]::GetFolderPath("Desktop") },
-        [pscustomobject]@{ Name = "Dokumente"; Path = [Environment]::GetFolderPath("MyDocuments") },
-        [pscustomobject]@{ Name = "Downloads"; Path = Get-UserShellFolder -Name "{374DE290-123F-4565-9164-39C4925E467B}" -Fallback (Join-Path $env:USERPROFILE "Downloads") },
-        [pscustomobject]@{ Name = "Bilder"; Path = [Environment]::GetFolderPath("MyPictures") },
-        [pscustomobject]@{ Name = "Musik"; Path = [Environment]::GetFolderPath("MyMusic") },
-        [pscustomobject]@{ Name = "Videos"; Path = [Environment]::GetFolderPath("MyVideos") },
-        [pscustomobject]@{ Name = "Favoriten"; Path = [Environment]::GetFolderPath("Favorites") },
-        [pscustomobject]@{ Name = "Gespeicherte Spiele"; Path = Join-Path $env:USERPROFILE "Saved Games" },
-        [pscustomobject]@{ Name = "Kontakte"; Path = Join-Path $env:USERPROFILE "Contacts" }
-    )
-
-    return @($folders | Where-Object { $_.Path -and ($IncludeMissing -or (Test-Path -LiteralPath $_.Path)) })
+    return @(Get-M24StandardFolderDefinitions | Where-Object { $IncludeMissing -or (Test-Path -LiteralPath $_.Path) })
 }
 
 function New-FolderListItem {
@@ -192,14 +140,8 @@ function New-FolderListItem {
 function Get-FolderItemDisplayName {
     param($Item)
     if ($Item -and $Item.PSObject.Properties['DisplayName']) { return [string]$Item.DisplayName }
-    if ($Item -and $Item.PSObject.Properties['Name']) { return Get-FolderDisplayName ([string]$Item.Name) }
+    if ($Item -and $Item.PSObject.Properties['Name']) { return Get-M24FolderDisplayName ([string]$Item.Name) $script:isGerman }
     return [string]$Item
-}
-
-function ConvertTo-QuotedArgument {
-    param([string]$Value)
-    if ($null -eq $Value) { return '""' }
-    return '"{0}"' -f ($Value -replace '"', '\"')
 }
 
 function Get-FolderMetadataFile {
@@ -341,12 +283,26 @@ function Update-ElapsedDuration {
 
 function Set-CancellationPendingOverview {
     $resultBox.Text = if ($restoreRadio.Checked) {
-        L "Wiederherstellung wird abgebrochen. Der laufende Vorgang wird sauber beendet; das kann einige Zeit dauern." "Restore is being cancelled. The current operation is finishing safely; this can take some time."
+        L "Wiederherstellung wird abgebrochen. Robocopy wird gestoppt; die zuletzt aktive Datei kann unvollständig sein." "Restore is being cancelled. Robocopy is being stopped; the last active file may be incomplete."
     } elseif ($script:activeDryRun) {
-        L "Simulation wird abgebrochen. Der laufende Vorgang wird sauber beendet; das kann einige Zeit dauern." "Simulation is being cancelled. The current operation is finishing safely; this can take some time."
+        L "Simulation wird abgebrochen. Der laufende Robocopy-Vorgang wird gestoppt." "Simulation is being cancelled. The current Robocopy operation is being stopped."
     } else {
-        L "Sicherung wird abgebrochen. Der laufende Kopiervorgang wird sauber beendet; das kann einige Zeit dauern." "Backup is being cancelled. The current copy operation is finishing safely; this can take some time."
+        L "Sicherung wird abgebrochen. Robocopy wird gestoppt; die zuletzt aktive Datei kann unvollständig im Ziel liegen." "Backup is being cancelled. Robocopy is being stopped; the last active file may be incomplete at the destination."
     }
+}
+
+function Format-RobocopyWarningSummary {
+    param($Warnings)
+
+    $items = @($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+    if ($items.Count -eq 0) { return "" }
+
+    $shown = @($items | Select-Object -First 3)
+    $prefix = if ($items.Count -eq 1) { L " Robocopy-Hinweis:" " Robocopy note:" } else { L " Robocopy-Hinweise:" " Robocopy notes:" }
+    $suffix = if ($items.Count -gt $shown.Count) {
+        " " + ((L "Weitere {0} Hinweis(e) im Protokoll." "See log for {0} more note(s).") -f ($items.Count - $shown.Count))
+    } else { "" }
+    return "{0} {1}.{2}" -f $prefix, ($shown -join ' | '), $suffix
 }
 
 function Get-NewestLogFile {
@@ -469,16 +425,7 @@ function Save-AppSettings {
     if (-not $script:settingsWritable) { throw (L 'Die vorhandenen Einstellungen konnten nicht sicher gelesen werden.' 'Existing settings could not be read safely.') }
     $json = $script:settings | ConvertTo-Json -Depth 6
     New-Item -ItemType Directory -Path $settingsDirectory -Force | Out-Null
-    $temporaryFile = Join-Path $settingsDirectory ("settings.{0}.tmp" -f [guid]::NewGuid().ToString('N'))
-    $backupFile = Join-Path $settingsDirectory ("settings.{0}.bak" -f [guid]::NewGuid().ToString('N'))
-    try {
-        [System.IO.File]::WriteAllText($temporaryFile, $json, (New-Object System.Text.UTF8Encoding($true)))
-        if ([System.IO.File]::Exists($settingsFile)) { [System.IO.File]::Replace($temporaryFile, $settingsFile, $backupFile, $true) }
-        else { [System.IO.File]::Move($temporaryFile, $settingsFile) }
-    } finally {
-        Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
-    }
+    Write-M24AtomicTextFile -Path $settingsFile -Content $json
 }
 
 function Get-KnownBackupDrive {
@@ -531,13 +478,22 @@ function Dismount-BackupDriveSafely {
     param([string]$Drive)
 
     $driveRoot = "{0}\" -f $Drive.TrimEnd('\')
+    if (-not (Test-Path -LiteralPath $driveRoot)) {
+        return [pscustomobject]@{ Success = $true; Method = 'AlreadyEjected'; Message = L 'Das Laufwerk ist nicht mehr eingebunden und kann entfernt werden.' 'The drive is no longer mounted and can be removed.' }
+    }
+
     $shell = $null
     try {
         $shell = New-Object -ComObject Shell.Application
         $driveItem = $shell.Namespace(17).ParseName($driveRoot)
         if ($driveItem) {
             $driveItem.InvokeVerb('Eject')
-            return [pscustomobject]@{ Success = $true; Method = 'Eject'; Message = L 'Auswurf wurde angefordert.' 'Eject was requested.' }
+            for ($attempt = 0; $attempt -lt 8; $attempt++) {
+                Start-Sleep -Milliseconds 250
+                if (-not (Test-Path -LiteralPath $driveRoot)) {
+                    return [pscustomobject]@{ Success = $true; Method = 'Eject'; Message = L 'Laufwerk wurde sicher ausgeworfen und kann entfernt werden.' 'The drive was safely ejected and can be removed.' }
+                }
+            }
         }
     } catch {
         # Fallback unten versuchen.
@@ -545,6 +501,11 @@ function Dismount-BackupDriveSafely {
         if ($shell) {
             [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
         }
+    }
+
+    # Der Shell-Auswurf kann unmittelbar nach der Wartefrist fertig werden.
+    if (-not (Test-Path -LiteralPath $driveRoot)) {
+        return [pscustomobject]@{ Success = $true; Method = 'Eject'; Message = L 'Laufwerk wurde sicher ausgeworfen und kann entfernt werden.' 'The drive was safely ejected and can be removed.' }
     }
 
     try {
@@ -911,7 +872,7 @@ $libraryList.TabIndex = 5
 $form.Controls.Add($libraryList)
 
 foreach ($folder in Get-LibraryDefinitions) {
-    $item = New-FolderListItem -Name $folder.Name -DisplayName (Get-FolderDisplayName $folder.Name) -Path $folder.Path -IsCustom $false -Checked $true
+    $item = New-FolderListItem -Name $folder.Name -DisplayName (Get-M24FolderDisplayName $folder.Name $script:isGerman) -Path $folder.Path -IsCustom $false -Checked $true
     [void]$libraryList.Items.Add($item, $true)
 }
 
@@ -973,6 +934,7 @@ $historyButton.FlatStyle = 'Flat'
 $historyButton.FlatAppearance.BorderColor = $buttonBorderColor
 $historyButton.BackColor = $surfaceColor
 $historyButton.Enabled = $false
+$historyButton.TabIndex = 10
 $form.Controls.Add($historyButton)
 
 $verifyButton = New-Object System.Windows.Forms.Button
@@ -983,6 +945,7 @@ $verifyButton.FlatStyle = 'Flat'
 $verifyButton.FlatAppearance.BorderColor = $buttonBorderColor
 $verifyButton.BackColor = $surfaceColor
 $verifyButton.Enabled = $false
+$verifyButton.TabIndex = 11
 $form.Controls.Add($verifyButton)
 
 # Das Logo nutzt den freien Bereich rechts neben Ordnerliste und Buttons
@@ -1017,14 +980,14 @@ $dryRunCheckBox.Text = L "Nur simulieren (Dry-Run)" "Simulate only (dry run)"
 $dryRunCheckBox.AutoSize = $true
 $dryRunCheckBox.Location = New-Object System.Drawing.Point(30, 426)
 $dryRunCheckBox.BackColor = $surfaceColor
-$dryRunCheckBox.TabIndex = 10
+$dryRunCheckBox.TabIndex = 12
 $form.Controls.Add($dryRunCheckBox)
 $ejectCheckBox = New-Object System.Windows.Forms.CheckBox
 $ejectCheckBox.Text = L "Laufwerk nach Erfolg sicher auswerfen" "Safely eject drive after success"
 $ejectCheckBox.AutoSize = $true
 $ejectCheckBox.Location = New-Object System.Drawing.Point(285, 426)
 $ejectCheckBox.BackColor = $surfaceColor
-$ejectCheckBox.TabIndex = 11
+$ejectCheckBox.TabIndex = 13
 $form.Controls.Add($ejectCheckBox)
 
 $checksumCheckBox = New-Object System.Windows.Forms.CheckBox
@@ -1033,7 +996,7 @@ $checksumCheckBox.AutoSize = $true
 $checksumCheckBox.Location = New-Object System.Drawing.Point(570, 426)
 $checksumCheckBox.BackColor = $surfaceColor
 $checksumCheckBox.Checked = $true
-$checksumCheckBox.TabIndex = 12
+$checksumCheckBox.TabIndex = 14
 $checksumCheckBox.Anchor = "Top, Right"
 $form.Controls.Add($checksumCheckBox)
 $activitySurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 460)) -Size (New-Object System.Drawing.Size(692, 148))
@@ -1126,7 +1089,7 @@ $startButton.FlatAppearance.BorderSize = 0
 $startButton.FlatAppearance.MouseOverBackColor = $accentHoverColor
 $startButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $startButton.Anchor = "Top, Left"
-$startButton.TabIndex = 8
+$startButton.TabIndex = 15
 $form.Controls.Add($startButton)
 $form.AcceptButton = $startButton
 
@@ -1142,7 +1105,7 @@ $logButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(
 $logButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $logButton.Enabled = $false
 $logButton.Anchor = "Top, Left"
-$logButton.TabIndex = 9
+$logButton.TabIndex = 16
 $form.Controls.Add($logButton)
 
 $closeButton = New-Object System.Windows.Forms.Button
@@ -1158,7 +1121,7 @@ $destinationButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::F
 $destinationButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $destinationButton.Enabled = $false
 $destinationButton.Anchor = "Top, Left"
-$destinationButton.TabIndex = 10
+$destinationButton.TabIndex = 17
 $form.Controls.Add($destinationButton)
 
 $closeButton.Text = L "Schließen" "Close"
@@ -1170,7 +1133,7 @@ $closeButton.FlatAppearance.BorderSize = 1
 $closeButton.FlatAppearance.BorderColor = $buttonBorderColor
 $closeButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
 $closeButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
-$closeButton.TabIndex = 11
+$closeButton.TabIndex = 18
 $closeButton.Anchor = "Top, Right"
 $form.Controls.Add($closeButton)
 
@@ -1188,7 +1151,7 @@ $cancelButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 # Der Abbrechen-Button ersetzt den Start-Button an derselben Position und
 # muss deshalb auch gleich verankert sein.
 $cancelButton.Anchor = "Top, Left"
-$cancelButton.TabIndex = 8
+$cancelButton.TabIndex = 15
 $cancelButton.Visible = $false
 $form.Controls.Add($cancelButton)
 
@@ -1430,7 +1393,7 @@ function Update-LibraryList {
             $backupRoot = Get-BackupRoot -Drive $disk.DeviceID
             $items += @(Get-LibraryDefinitions -IncludeMissing | Where-Object { Test-Path -LiteralPath (Join-Path $backupRoot $_.Name) -PathType Container } | ForEach-Object {
                 $checked = if ($script:folderCheckStates.ContainsKey([string]$_.Name)) { [bool]$script:folderCheckStates[[string]$_.Name] } else { $true }
-                New-FolderListItem -Name $_.Name -DisplayName (Get-FolderDisplayName $_.Name) -Path $_.Path -IsCustom $false -Checked $checked
+                New-FolderListItem -Name $_.Name -DisplayName (Get-M24FolderDisplayName $_.Name $script:isGerman) -Path $_.Path -IsCustom $false -Checked $checked
             })
             $items += @(Get-RestoreCustomFolders -BackupRoot $backupRoot)
         }
@@ -1442,7 +1405,7 @@ function Update-LibraryList {
     } else {
         $items += @(Get-LibraryDefinitions | ForEach-Object {
             $checked = if ($script:folderCheckStates.ContainsKey([string]$_.Name)) { [bool]$script:folderCheckStates[[string]$_.Name] } else { $true }
-            New-FolderListItem -Name $_.Name -DisplayName (Get-FolderDisplayName $_.Name) -Path $_.Path -IsCustom $false -Checked $checked
+            New-FolderListItem -Name $_.Name -DisplayName (Get-M24FolderDisplayName $_.Name $script:isGerman) -Path $_.Path -IsCustom $false -Checked $checked
         })
         $items += @($script:customFolders)
         $titleLabel.Text = L "Dateien sichern" "Back up files"
@@ -1604,6 +1567,10 @@ function Update-DriveList {
         } else {
             $driveInfoLabel.Text = L "Kein geeignetes Ziellaufwerk gefunden." "No suitable drive was found."
             Update-BackupArtifactActions
+            Update-BackupHealth
+            Update-LibraryList
+            Update-BackupOptionState
+            Update-SelectionState
             $startButton.Enabled = $false
         }
     } catch {
@@ -1613,6 +1580,10 @@ function Update-DriveList {
         $script:driveMap.Clear()
         $driveInfoLabel.Text = (L "Laufwerke konnten nicht ermittelt werden: {0}" "Drives could not be detected: {0}") -f $_.Exception.Message
         Update-BackupArtifactActions
+        Update-BackupHealth
+        Update-LibraryList
+        Update-BackupOptionState
+        Update-SelectionState
         $startButton.Enabled = $false
     }
 }
@@ -1755,7 +1726,7 @@ $startButton.Add_Click({
     $form.AcceptButton = $null
 
     try {
-        Write-AtomicUtf8BomTextFile -Path $script:selectedFoldersFile -Content (($selectedFolders | ConvertTo-Json -Depth 4) + [Environment]::NewLine)
+        Write-M24AtomicTextFile -Path $script:selectedFoldersFile -Content (($selectedFolders | ConvertTo-Json -Depth 4) + [Environment]::NewLine)
         $powershellExe = Join-Path $PSHOME "powershell.exe"
         $mode = if ($restoreRadio.Checked) { 'Restore' } else { 'Backup' }
         $script:activeMode = $mode
@@ -1779,7 +1750,7 @@ $startButton.Add_Click({
         if ($backupRadio.Checked -and -not $script:activeDryRun -and -not $checksumCheckBox.Checked) {
             $argumentList += '-SkipChecksums'
         }
-        $arguments = ($argumentList | ForEach-Object { ConvertTo-QuotedArgument ([string]$_) }) -join ' '
+        $arguments = ($argumentList | ForEach-Object { ConvertTo-M24ProcessArgument ([string]$_) }) -join ' '
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
         $startInfo.FileName = $powershellExe
         $startInfo.Arguments = $arguments
@@ -1901,15 +1872,58 @@ $timer.Add_Tick({
                     }
                     "PRUEFUNG" {
                         Start-BusyProgress
-                        $displayFolder = Get-FolderDisplayName $parts[3]
+                        $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
                         $statusLabel.Text = if ($script:isGerman) { "Prüfe Ordner $($parts[1]) von $($parts[2]): $displayFolder" } else { "Checking folder $($parts[1]) of $($parts[2]): $displayFolder" }
                         $resultBox.Text = L "Dateien und benötigter Speicherplatz werden geprüft ..." "Checking files and required disk space ..."
                     }
                     "PRUEFSUMME" {
                         Start-BusyProgress
-                        $displayFolder = Get-FolderDisplayName $parts[3]
+                        $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
                         $statusLabel.Text = if ($script:isGerman) { "Prüfsummen für Ordner $($parts[1]) von $($parts[2]): $displayFolder" } else { "Checksums for folder $($parts[1]) of $($parts[2]): $displayFolder" }
                         $resultBox.Text = L "Neue und geänderte Backup-Dateien werden mit SHA-256 erfasst ..." "New and changed backup files are being recorded with SHA-256 ..."
+                    }
+                    "KOPIERVORGANG" {
+                        Start-BusyProgress
+                        $current = [int]$parts[1]
+                        $total = [int]$parts[2]
+                        $script:lastProgressCurrent = $current
+                        $script:lastProgressTotal = [math]::Max(1, $total)
+                        $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
+                        $statusLabel.Text = if ($restoreRadio.Checked) {
+                            if ($script:isGerman) { "Robocopy stellt Ordner $current von $total wieder her: $displayFolder" } else { "Robocopy is restoring folder $current of $total`: $displayFolder" }
+                        } elseif ($script:activeDryRun) {
+                            if ($script:isGerman) { "Robocopy simuliert Ordner $current von $total`: $displayFolder" } else { "Robocopy is simulating folder $current of $total`: $displayFolder" }
+                        } else {
+                            if ($script:isGerman) { "Robocopy sichert Ordner $current von $total`: $displayFolder" } else { "Robocopy is backing up folder $current of $total`: $displayFolder" }
+                        }
+                        $resultBox.Text = if ($script:isGerman) { "Aktiver Ordner: $displayFolder. Der Vorgang kann hier abgebrochen werden." } else { "Active folder: $displayFolder. The operation can be cancelled here." }
+                    }
+                    "ABBRUCHLAEUFT" {
+                        Start-BusyProgress
+                        $current = [int]$parts[1]
+                        $total = [int]$parts[2]
+                        $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
+                        $statusLabel.Text = if ($script:isGerman) { "Abbruch läuft für Ordner $current von $total`: $displayFolder" } else { "Cancelling folder $current of $total`: $displayFolder" }
+                        $resultBox.Text = if ($restoreRadio.Checked) {
+                            L "Robocopy wird gestoppt. Die zuletzt aktive Datei kann unvollständig sein." "Robocopy is being stopped. The last active file may be incomplete."
+                        } elseif ($script:activeDryRun) {
+                            L "Robocopy wird gestoppt. Die Simulation wird beendet." "Robocopy is being stopped. The simulation is ending."
+                        } else {
+                            L "Robocopy wird gestoppt. Die zuletzt aktive Datei kann unvollständig im Backup-Ziel liegen." "Robocopy is being stopped. The last active file may be incomplete in the backup destination."
+                        }
+                    }
+                    "ABBRUCHWARTET" {
+                        Start-BusyProgress
+                        $current = [int]$parts[1]
+                        $total = [int]$parts[2]
+                        $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
+                        $seconds = if ($parts.Count -ge 5) { [int]$parts[4] } else { 0 }
+                        $statusLabel.Text = if ($script:isGerman) { "Warte auf Robocopy-Ende für Ordner $current von $total`: $displayFolder" } else { "Waiting for Robocopy to exit for folder $current of $total`: $displayFolder" }
+                        $resultBox.Text = if ($script:isGerman) {
+                            "Robocopy wird beendet. Bitte Laufwerk nicht entfernen. Wartezeit: $seconds s."
+                        } else {
+                            "Robocopy is exiting. Do not remove the drive. Wait time: $seconds s."
+                        }
                     }
                     "FORTSCHRITT" {
                         Start-BusyProgress
@@ -1917,7 +1931,7 @@ $timer.Add_Tick({
                         $total = [int]$parts[2]
                         $script:lastProgressCurrent = $current
                         $script:lastProgressTotal = [math]::Max(1, $total)
-                        $name = Get-FolderDisplayName $parts[3]
+                        $name = Get-M24FolderDisplayName $parts[3] $script:isGerman
                         $statusLabel.Text = if ($restoreRadio.Checked) {
                             if ($script:isGerman) { "Ordner $current von $total wird wiederhergestellt: $name" } else { "Restoring folder $current of $total`: $name" }
                         } elseif ($script:activeDryRun) {
@@ -1986,7 +2000,19 @@ $timer.Add_Tick({
             if ($script:backupCancelled) {
                 $statusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
                 $statusLabel.Text = L "Vorgang wurde abgebrochen." "Operation was cancelled."
-                $resultBox.Text = L "Vom Benutzer abgebrochen. Bereits kopierte Dateien bleiben erhalten." "Cancelled by the user. Files already copied remain in place."
+                $interruptedFolder = if ($result -and $result.PSObject.Properties['InterruptedFolder'] -and $result.InterruptedFolder) { Get-M24FolderDisplayName ([string]$result.InterruptedFolder) $script:isGerman } else { $null }
+                $partialWarning = if ($result -and $result.PSObject.Properties['PartialFilesMayRemain'] -and [bool]$result.PartialFilesMayRemain) {
+                    L " Die zuletzt aktive Datei kann unvollständig sein; starten Sie die Sicherung erneut oder prüfen Sie das Backup." " The last active file may be incomplete; run the backup again or verify the backup."
+                } else { "" }
+                $resultBox.Text = if ($interruptedFolder) {
+                    ((L "Vom Benutzer abgebrochen während: {0}." "Cancelled by the user while processing: {0}.") -f $interruptedFolder) + $partialWarning
+                } else {
+                    (L "Vom Benutzer abgebrochen." "Cancelled by the user.") + $partialWarning
+                }
+            } elseif ($exitCode -eq 0 -and -not $result) {
+                $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
+                $statusLabel.Text = L "Worker ohne Ergebnis beendet." "Worker exited without a result."
+                $resultBox.Text = L "Der Hintergrundprozess wurde beendet, hat aber keine Ergebnisdatei geschrieben. Bitte prüfen Sie das Protokoll und starten Sie den Vorgang erneut." "The background process exited but did not write a result file. Review the log and run the operation again."
             } elseif ($exitCode -eq 0) {
                 $elapsed = (Get-Date) - $script:backupStartedAt
                 $duration = Format-ElapsedDuration $elapsed
@@ -2003,13 +2029,15 @@ $timer.Add_Tick({
                 $progressBar.Value = $progressBar.Maximum
                 if ($result) {
                     $plannedGb = [math]::Round(([double]$result.PlannedBytes / 1GB), 2)
-                    $displayHints = @($result.HintFolders | ForEach-Object { Get-FolderDisplayName $_ })
+                    $displayHints = @($result.HintFolders | ForEach-Object { Get-M24FolderDisplayName $_ $script:isGerman })
                     $hints = if ($displayHints.Count) { (L " Hinweise: {0}." " Notes: {0}.") -f ($displayHints -join ', ') } else { "" }
+                    $robocopyWarnings = if ($result.PSObject.Properties['RobocopyWarnings']) { @($result.RobocopyWarnings | Where-Object { $_ }) } else { @() }
+                    $robocopyWarningText = Format-RobocopyWarningSummary -Warnings $robocopyWarnings
                     $checksumNote = if ($result.PSObject.Properties['ChecksumSkipped'] -and [bool]$result.ChecksumSkipped) { L " Prüfsummen übersprungen." " Checksums skipped." } else { "" }
                     $resultBox.Text = if ($script:isGerman) {
-                        "$(if ($isRestore) { 'Wiederhergestellt' } elseif ($isDryRun) { 'Simuliert' } else { 'Gesichert' }): $(@($result.SuccessfulFolders).Count) Ordner. Geplant: $($result.PlannedFiles) Dateien / $plannedGb GB. Dauer: $duration.$hints$checksumNote"
+                        "$(if ($isRestore) { 'Wiederhergestellt' } elseif ($isDryRun) { 'Simuliert' } else { 'Gesichert' }): $(@($result.SuccessfulFolders).Count) Ordner. Geplant: $($result.PlannedFiles) Dateien / $plannedGb GB. Dauer: $duration.$hints$robocopyWarningText$checksumNote"
                     } else {
-                        "$(if ($isRestore) { 'Restored' } elseif ($isDryRun) { 'Simulated' } else { 'Backed up' }): $(@($result.SuccessfulFolders).Count) folders. Planned: $($result.PlannedFiles) files / $plannedGb GB. Duration: $duration.$hints$checksumNote"
+                        "$(if ($isRestore) { 'Restored' } elseif ($isDryRun) { 'Simulated' } else { 'Backed up' }): $(@($result.SuccessfulFolders).Count) folders. Planned: $($result.PlannedFiles) files / $plannedGb GB. Duration: $duration.$hints$robocopyWarningText$checksumNote"
                     }
                 } else {
                     $resultBox.Text = L "Vorgang erfolgreich abgeschlossen." "Operation completed successfully."
@@ -2033,13 +2061,18 @@ $timer.Add_Tick({
             } else {
                 $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
                 $partialCopy = $result -and $result.PSObject.Properties['PartialCopy'] -and [bool]$result.PartialCopy
-                $statusLabel.Text = if ($partialCopy) {
+                $statusLabel.Text = if (-not $result) {
+                    (L "Worker unerwartet beendet (Exit-Code {0})." "Worker exited unexpectedly (exit code {0}).") -f $exitCode
+                } elseif ($partialCopy) {
                     (L "Vorgang unvollständig (Exit-Code {0})." "Operation incomplete (exit code {0}).") -f $exitCode
                 } else {
                     (L "Vorgang mit Fehlern beendet (Exit-Code {0})." "Operation finished with errors (exit code {0}).") -f $exitCode
                 }
                 $resultBox.Text = if ($result -and $result.Message) {
-                    $result.Message
+                    $warnings = if ($result.PSObject.Properties['RobocopyWarnings']) { @($result.RobocopyWarnings | Where-Object { $_ }) } else { @() }
+                    "$($result.Message)$(Format-RobocopyWarningSummary -Warnings $warnings)"
+                } elseif (-not $result) {
+                    L "Der Hintergrundprozess wurde beendet, ohne eine Ergebnisdatei zu schreiben. Das kann nach einem harten Prozessabbruch passieren; bitte prüfen Sie das Protokoll." "The background process exited without writing a result file. This can happen after a hard process termination; review the log."
                 } elseif ($newestLog) {
                     L "Details finden Sie im Protokoll." "See the log for details."
                 } else {
@@ -2071,7 +2104,7 @@ $timer.Add_Tick({
             $script:resultSummary = $resultBox.Text
             $script:backupProcess.Dispose()
             $script:backupProcess = $null
-            Update-BackupHealth
+            if ($script:pendingEjectDrive) { Update-BackupHealth } else { Update-DriveList -Force }
             $script:activeDrive = $null
             $script:activeMode = $null
             $script:activeDryRun = $false
@@ -2205,7 +2238,7 @@ $cancelButton.Add_Click({
     }
     if (-not $script:backupProcess -or $script:backupProcess.HasExited) { return }
     $answer = [System.Windows.Forms.MessageBox]::Show(
-        (L "Möchten Sie den laufenden Vorgang wirklich abbrechen?`r`n`r`nBereits kopierte Dateien bleiben erhalten." "Do you really want to cancel the current operation?`r`n`r`nFiles already copied will remain in place."),
+        (L "Möchten Sie den laufenden Vorgang wirklich abbrechen?`r`n`r`nRobocopy wird gestoppt. Die zuletzt aktive Datei kann unvollständig im Ziel liegen. Starten Sie die Sicherung danach erneut oder prüfen Sie das Backup." "Do you really want to cancel the current operation?`r`n`r`nRobocopy will be stopped. The last active file may be incomplete at the destination. Run the backup again afterwards or verify the backup."),
         (L "Vorgang abbrechen" "Cancel operation"),
         "YesNo",
         "Warning"
