@@ -460,6 +460,7 @@ if (-not (Test-Path -LiteralPath $logoPath -PathType Leaf)) { throw "Missing log
 New-AppIcon -SourcePath $logoPath -DestinationPath $iconPath
 
 $releaseFiles = @(
+    'LICENSE',
     'Bibliothekssicherung-GUI.ps1',
     'Bibliothekssicherung.ps1',
     'M24Backup.Shared.ps1',

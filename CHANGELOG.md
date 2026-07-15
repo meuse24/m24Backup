@@ -8,6 +8,9 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ### Hinzugefügt
 
+- Veröffentlichung unter der MIT-Lizenz; die Lizenzdatei ist Teil des
+  Repositorys und aller Distributionen
+
 - Windows-Benachrichtigungen für abgeschlossene, fehlgeschlagene und
   abgebrochene Vorgänge im Hintergrund
 - Dauerhaft gespeicherte Auswahl von Standard- und Zusatzordnern

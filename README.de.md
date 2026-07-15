@@ -169,6 +169,8 @@ kann deshalb bei Downloads aus dem Internet warnen. Für eine breitere
 öffentliche Verteilung sollten Setup-Datei und Skripte mit einem
 vertrauenswürdigen Code-Signing-Zertifikat signiert werden.
 
-Dieses Repository enthält derzeit keine Open-Source-Lizenz. Eine öffentliche
-Lesbarkeit des Quellcodes erteilt daher nicht automatisch Nutzungs-, Änderungs-
-oder Weiterverteilungsrechte.
+## Lizenz
+
+M24 Backup ist Open Source und steht unter der [MIT-Lizenz](LICENSE).
+Nutzung, Änderung und Weiterverteilung sind erlaubt; Copyright- und
+Lizenzhinweis müssen erhalten bleiben.

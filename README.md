@@ -164,6 +164,8 @@ therefore show a warning for files downloaded from the internet. For wider
 public distribution, the setup file and scripts should be signed with a trusted
 code-signing certificate.
 
-This repository currently has no open-source license. Publicly readable source
-code does not automatically grant permission to use, modify, or redistribute
-it.
+## License
+
+M24 Backup is open source and released under the [MIT License](LICENSE).
+You may use, modify, and redistribute the software; the copyright and
+license notice must be preserved.
