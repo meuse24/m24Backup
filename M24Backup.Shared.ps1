@@ -107,12 +107,24 @@ function Test-M24ExcludedFileName {
     return $false
 }
 
+function ConvertTo-M24ExtendedLengthPath {
+    # Erweitertes Pfadpraefix \\?\ fuer absolute Pfade. Dadurch lassen sich
+    # auch Dateien mit reservierten Geraetenamen (z. B. "nul", "con") oder
+    # abschliessendem Punkt/Leerzeichen als normale Dateien oeffnen, die
+    # Robocopy kopieren kann, .NET ueber den normalen Pfadweg aber nicht.
+    param([string]$Path)
+    if ($Path.StartsWith('\\?\')) { return $Path }
+    if ($Path -match '^[A-Za-z]:\\') { return "\\?\$Path" }
+    if ($Path.StartsWith('\\')) { return "\\?\UNC$($Path.Substring(1))" }
+    return $Path
+}
+
 function Get-M24FileSha256 {
     param([string]$Path, [scriptblock]$CancelCallback)
     $stream = $null
     $sha = $null
     try {
-        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $stream = [System.IO.File]::Open((ConvertTo-M24ExtendedLengthPath $Path), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         $sha = [System.Security.Cryptography.SHA256]::Create()
         $buffer = New-Object byte[] (1MB)
         while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {

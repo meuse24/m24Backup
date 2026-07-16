@@ -119,6 +119,44 @@ Describe 'Checksum manifest lifecycle' {
     }
 }
 
+Describe 'ConvertTo-M24ExtendedLengthPath' {
+    It 'prefixes local absolute paths' {
+        ConvertTo-M24ExtendedLengthPath 'C:\Data\nul' | Should -Be '\\?\C:\Data\nul'
+    }
+
+    It 'converts UNC paths to the extended UNC form' {
+        ConvertTo-M24ExtendedLengthPath '\\server\share\file.txt' | Should -Be '\\?\UNC\server\share\file.txt'
+    }
+
+    It 'leaves already prefixed and relative paths unchanged' {
+        ConvertTo-M24ExtendedLengthPath '\\?\C:\Data\nul' | Should -Be '\\?\C:\Data\nul'
+        ConvertTo-M24ExtendedLengthPath 'relative\file.txt' | Should -Be 'relative\file.txt'
+    }
+}
+
+Describe 'Reserved device file names' {
+    It 'hashes and verifies a file named after a reserved device' {
+        $source = Join-Path $TestDrive 'device-source'
+        $manifestPath = Join-Path $TestDrive 'device.tsv'
+        New-Item -ItemType Directory -Path $source | Out-Null
+        $devicePath = Join-Path $source 'nul'
+        [System.IO.File]::WriteAllText("\\?\$devicePath", 'device-name-content')
+        $folders = @([pscustomobject]@{ Name = 'Downloads'; Path = $source })
+        try {
+            $updated = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @()
+            $updated.Files | Should -Be 1
+
+            $verified = Test-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @()
+            $verified.ErrorCount | Should -Be 0
+            $verified.Files | Should -Be 1
+        } finally {
+            # Pester raeumt TestDrive mit normalen Pfad-APIs auf; die
+            # Geraetenamen-Datei muss deshalb hier explizit geloescht werden.
+            [System.IO.File]::Delete("\\?\$devicePath")
+        }
+    }
+}
+
 Describe 'Checksum verification metadata' {
     It 'stores and reads back the verification timestamp' {
         $metadataFile = Join-Path $TestDrive '_Sicherungsinfo.txt'
