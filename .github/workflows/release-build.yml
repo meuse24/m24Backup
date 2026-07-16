@@ -1,9 +1,12 @@
 name: Release build
 
-# Baut die Release-Artefakte nachvollziehbar aus dem Quellcode und reicht sie
-# optional bei SignPath zum Signieren ein. Der Signierschritt laeuft erst,
-# wenn die SignPath-Zugangsdaten als Repository-Variablen und -Secret
-# hinterlegt sind (siehe docs/signpath-application.md).
+# Baut die Release-Artefakte nachvollziehbar aus dem Quellcode, reicht sie
+# optional bei SignPath zum Signieren ein und veroeffentlicht bei einem
+# Tag-Push das GitHub-Release mit den CI-Artefakten. Der Signierschritt
+# laeuft erst, wenn die SignPath-Zugangsdaten als Repository-Variablen und
+# -Secret hinterlegt sind (siehe docs/signpath-application.md). Ist die
+# Signierung konfiguriert, wird ausschliesslich das signierte Ergebnis
+# veroeffentlicht; schlaegt sie fehl, entsteht kein Release.
 
 on:
   push:
@@ -77,3 +80,50 @@ jobs:
           name: dist-signed
           path: signed/
           if-no-files-found: error
+
+  release:
+    needs: [build, sign]
+    # Veroeffentlicht ausschliesslich bei einem Tag-Push; ein manuell per
+    # workflow_dispatch gestarteter Lauf baut nur. Wurde der Signierjob
+    # uebersprungen (SignPath noch nicht konfiguriert), werden die
+    # unsignierten CI-Artefakte veroeffentlicht; ist er fehlgeschlagen,
+    # wird kein Release erstellt.
+    if: >-
+      !cancelled() &&
+      github.event_name == 'push' &&
+      github.ref_type == 'tag' &&
+      needs.build.result == 'success' &&
+      (needs.sign.result == 'success' || needs.sign.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed artifacts
+        if: needs.sign.result == 'success'
+        uses: actions/download-artifact@v7
+        with:
+          name: dist-signed
+          path: release-assets
+
+      - name: Download unsigned artifacts
+        if: needs.sign.result == 'skipped'
+        uses: actions/download-artifact@v7
+        with:
+          name: dist-unsigned
+          path: release-assets
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" release-assets/* \
+              --verify-tag \
+              --title "M24 Backup $version" \
+              --generate-notes \
+              --repo "$GITHUB_REPOSITORY"
+          fi

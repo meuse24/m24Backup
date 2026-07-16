@@ -74,14 +74,20 @@ bereitgestellt.
 
 ## 5. Release-Ablauf mit Signierung
 
-1. `release.ps1` wie gewohnt ausführen; es erstellt und pusht den Tag.
-2. Der Tag-Push startet `release-build.yml`; nach Freigabe der Signieranfrage
-   im SignPath-Portal liegt `dist-signed` als Workflow-Artefakt bereit.
-3. Die signierten Dateien herunterladen und die Assets des GitHub-Releases
-   damit ersetzen (`gh release upload <tag> <dateien> --clobber`).
+1. `release.ps1` wie gewohnt ausführen; es baut lokal zur Verifikation und
+   erstellt und pusht den Tag.
+2. Der Tag-Push startet `release-build.yml`. Der Workflow baut die Artefakte
+   aus dem Quellcode und reicht sie bei SignPath ein; nach Freigabe der
+   Signieranfrage im SignPath-Portal veröffentlicht der `release`-Job das
+   GitHub-Release automatisch mit den signierten Dateien und der neu
+   berechneten `SHA256SUMS.txt`.
+3. Solange die SignPath-Integration nicht konfiguriert ist, veröffentlicht
+   der Workflow stattdessen die unsignierten CI-Artefakte. Schlägt die
+   Signierung fehl oder wird sie abgelehnt, wird kein Release erstellt.
 
-Wichtig: Nur die in der CI gebauten und über SignPath signierten Binärdateien
-veröffentlichen – lokal gebaute Artefakte dürfen laut den
-Foundation-Bedingungen nicht signiert werden. Nach dem ersten signierten
+Damit werden ausschließlich in der CI gebaute (und bei aktiver Integration
+über SignPath signierte) Binärdateien veröffentlicht – lokal gebaute
+Artefakte gelangen nie in ein Release und dürfen laut den
+Foundation-Bedingungen auch nicht signiert werden. Nach dem ersten signierten
 Release den Abschnitt „Hinweise zur Veröffentlichung" in beiden READMEs
 aktualisieren.

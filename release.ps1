@@ -1,12 +1,15 @@
 ﻿<#
 .SYNOPSIS
-Builds and optionally publishes a complete M24 Backup release.
+Prepares and triggers a complete M24 Backup release.
 
 .DESCRIPTION
 Derives the next semantic version from Git tags, builds the installer and
-portable ZIP, creates and pushes an annotated tag, and publishes the artifacts
-as a GitHub release. Potentially destructive or remote actions are shown before
-execution and require confirmation unless -Yes is specified.
+portable ZIP locally as a verification step, and creates and pushes an
+annotated tag. The tag push triggers the release-build workflow, which builds
+the published artifacts from source in CI, optionally signs them via SignPath,
+and publishes the GitHub release. Locally built artifacts are never uploaded.
+Potentially destructive or remote actions are shown before execution and
+require confirmation unless -Yes is specified.
 
 .EXAMPLE
   .\release.ps1
@@ -89,65 +92,16 @@ function Get-NextVersion {
     }
 }
 
-function Get-GitHubCli {
-    return Get-Executable -Name 'gh.exe' -Candidates @(
-        (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\gh.exe'),
-        (Join-Path $env:ProgramFiles 'GitHub CLI\gh.exe'),
-        (Join-Path $env:LOCALAPPDATA 'Programs\GitHub CLI\gh.exe')
-    )
-}
-
-function Enable-TemporaryGitHubAuthentication {
-    if ($env:GH_TOKEN -or $env:GITHUB_TOKEN) { return $false }
-    $credentialOutput = "protocol=https`nhost=github.com`n`n" | & $git credential fill
-    if ($LASTEXITCODE -ne 0) { throw 'GitHub-Anmeldung konnte nicht aus dem Windows-Anmeldeinformationsmanager gelesen werden.' }
-    $passwordLine = $credentialOutput | Where-Object { $_ -like 'password=*' } | Select-Object -First 1
-    if (-not $passwordLine) { throw 'Keine GitHub-Anmeldung gefunden. Bitte zuerst einmal erfolgreich zu GitHub pushen.' }
-    $env:GH_TOKEN = $passwordLine.Substring('password='.Length)
-    return $true
-}
-
-function Invoke-GitHubCommandWithRetry {
-    param(
-        [string[]]$Arguments,
-        [string]$Description,
-        [string]$ExpectedReleaseTag,
-        [int]$MaximumAttempts = 3
-    )
-
-    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
-        $previousPreference = $ErrorActionPreference
-        try {
-            $ErrorActionPreference = 'Continue'
-            $output = & $gh @Arguments 2>&1
-            $exitCode = $LASTEXITCODE
-        } finally {
-            $ErrorActionPreference = $previousPreference
-        }
-        if ($exitCode -eq 0) { return $output }
-
-        # A request may have reached GitHub even when its response timed out.
-        # In that case a retry of "release create" reports a duplicate although
-        # the desired end state has already been reached.
-        if ($ExpectedReleaseTag) {
-            $previousPreference = $ErrorActionPreference
-            try {
-                $ErrorActionPreference = 'SilentlyContinue'
-                $releaseUrl = & $gh release view $ExpectedReleaseTag --json url --jq '.url' 2>$null
-                $releaseExists = $LASTEXITCODE -eq 0 -and $releaseUrl
-            } finally {
-                $ErrorActionPreference = $previousPreference
-            }
-            if ($releaseExists) { return $releaseUrl }
-        }
-
-        if ($attempt -eq $MaximumAttempts) {
-            throw "$Description ist nach $MaximumAttempts Versuchen fehlgeschlagen:`r`n$($output -join [Environment]::NewLine)"
-        }
-        $delay = [int][math]::Pow(2, $attempt)
-        Write-Warning "$Description fehlgeschlagen. Neuer Versuch in $delay Sekunden ($attempt/$MaximumAttempts)."
-        Start-Sleep -Seconds $delay
+function Get-GitHubRepositoryWebUrl {
+    # Leitet die Projekt-URL aus dem origin-Remote ab (HTTPS oder SSH).
+    $remoteUrl = (Invoke-Git remote get-url origin | Select-Object -First 1).Trim()
+    if ($remoteUrl -match '^https://github\.com/(?<repo>[^/]+/[^/]+?)(?:\.git)?$') {
+        return "https://github.com/$($matches['repo'])"
     }
+    if ($remoteUrl -match '^git@github\.com:(?<repo>[^/]+/[^/]+?)(?:\.git)?$') {
+        return "https://github.com/$($matches['repo'])"
+    }
+    return $null
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $root '.git') -PathType Container)) {
@@ -163,12 +117,9 @@ $branch = (Invoke-Git branch --show-current | Select-Object -First 1).Trim()
 if (-not $branch) { throw 'Releases aus einem detached HEAD sind nicht erlaubt.' }
 $head = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
 
-$gh = $null
 if (-not $LocalOnly) {
     $remotes = @(Invoke-Git remote)
     if ($remotes -notcontains 'origin') { throw "Git-Remote 'origin' fehlt." }
-    $gh = Get-GitHubCli
-    if (-not $gh) { throw 'GitHub CLI fehlt. Installation: winget install --id GitHub.cli -e --scope user' }
 
     if (-not $WhatIfPreference) {
         Invoke-Git fetch origin --tags | Out-Null
@@ -222,7 +173,7 @@ Write-Host "  Commit:       $head"
 Write-Host "  Letzter Tag:  $(if ($latest) { $latest.Tag } else { '(keiner)' })"
 Write-Host "  Neue Version: $releaseVersion"
 Write-Host "  Neuer Tag:    $(if ($needsTag) { $releaseTag } else { "$releaseTag (bereits vorhanden)" })"
-Write-Host "  Ziel:         $(if ($LocalOnly) { 'nur lokale Build-Artefakte' } else { 'Git-Tag, origin und GitHub Release' })"
+Write-Host "  Ziel:         $(if ($LocalOnly) { 'nur lokale Build-Artefakte' } else { 'Git-Tag und Push; das GitHub-Release veroeffentlicht der Release-Workflow aus CI-Artefakten' })"
 Write-Host ''
 
 if ($WhatIfPreference) {
@@ -231,7 +182,7 @@ if ($WhatIfPreference) {
 }
 
 if (-not $LocalOnly -and -not $Yes) {
-    $answer = Read-Host "Release $releaseTag jetzt bauen und veröffentlichen? [j/N]"
+    $answer = Read-Host "Release $releaseTag jetzt taggen und den Release-Workflow starten? [j/N]"
     if ($answer -notmatch '^(j|ja|y|yes)$') {
         Write-Host 'Abgebrochen. Es wurden keine Änderungen vorgenommen.'
         return
@@ -240,7 +191,9 @@ if (-not $LocalOnly -and -not $Yes) {
 
 if (-not $PSCmdlet.ShouldProcess("M24 Backup $releaseVersion", 'Release bauen')) { return }
 
-Write-Host "Baue Release $releaseVersion ..." -ForegroundColor Cyan
+# Der lokale Build dient nur als Verifikation, dass der zu taggende Stand
+# baubar ist. Veroeffentlicht werden ausschliesslich die CI-Artefakte.
+Write-Host "Baue Release $releaseVersion zur Verifikation lokal ..." -ForegroundColor Cyan
 & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $buildScript -Version $releaseVersion -RequireInstaller
 if ($LASTEXITCODE -ne 0) { throw "Build fehlgeschlagen (Exit-Code $LASTEXITCODE)." }
 
@@ -268,34 +221,12 @@ if (-not $PSCmdlet.ShouldProcess("origin/$branch und $releaseTag", 'Zu GitHub pu
 Invoke-Git push origin $branch | Out-Null
 Invoke-Git push origin $releaseTag | Out-Null
 
-$temporaryToken = $false
-try {
-    $temporaryToken = Enable-TemporaryGitHubAuthentication
-    $previousPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'SilentlyContinue'
-        $existingReleaseUrl = & $gh release view $releaseTag --json url --jq '.url' 2>$null
-        $releaseExists = $LASTEXITCODE -eq 0 -and $existingReleaseUrl
-    } finally {
-        $ErrorActionPreference = $previousPreference
-    }
-
-    $artifactPaths = @($artifactNames | ForEach-Object { Join-Path $distDirectory $_ })
-    if ($releaseExists) {
-        if (-not $PSCmdlet.ShouldProcess($existingReleaseUrl, 'Release-Dateien aktualisieren')) { return }
-        $uploadArguments = @('release', 'upload', $releaseTag) + $artifactPaths + @('--clobber')
-        Invoke-GitHubCommandWithRetry -Arguments $uploadArguments -Description 'GitHub-Release-Dateien aktualisieren' | Out-Null
-        $releaseUrl = $existingReleaseUrl
-    } else {
-        if (-not $PSCmdlet.ShouldProcess($releaseTag, 'GitHub Release erstellen')) { return }
-        $createArguments = @('release', 'create', $releaseTag) + $artifactPaths + @('--verify-tag', '--title', "M24 Backup $releaseVersion", '--generate-notes')
-        $releaseUrl = Invoke-GitHubCommandWithRetry -Arguments $createArguments -Description 'GitHub Release erstellen' -ExpectedReleaseTag $releaseTag
-    }
-} finally {
-    if ($temporaryToken) { Remove-Item Env:\GH_TOKEN -ErrorAction SilentlyContinue }
-}
+$repositoryUrl = Get-GitHubRepositoryWebUrl
 
 Write-Host ''
-Write-Host "Release $releaseVersion erfolgreich veröffentlicht." -ForegroundColor Green
-Write-Host $releaseUrl
-Write-Host "Lokale Artefakte: $distDirectory"
+Write-Host "Tag $releaseTag wurde gepusht. Der Release-Workflow baut, signiert (falls konfiguriert) und veröffentlicht das GitHub-Release." -ForegroundColor Green
+if ($repositoryUrl) {
+    Write-Host "Workflow-Status: $repositoryUrl/actions/workflows/release-build.yml"
+    Write-Host "Release-Seite:   $repositoryUrl/releases/tag/$releaseTag"
+}
+Write-Host "Lokale Verifikations-Artefakte (werden nicht veröffentlicht): $distDirectory"
