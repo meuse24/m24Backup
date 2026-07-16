@@ -4,7 +4,10 @@ Alle wesentlichen Änderungen dieses Projekts werden in dieser Datei
 dokumentiert. Die Versionierung orientiert sich an
 [Semantic Versioning](https://semver.org/lang/de/).
 
-## [1.1.0] – 2026-07-16
+## [1.4.0] – 2026-07-16
+
+Sammelrelease: enthält auch die seit v1.0.0 in den Zwischenreleases
+v1.1.0 bis v1.3.0 veröffentlichten Änderungen.
 
 ### Behoben
 
@@ -95,5 +98,5 @@ Erste öffentliche, releasefähige Version.
 - Portables ZIP und per-user Inno-Setup-Installer
 - Versionsanzeige und SHA-256-Prüfsummen für Release-Artefakte
 
-[1.1.0]: https://github.com/meuse24/m24Backup/releases/tag/v1.1.0
+[1.4.0]: https://github.com/meuse24/m24Backup/releases/tag/v1.4.0
 [1.0.0]: https://github.com/meuse24/m24Backup/releases/tag/v1.0.0
