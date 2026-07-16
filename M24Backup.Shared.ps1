@@ -279,6 +279,34 @@ function Test-M24ChecksumManifest {
     return [pscustomobject]@{ Cancelled = $false; MissingManifest = $false; Files = $files; Bytes = $bytes; ErrorCount = $errorCount; Errors = @($errors) }
 }
 
+function Get-M24ChecksumVerifiedDate {
+    # Liefert den Zeitpunkt der letzten erfolgreichen vollstaendigen
+    # Pruefsummenpruefung aus den Sicherungsmetadaten oder $null.
+    param([string]$MetadataFile)
+    if (-not (Test-Path -LiteralPath $MetadataFile -PathType Leaf)) { return $null }
+    $line = Get-Content -LiteralPath $MetadataFile -ErrorAction SilentlyContinue |
+        Where-Object { $_ -like 'Pruefsummen-Pruefung:*' } |
+        Select-Object -Last 1
+    if ($line -and $line -match '^Pruefsummen-Pruefung:\s*Erfolgreich am\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.?$') {
+        return $matches[1]
+    }
+    return $null
+}
+
+function Set-M24ChecksumVerifiedMetadata {
+    # Vermerkt eine erfolgreiche vollstaendige Pruefsummenpruefung in den
+    # Sicherungsmetadaten. Ein neuer Sicherungslauf schreibt die Metadaten
+    # komplett neu und entwertet den Vermerk damit automatisch.
+    param(
+        [string]$MetadataFile,
+        [datetime]$VerifiedAt = (Get-Date)
+    )
+    if (-not (Test-Path -LiteralPath $MetadataFile -PathType Leaf)) { return }
+    $lines = @(Get-Content -LiteralPath $MetadataFile -ErrorAction Stop | Where-Object { $_ -notlike 'Pruefsummen-Pruefung:*' })
+    $content = (@($lines) + ("Pruefsummen-Pruefung: Erfolgreich am {0}." -f $VerifiedAt.ToString('yyyy-MM-dd HH:mm:ss'))) -join [Environment]::NewLine
+    Write-M24AtomicTextFile -Path $MetadataFile -Content ($content + [Environment]::NewLine)
+}
+
 function Get-NormalizedFullPath {
     param([string]$Path)
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\')

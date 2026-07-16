@@ -137,7 +137,10 @@ enough information.
 ## Backup behavior
 
 - New and changed files are copied.
-- Newer destination files are not replaced by older source files.
+- For source paths that still exist, the backed-up file version matches the
+  current source state after a successful run: changed source files replace
+  their existing copy in the backup even when their timestamp is older. Files
+  deleted from the source remain in the backup.
 - Files are never automatically deleted from the backup.
 - Robocopy `/MIR` and `/PURGE` are not used.
 - Open or locked files may be skipped.
@@ -163,8 +166,10 @@ recommended for backup drives. Formatting a drive deletes its existing data.
 7. Confirm only if the displayed changes are correct.
 
 The preview shows missing local files, possible overwrites, protected newer
-local files, data volume, and example paths. No files are restored without
-explicit confirmation.
+local files, data volume, and example paths. It also shows the backup's
+integrity status: when the SHA-256 checksums were last fully verified, or
+that this verification is still pending. Before an important restore, run
+**Verify backup** first. No files are restored without explicit confirmation.
 
 ## Restore protection
 
@@ -176,9 +181,11 @@ explicit confirmation.
 
 ## Cancelling an operation
 
-Use **Cancel backup** or **Cancel restore**. The currently processed folder is
-allowed to finish safely before the worker exits. Files already copied remain
-in place.
+Use **Cancel backup** or **Cancel restore**. The running copy operation is
+stopped immediately; the file being transferred at that moment may remain
+incomplete at the destination. Files already copied completely remain in
+place. After a cancellation, run the backup again or use **Verify backup**;
+a cancelled run does not count as a successful backup.
 
 ## Backup location
 
@@ -264,7 +271,7 @@ restore conflict preview. Warnings must be confirmed before data is written.
 | `/E` | Copy subfolders, including empty folders. |
 | `/XJ` | Do not follow junctions, preventing loops. |
 | `/FFT` | Use two-second timestamp tolerance for external file systems. |
-| `/XO` | Do not replace newer destination files with older source files. |
+| `/XO` | Restore only: do not replace newer local files with older backup files. `/XO` is not used for backups so that changed source files with older timestamps are still backed up. |
 | `/MT:<Threads>` | Use multiple copy threads. |
 | `/R:1` | Retry once on errors. |
 | `/W:3` | Wait three seconds between retries. |

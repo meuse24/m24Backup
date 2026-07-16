@@ -145,8 +145,10 @@ sofern diese aus den Metadaten ermittelt werden kann.
 ## Verhalten der Sicherung
 
 - Neue und geänderte Dateien werden kopiert.
-- Neuere Dateien im Sicherungsziel werden nicht durch ältere Quelldateien
-  ersetzt.
+- Für noch vorhandene Quellpfade entspricht die gesicherte Dateiversion nach
+  einem erfolgreichen Lauf dem aktuellen Quellbestand: Geänderte Quelldateien
+  ersetzen ihre vorhandene Kopie im Backup auch dann, wenn ihr Zeitstempel
+  älter ist. In der Quelle gelöschte Dateien bleiben im Backup erhalten.
 - Dateien werden im Sicherungsziel nicht automatisch gelöscht.
 - Robocopy `/MIR` und `/PURGE` werden nicht verwendet.
 - Geöffnete oder gesperrte Dateien können übersprungen werden.
@@ -174,8 +176,11 @@ dessen vorhandene Daten gelöscht.
 
 Die Konfliktvorschau zeigt lokal fehlende Dateien, mögliche
 Überschreibungen, geschützte neuere lokale Dateien, Datenmenge und
-Beispielpfade. Ohne ausdrückliche Bestätigung werden keine Dateien
-wiederhergestellt.
+Beispielpfade. Zusätzlich zeigt sie den Integritätsstatus des Backups: wann
+die SHA-256-Prüfsummen zuletzt vollständig geprüft wurden oder ob diese
+Prüfung noch aussteht. Vor einer wichtigen Wiederherstellung wird empfohlen,
+zuerst **Backup prüfen** auszuführen. Ohne ausdrückliche Bestätigung werden
+keine Dateien wiederhergestellt.
 
 ## Schutz bei der Wiederherstellung
 
@@ -189,9 +194,12 @@ wiederhergestellt.
 ## Sicherung oder Wiederherstellung abbrechen
 
 Der laufende Vorgang kann über **Sicherung abbrechen** beziehungsweise
-**Wiederherstellung abbrechen** beendet werden. Der aktuell bearbeitete Ordner
-wird kontrolliert abgeschlossen, bevor der Worker stoppt. Bereits vollständig
-kopierte Dateien bleiben erhalten.
+**Wiederherstellung abbrechen** beendet werden. Der laufende Kopiervorgang
+wird dabei sofort gestoppt; die gerade übertragene Datei kann dadurch
+unvollständig im Ziel zurückbleiben. Bereits vollständig kopierte Dateien
+bleiben erhalten. Nach einem Abbruch sollte die Sicherung erneut ausgeführt
+oder das Backup mit **Backup prüfen** kontrolliert werden; ein abgebrochener
+Lauf gilt nicht als erfolgreiche Sicherung.
 
 ## Speicherort der Sicherung
 
@@ -279,7 +287,7 @@ Daten geschrieben werden.
 | `/E` | Unterordner einschließlich leerer Ordner kopieren. |
 | `/XJ` | Junctions nicht verfolgen, damit keine Schleifen entstehen. |
 | `/FFT` | Zwei-Sekunden-Zeitstempeltoleranz für externe Dateisysteme. |
-| `/XO` | Neuere Zieldateien nicht durch ältere Quelldateien ersetzen. |
+| `/XO` | Nur bei der Wiederherstellung: neuere lokale Dateien nicht durch ältere Sicherungsdateien ersetzen. Bei der Sicherung wird `/XO` nicht verwendet, damit auch geänderte Quelldateien mit älterem Zeitstempel gesichert werden. |
 | `/MT:<Threads>` | Mehrere Kopierthreads verwenden. |
 | `/R:1` | Einen Wiederholungsversuch bei Fehlern. |
 | `/W:3` | Drei Sekunden Wartezeit zwischen Wiederholungen. |

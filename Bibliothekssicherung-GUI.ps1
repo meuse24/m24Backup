@@ -1058,6 +1058,7 @@ $resultBox.Size = New-Object System.Drawing.Size(660, 64)
 $resultBox.Anchor = "Top, Left, Right"
 $resultBox.Multiline = $true
 $resultBox.ReadOnly = $true
+$resultBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
 $resultBox.BorderStyle = [System.Windows.Forms.BorderStyle]::None
 $resultBox.BackColor = $surfaceColor
 $resultBox.TabStop = $false
@@ -1821,10 +1822,19 @@ $timer.Add_Tick({
                                 $previewGb = [math]::Round(([double]$preview.PlannedBytes / 1GB), 2)
                                 $examples = @($preview.OverwriteExamples)
                                 $exampleText = if ($examples.Count) { (L "`r`n`r`nBeispiele für ersetzte Dateien:`r`n" "`r`n`r`nExamples of files to be replaced:`r`n") + ($examples -join "`r`n") } else { "" }
-                                $message = if ($script:isGerman) {
-                                    "Konfliktvorschau:`r`n`r`nFehlende Dateien: $($preview.MissingFiles)`r`nLokale Dateien, die ersetzt werden: $($preview.OverwriteFiles)`r`nNeuere lokale Dateien, die geschützt bleiben: $($preview.ProtectedNewerFiles)`r`nZu kopieren: $($preview.PlannedFiles) Dateien / $previewGb GB$exampleText`r`n`r`nWiederherstellung jetzt starten?"
+                                $manifestExists = $preview.PSObject.Properties['ChecksumManifestExists'] -and [bool]$preview.ChecksumManifestExists
+                                $verifiedAt = if ($preview.PSObject.Properties['ChecksumsVerifiedAt']) { [string]$preview.ChecksumsVerifiedAt } else { '' }
+                                $integrityText = if (-not $manifestExists) {
+                                    L "Integrität: Kein SHA-256-Prüfsummenmanifest vorhanden – beschädigte Dateien würden nicht erkannt." "Integrity: no SHA-256 checksum manifest exists – corrupted files would not be detected."
+                                } elseif ($verifiedAt) {
+                                    (L "Integrität: Prüfsummen zuletzt erfolgreich geprüft am {0}." "Integrity: checksums last verified successfully on {0}.") -f $verifiedAt
                                 } else {
-                                    "Conflict preview:`r`n`r`nMissing files: $($preview.MissingFiles)`r`nLocal files to be replaced: $($preview.OverwriteFiles)`r`nNewer local files that remain protected: $($preview.ProtectedNewerFiles)`r`nTo be copied: $($preview.PlannedFiles) files / $previewGb GB$exampleText`r`n`r`nStart the restore now?"
+                                    L "Integrität: Prüfsummen seit der letzten Sicherung nicht geprüft – Empfehlung: zuerst „Backup prüfen“ ausführen." "Integrity: checksums not verified since the last backup – recommendation: run “Verify backup” first."
+                                }
+                                $message = if ($script:isGerman) {
+                                    "Konfliktvorschau:`r`n`r`nFehlende Dateien: $($preview.MissingFiles)`r`nLokale Dateien, die ersetzt werden: $($preview.OverwriteFiles)`r`nNeuere lokale Dateien, die geschützt bleiben: $($preview.ProtectedNewerFiles)`r`nZu kopieren: $($preview.PlannedFiles) Dateien / $previewGb GB`r`n`r`n$integrityText$exampleText`r`n`r`nWiederherstellung jetzt starten?"
+                                } else {
+                                    "Conflict preview:`r`n`r`nMissing files: $($preview.MissingFiles)`r`nLocal files to be replaced: $($preview.OverwriteFiles)`r`nNewer local files that remain protected: $($preview.ProtectedNewerFiles)`r`nTo be copied: $($preview.PlannedFiles) files / $previewGb GB`r`n`r`n$integrityText$exampleText`r`n`r`nStart the restore now?"
                                 }
                                 $answer = [System.Windows.Forms.MessageBox]::Show($message, (L "Wiederherstellung prüfen" "Review restore"), "YesNo", "Warning")
                                 if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
@@ -2153,7 +2163,12 @@ $historyButton.Add_Click({
         $kind = if ($_.BaseName -like 'restore_*') { L 'Wiederherstellung' 'Restore' } else { L 'Sicherung' 'Backup' }
         '{0}  ·  {1}  ·  {2:N1} KB' -f $_.LastWriteTime.ToString('dd.MM.yyyy HH:mm'), $kind, ($_.Length / 1KB)
     })
-    [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), (L 'Letzte Vorgänge' 'Recent operations'), 'OK', 'Information') | Out-Null
+    $message = ($lines -join [Environment]::NewLine) + [Environment]::NewLine + [Environment]::NewLine +
+        (L 'Protokollordner jetzt öffnen, um einzelne Protokolle anzusehen?' 'Open the log folder now to inspect individual logs?')
+    $answer = [System.Windows.Forms.MessageBox]::Show($message, (L 'Letzte Vorgänge' 'Recent operations'), 'YesNo', 'Information')
+    if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+        Start-Process -FilePath 'explorer.exe' -ArgumentList $script:lastLogDir
+    }
 })
 
 $verifyButton.Add_Click({
@@ -2206,6 +2221,11 @@ $verifyButton.Add_Click({
             }
             $checked = Test-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles $excluded `
                 -CancelCallback { Test-Path -LiteralPath $cancelFile }
+            if (-not $checked.Cancelled -and [int]$checked.ErrorCount -eq 0) {
+                # Erfolgreiche Vollpruefung in den Metadaten vermerken; die
+                # Restore-Vorschau zeigt diesen Stand als Integritaetsstatus an.
+                Set-M24ChecksumVerifiedMetadata -MetadataFile (Join-Path $root '_Sicherungsinfo.txt')
+            }
             return [pscustomobject]@{ Initialized = $false; Cancelled = $checked.Cancelled; Files = $checked.Files; Bytes = $checked.Bytes; ErrorCount = $checked.ErrorCount; Errors = @($checked.Errors) }
         } finally {
             if ($lockStream) { $lockStream.Dispose() }

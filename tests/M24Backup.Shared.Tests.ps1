@@ -74,6 +74,38 @@ Describe 'Checksum manifest lifecycle' {
         $changed.Errors[0] | Should -Match 'Checksum mismatch'
     }
 
+    It 'detects a file that is missing from the backup' {
+        $source = Join-Path $TestDrive 'missing-source'
+        $manifestPath = Join-Path $TestDrive 'missing.tsv'
+        New-Item -ItemType Directory -Path $source | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $source 'keep.txt'), 'keep')
+        [System.IO.File]::WriteAllText((Join-Path $source 'gone.txt'), 'gone')
+        $folders = @([pscustomobject]@{ Name = 'Dokumente'; Path = $source })
+
+        Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @() | Out-Null
+        Remove-Item -LiteralPath (Join-Path $source 'gone.txt') -Force
+
+        $verified = Test-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @()
+        $verified.ErrorCount | Should -Be 1
+        $verified.Errors[0] | Should -Match 'File missing'
+    }
+
+    It 'reports a missing manifest instead of passing verification' {
+        $source = Join-Path $TestDrive 'no-manifest-source'
+        New-Item -ItemType Directory -Path $source | Out-Null
+        $folders = @([pscustomobject]@{ Name = 'Dokumente'; Path = $source })
+
+        $verified = Test-M24ChecksumManifest -Folders $folders -ManifestPath (Join-Path $TestDrive 'does-not-exist.tsv') -ExcludedFiles @()
+        $verified.MissingManifest | Should -Be $true
+        $verified.ErrorCount | Should -Be 1
+    }
+
+    It 'rejects a manipulated manifest header' {
+        $manifestPath = Join-Path $TestDrive 'tampered.tsv'
+        [System.IO.File]::WriteAllText($manifestPath, "TAMPERED`t1`tSHA256`r`n")
+        { Read-M24ChecksumManifest -Path $manifestPath } | Should -Throw '*Unsupported checksum manifest format*'
+    }
+
     It 'does not write a manifest after cancellation' {
         $source = Join-Path $TestDrive 'cancelled-source'
         $manifestPath = Join-Path $TestDrive 'cancelled.tsv'
@@ -84,6 +116,37 @@ Describe 'Checksum manifest lifecycle' {
         $result = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @() -CancelCallback { $true }
         $result.Cancelled | Should -Be $true
         Test-Path -LiteralPath $manifestPath | Should -Be $false
+    }
+}
+
+Describe 'Checksum verification metadata' {
+    It 'stores and reads back the verification timestamp' {
+        $metadataFile = Join-Path $TestDrive '_Sicherungsinfo.txt'
+        Write-M24AtomicTextFile -Path $metadataFile -Content "Bibliothekssicherung`r`nComputer: PC`r`nErgebnis: Erfolgreich abgeschlossen am 2026-07-16 08:00:00.`r`n"
+
+        $verifiedAt = Get-Date '2026-07-16 09:30:00'
+        Set-M24ChecksumVerifiedMetadata -MetadataFile $metadataFile -VerifiedAt $verifiedAt
+
+        Get-M24ChecksumVerifiedDate -MetadataFile $metadataFile | Should -Be '2026-07-16 09:30:00'
+        # Die uebrigen Metadatenzeilen bleiben unveraendert erhalten.
+        (Get-Content -LiteralPath $metadataFile) -contains 'Computer: PC' | Should -Be $true
+    }
+
+    It 'replaces an existing verification line instead of appending' {
+        $metadataFile = Join-Path $TestDrive '_Sicherungsinfo_replace.txt'
+        Write-M24AtomicTextFile -Path $metadataFile -Content "Bibliothekssicherung`r`n"
+        Set-M24ChecksumVerifiedMetadata -MetadataFile $metadataFile -VerifiedAt (Get-Date '2026-07-15 10:00:00')
+        Set-M24ChecksumVerifiedMetadata -MetadataFile $metadataFile -VerifiedAt (Get-Date '2026-07-16 11:00:00')
+
+        @(Get-Content -LiteralPath $metadataFile | Where-Object { $_ -like 'Pruefsummen-Pruefung:*' }).Count | Should -Be 1
+        Get-M24ChecksumVerifiedDate -MetadataFile $metadataFile | Should -Be '2026-07-16 11:00:00'
+    }
+
+    It 'returns null when no verification has been recorded' {
+        $metadataFile = Join-Path $TestDrive '_Sicherungsinfo_none.txt'
+        Write-M24AtomicTextFile -Path $metadataFile -Content "Bibliothekssicherung`r`n"
+        Get-M24ChecksumVerifiedDate -MetadataFile $metadataFile | Should -Be $null
+        Get-M24ChecksumVerifiedDate -MetadataFile (Join-Path $TestDrive 'fehlt.txt') | Should -Be $null
     }
 }
 

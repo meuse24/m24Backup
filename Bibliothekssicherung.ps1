@@ -282,7 +282,9 @@ function Wait-GuiApproval {
 function Get-BackupPreflight {
     param(
         [array]$Folders,
-        [string[]]$ExcludedFiles
+        [string[]]$ExcludedFiles,
+        [ValidateSet('Backup', 'Restore')]
+        [string]$OperationMode = 'Backup'
     )
 
     [int64]$totalBytes = 0
@@ -342,12 +344,21 @@ function Get-BackupPreflight {
                             try {
                                 $existing = New-Object System.IO.FileInfo($targetFile)
                                 $timeDifference = ($file.LastWriteTimeUtc - $existing.LastWriteTimeUtc).TotalSeconds
-                                $needsCopy = ($timeDifference -gt 2) -or (([math]::Abs($timeDifference) -le 2) -and ($file.Length -ne $existing.Length))
+                                if ($OperationMode -eq 'Restore') {
+                                    # Beim Restore schuetzt /XO neuere lokale Dateien.
+                                    $needsCopy = ($timeDifference -gt 2) -or (([math]::Abs($timeDifference) -le 2) -and ($file.Length -ne $existing.Length))
+                                    if (-not $needsCopy -and $timeDifference -lt -2) {
+                                        $protectedNewerFileCount++
+                                    }
+                                } else {
+                                    # Beim Backup gewinnt der aktuelle Quellbestand: Auch eine
+                                    # Quelldatei mit aelterem Zeitstempel wird kopiert, wenn sie
+                                    # von der Zieldatei abweicht (Robocopy ohne /XO).
+                                    $needsCopy = ([math]::Abs($timeDifference) -gt 2) -or ($file.Length -ne $existing.Length)
+                                }
                                 if ($needsCopy) {
                                     $overwriteFileCount++
                                     if ($overwriteExamples.Count -lt 10) { $overwriteExamples += $targetFile }
-                                } elseif ($timeDifference -lt -2) {
-                                    $protectedNewerFileCount++
                                 }
                             } catch { $needsCopy = $true }
                         } else {
@@ -784,7 +795,7 @@ $fat32Warning = $fileSystem -eq "FAT32"
 # Unwichtige Windows-Metadaten und typische temporaere Dateien auslassen.
 $excludedFiles = @(Get-M24DefaultExcludedFiles)
 
-$preflight = Get-BackupPreflight -Folders $backupFolders -ExcludedFiles $excludedFiles
+$preflight = Get-BackupPreflight -Folders $backupFolders -ExcludedFiles $excludedFiles -OperationMode $Mode
 if ($preflight.ScanWarnings.Count -gt 0) {
     # Bei einer Wiederherstellung deuten Lesefehler auf dem Sicherungsmedium
     # auf einen Defekt hin; hier bleibt der Abbruch bestehen. Bei einer
@@ -833,6 +844,10 @@ if ($Mode -eq 'Backup' -and $fat32Warning -and $preflight.LargeFiles.Count -gt 0
 }
 
 if ($Mode -eq 'Restore') {
+    # Integritaetsstatus fuer die Freigabeentscheidung: Gibt es ein
+    # Pruefsummenmanifest und wann wurde es zuletzt vollstaendig geprueft?
+    $checksumManifestExists = Test-Path -LiteralPath $checksumManifestFile -PathType Leaf
+    $checksumsVerifiedAt = Get-M24ChecksumVerifiedDate -MetadataFile $metadataFile
     if ($PreviewFile) {
         [pscustomobject]@{
             MissingFiles = $preflight.MissingFileCount
@@ -841,6 +856,8 @@ if ($Mode -eq 'Restore') {
             PlannedFiles = $preflight.RequiredFileCount
             PlannedBytes = $preflight.RequiredBytes
             OverwriteExamples = @($preflight.OverwriteExamples)
+            ChecksumManifestExists = $checksumManifestExists
+            ChecksumsVerifiedAt = $checksumsVerifiedAt
         } | Write-AtomicJsonFile -Path $PreviewFile -Depth 4
     }
     if ($Silent) {
@@ -871,9 +888,16 @@ if ($Mode -eq 'Restore') {
     Write-Host (M "Es wird nichts in den lokalen Ordnern geloescht." "Nothing is deleted from local folders.")
     Write-Host (M "Neuere lokale Dateien bleiben durch /XO geschuetzt." "Newer local files remain protected by /XO.")
     Write-Host ((M "Konflikte: {0} lokale Datei(en) werden ersetzt; {1} neuere lokale Datei(en) bleiben erhalten." "Conflicts: {0} local file(s) will be replaced; {1} newer local file(s) will remain protected.") -f $preflight.OverwriteFileCount, $preflight.ProtectedNewerFileCount)
+    if (-not $checksumManifestExists) {
+        Write-Host (M "WARNUNG: Fuer dieses Backup ist kein SHA-256-Pruefsummenmanifest vorhanden. Beschaedigte Dateien wuerden nicht erkannt." "WARNING: This backup has no SHA-256 checksum manifest. Corrupted files would not be detected.")
+    } elseif ($checksumsVerifiedAt) {
+        Write-Host ((M "Integritaet: Pruefsummen zuletzt erfolgreich geprueft am {0}." "Integrity: checksums last verified successfully on {0}.") -f $checksumsVerifiedAt)
+    } else {
+        Write-Host (M "Hinweis: Die Pruefsummen dieses Backups wurden seit der letzten Sicherung nicht geprueft. Empfehlung: vorher 'Backup pruefen' ausfuehren." "Note: The checksums of this backup have not been verified since the last backup. Recommendation: run 'Verify backup' first.")
+    }
 } else {
     Write-Host (M "Es wird nichts im Backup-Ziel geloescht." "Nothing is deleted from the backup destination.")
-    Write-Host (M "Neuere Dateien ueberschreiben aeltere Dateien im Backup." "Newer files replace older files in the backup.")
+    Write-Host (M "Geaenderte Quelldateien ersetzen ihre vorhandene Kopie im Backup, auch bei aelterem Zeitstempel der Quelle." "Changed source files replace their existing copy in the backup, even when the source timestamp is older.")
 }
 Write-Host (M "AppData, Temp- und Cache-Verzeichnisse werden nicht kopiert." "AppData, temporary, and cache folders are not copied.")
 Write-Host (M "Hinweis: Geoeffnete/gesperrte Dateien koennen uebersprungen werden; Details stehen im Log." "Note: Open or locked files may be skipped; see the log for details.")
@@ -974,7 +998,6 @@ foreach ($folder in $backupFolders) {
     # /E       kopiert auch leere Unterordner.
     # /XJ      folgt keinen Junctions und verhindert Schleifen.
     # /FFT     toleriert groebere Zeitstempel externer Dateisysteme.
-    # /XO      ersetzt keine neuere Datei im Sicherungsziel durch eine aeltere.
     # /COPY:DAT kopiert Daten, Attribute und Zeitstempel, aber keine NTFS-ACLs.
     # Es wird absichtlich weder /MIR noch /PURGE verwendet: Am Ziel wird nichts geloescht.
     $robocopyArgs = @(
@@ -983,7 +1006,6 @@ foreach ($folder in $backupFolders) {
         "/E",
         "/XJ",
         "/FFT",
-        "/XO",
         "/MT:$Threads",
         "/R:1",
         "/W:3",
@@ -992,6 +1014,12 @@ foreach ($folder in $backupFolders) {
         "/NP",
         "/UNILOG+:$logFile"
     )
+    if ($Mode -eq 'Restore') {
+        # /XO nur beim Restore: neuere lokale Dateien bleiben geschuetzt.
+        # Beim Backup wuerde /XO inhaltlich geaenderte Quelldateien mit
+        # aelterem Zeitstempel ueberspringen; dort gewinnt die Quelle.
+        $robocopyArgs += "/XO"
+    }
     if (-not $DryRun) {
         $robocopyArgs += @("/NFL", "/NDL")
     } else {
