@@ -4,17 +4,34 @@ Alle wesentlichen Änderungen dieses Projekts werden in dieser Datei
 dokumentiert. Die Versionierung orientiert sich an
 [Semantic Versioning](https://semver.org/lang/de/).
 
-## [Unveröffentlicht]
+## [1.1.0] – 2026-07-16
+
+### Behoben
+
+- Sicherungen verwenden Robocopy `/XO` nicht mehr: Inhaltlich geänderte
+  Quelldateien mit älterem Zeitstempel werden jetzt zuverlässig gesichert.
+  `/XO` schützt weiterhin neuere lokale Dateien bei der Wiederherstellung.
+- Die Hilfe beschreibt den Abbruch jetzt korrekt: Robocopy wird sofort
+  gestoppt und die zuletzt übertragene Datei kann unvollständig im Ziel
+  zurückbleiben.
 
 ### Hinzugefügt
 
+- Integritätsstatus vor der Wiederherstellung: Die Konfliktvorschau zeigt an,
+  wann die SHA-256-Prüfsummen zuletzt vollständig geprüft wurden bzw. dass
+  die Prüfung noch aussteht; eine erfolgreiche Vollprüfung wird in
+  `_Sicherungsinfo.txt` vermerkt und durch jede neue Sicherung entwertet
+- Verlauf bietet das Öffnen des Protokollordners an; die Ergebnisübersicht
+  hat eine Scrollleiste
+- Abschnitt „Wichtige Einschränkungen" (unverschlüsselte Sicherungsdaten,
+  kein VSS, keine Versionierung) in beiden READMEs
 - Veröffentlichung unter der MIT-Lizenz; die Lizenzdatei ist Teil des
   Repositorys und aller Distributionen
 - Release-Build-Workflow, der die Artefakte nachvollziehbar in GitHub Actions
-  baut und eine vorbereitete SignPath-Signierung enthält, dazu die
-  Code-Signing-Richtlinie in beiden READMEs und eine Antragsanleitung unter
-  `docs/signpath-application.md`
-
+  baut, eine vorbereitete SignPath-Signierung enthält und bei einem Tag-Push
+  das GitHub-Release ausschließlich aus den CI-Artefakten veröffentlicht;
+  dazu die Code-Signing-Richtlinie in beiden READMEs und eine
+  Antragsanleitung unter `docs/signpath-application.md`
 - Windows-Benachrichtigungen für abgeschlossene, fehlgeschlagene und
   abgebrochene Vorgänge im Hintergrund
 - Dauerhaft gespeicherte Auswahl von Standard- und Zusatzordnern
@@ -40,10 +57,10 @@ dokumentiert. Die Versionierung orientiert sich an
   Prozesszugriffe schließen kann
 - Lokales HTML-Hilfesystem mit Markdown-Quellen, Inhaltsverzeichnis und
   kontextsensitiven Hilfe-Schaltflaechen in der GUI
-- Release-Orchestrator mit automatischer SemVer-Erhöhung, Schutzprüfungen,
-  Build, Git-Tag, Push und Veröffentlichung der Artefakte als GitHub-Release
-- Automatische Wiederholungsversuche bei vorübergehenden GitHub-API- und
-  Netzwerkfehlern während der Release-Veröffentlichung
+- Release-Orchestrator `release.ps1` mit automatischer SemVer-Erhöhung,
+  Schutzprüfungen, lokalem Verifikations-Build sowie Git-Tag und Push; das
+  GitHub-Release veröffentlicht anschließend der Release-Build-Workflow,
+  lokal gebaute Artefakte werden nie veröffentlicht
 
 ### Geändert
 
@@ -78,4 +95,5 @@ Erste öffentliche, releasefähige Version.
 - Portables ZIP und per-user Inno-Setup-Installer
 - Versionsanzeige und SHA-256-Prüfsummen für Release-Artefakte
 
+[1.1.0]: https://github.com/meuse24/m24Backup/releases/tag/v1.1.0
 [1.0.0]: https://github.com/meuse24/m24Backup/releases/tag/v1.0.0

@@ -45,6 +45,20 @@ auf Englisch.
 > geprüft wurde. Während der Wiederherstellung werden neuere lokale Dateien
 > geschützt; die Vorschau sollte trotzdem aufmerksam kontrolliert werden.
 
+## Wichtige Einschränkungen
+
+- **Die Sicherungsdaten liegen unverschlüsselt** auf dem Ziellaufwerk. Das
+  Laufwerk sollte sicher aufbewahrt oder z. B. mit BitLocker To Go geschützt
+  werden.
+- **Geöffnete oder gesperrte Dateien können fehlen.** Es wird kein
+  Volume-Schattenkopie-Dienst (VSS) verwendet; solche Dateien werden
+  übersprungen und im Protokoll vermerkt.
+- **Keine Versionierung:** Die Sicherung ist eine fortlaufende
+  Sicherheitskopie mit genau einem aktuellen Wiederherstellungsstand, kein
+  Archiv mit historischen Dateiversionen.
+
+Details stehen im Abschnitt „Sicherheitsgrenzen" der [Hilfe](docs/help.de.md).
+
 ## Installation
 
 Die empfohlene Variante ist die Setup-Datei aus den
@@ -128,9 +142,12 @@ benötigt:
 winget install --id JRSoftware.InnoSetup -e --scope user
 ```
 
-Das Release-Skript ermittelt die nächste semantische Version, baut und prüft
-alle Artefakte, erstellt und pusht den Git-Tag und veröffentlicht ein
-GitHub-Release:
+Das Release-Skript ermittelt die nächste semantische Version, baut die
+Artefakte lokal zur Verifikation und erstellt und pusht den Git-Tag. Der
+Tag-Push startet den Release-Build-Workflow, der die zu veröffentlichenden
+Artefakte aus dem Quellcode baut, bei konfigurierter SignPath-Integration
+signiert und das GitHub-Release veröffentlicht. Lokal gebaute Artefakte
+werden nie veröffentlicht:
 
 ```powershell
 .\release.ps1

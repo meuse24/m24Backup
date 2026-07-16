@@ -44,6 +44,18 @@ Windows systems and in English on all other systems.
 > local files are protected during restore, but the preview should still be
 > reviewed carefully.
 
+## Important limitations
+
+- **Backup data is stored unencrypted** on the destination drive. Keep the
+  drive in a safe place or protect it, for example with BitLocker To Go.
+- **Open or locked files may be missing.** No Volume Shadow Copy Service
+  (VSS) is used; such files are skipped and noted in the log.
+- **No versioning:** the backup is a rolling safety copy with exactly one
+  current restore state, not an archive with historical file versions.
+
+See the "Safety boundaries" section of the [help](docs/help.en.md) for
+details.
+
 ## Installation
 
 The recommended option is the setup file from
@@ -125,8 +137,12 @@ installer:
 winget install --id JRSoftware.InnoSetup -e --scope user
 ```
 
-The release script derives the next semantic version, builds and verifies all
-artifacts, creates and pushes the Git tag, and publishes a GitHub Release:
+The release script derives the next semantic version, builds the artifacts
+locally as a verification step, and creates and pushes the Git tag. The tag
+push triggers the release-build workflow, which builds the published
+artifacts from source, signs them when the SignPath integration is
+configured, and publishes the GitHub release. Locally built artifacts are
+never published:
 
 ```powershell
 .\release.ps1
