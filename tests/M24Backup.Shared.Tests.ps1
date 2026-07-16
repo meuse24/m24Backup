@@ -135,6 +135,53 @@ Describe 'ConvertTo-M24ExtendedLengthPath' {
 }
 
 Describe 'Reserved device file names' {
+    It 'recognizes reserved device names with and without extensions' {
+        foreach ($name in @('nul', 'NUL', 'con.txt', 'com1.bak', 'lpt9', 'aux.tar.gz')) {
+            Test-M24ReservedDeviceFileName -Name $name | Should -Be $true -Because $name
+        }
+        foreach ($name in @('null', 'console.log', 'com10', 'nul2.txt', 'normal.txt')) {
+            Test-M24ReservedDeviceFileName -Name $name | Should -Be $false -Because $name
+        }
+    }
+
+    It 'skips a device-name file whose hashing fails instead of aborting' {
+        Mock Get-M24FileSha256 { throw 'FileStream was asked to open a device' } -ParameterFilter { $Path -like '*\nul' }
+        $source = Join-Path $TestDrive 'device-fail-source'
+        $manifestPath = Join-Path $TestDrive 'device-fail.tsv'
+        New-Item -ItemType Directory -Path $source | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $source 'normal.txt'), 'inhalt')
+        $devicePath = Join-Path $source 'nul'
+        [System.IO.File]::WriteAllText("\\?\$devicePath", 'x')
+        $folders = @([pscustomobject]@{ Name = 'Downloads'; Path = $source })
+        try {
+            $updated = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @()
+            $updated.Cancelled | Should -Be $false
+            $updated.Files | Should -Be 1
+            $updated.SkippedDeviceFiles | Should -Be 1
+
+            $verified = Test-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @()
+            $verified.ErrorCount | Should -Be 0
+        } finally {
+            [System.IO.File]::Delete("\\?\$devicePath")
+        }
+    }
+
+    It 'does not report a manifest-only device entry as a missing file' {
+        $source = Join-Path $TestDrive 'device-missing-source'
+        $manifestPath = Join-Path $TestDrive 'device-missing.tsv'
+        New-Item -ItemType Directory -Path $source | Out-Null
+        $devicePath = Join-Path $source 'nul'
+        [System.IO.File]::WriteAllText("\\?\$devicePath", 'x')
+        $folders = @([pscustomobject]@{ Name = 'Downloads'; Path = $source })
+        try {
+            Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @() | Out-Null
+        } finally {
+            [System.IO.File]::Delete("\\?\$devicePath")
+        }
+        $verified = Test-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @()
+        $verified.ErrorCount | Should -Be 0
+    }
+
     It 'hashes and verifies a file named after a reserved device' {
         $source = Join-Path $TestDrive 'device-source'
         $manifestPath = Join-Path $TestDrive 'device.tsv'

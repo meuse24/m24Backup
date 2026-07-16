@@ -19,6 +19,15 @@ function Get-M24DefaultExcludedFiles {
     return @('thumbs.db', 'desktop.ini', '*.tmp', '*.temp', '~$*')
 }
 
+function Test-M24ReservedDeviceFileName {
+    # Erkennt Dateinamen, die reservierten Windows-Geraetenamen entsprechen
+    # (z. B. "nul", "con.txt"). Solche Dateien sind fast immer versehentlich
+    # erzeugte Artefakte; scheitert ihr Zugriff, darf das einen Sicherungs-
+    # oder Pruefvorgang nicht zum Abbruch bringen.
+    param([string]$Name)
+    return [bool]($Name -match '^(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$')
+}
+
 function Get-M24UserShellFolder {
     param(
         [string]$Name,
@@ -201,6 +210,7 @@ function Update-M24ChecksumManifest {
     $manifest = Read-M24ChecksumManifest -Path $ManifestPath
     $entries = $manifest.Entries
     [int64]$fileCount = 0; [int64]$hashedFiles = 0; [int64]$reusedFiles = 0; [int64]$totalBytes = 0
+    [int64]$skippedDeviceFiles = 0
     $folderIndex = 0
     foreach ($folder in $Folders) {
         $folderIndex++
@@ -221,7 +231,18 @@ function Update-M24ChecksumManifest {
             if (-not $ForceRehash -and $existing -and $existing.Length -eq $file.Length -and $existing.LastWriteUtcTicks -eq $file.LastWriteTimeUtc.Ticks) {
                 $hash = $existing.Sha256; $reusedFiles++
             } else {
-                $hash = Get-M24FileSha256 -Path $file.FullName -CancelCallback $CancelCallback
+                try {
+                    $hash = Get-M24FileSha256 -Path $file.FullName -CancelCallback $CancelCallback
+                } catch {
+                    # Nur Dateien mit reservierten Geraetenamen (z. B. "nul")
+                    # duerfen bei einem Zugriffsfehler stillschweigend ohne
+                    # Pruefsumme bleiben; echte Lesefehler brechen weiter ab.
+                    if (Test-M24ReservedDeviceFileName -Name $file.Name) {
+                        $skippedDeviceFiles++
+                        return
+                    }
+                    throw
+                }
                 if ($null -eq $hash) { $cancelled = $true; return }
                 $hashedFiles++
             }
@@ -234,7 +255,7 @@ function Update-M24ChecksumManifest {
         if ($cancelled) { return [pscustomobject]@{ Cancelled = $true } }
     }
     Write-M24ChecksumManifest -Path $ManifestPath -Entries $entries
-    return [pscustomobject]@{ Cancelled = $false; Files = $fileCount; HashedFiles = $hashedFiles; ReusedFiles = $reusedFiles; Bytes = $totalBytes }
+    return [pscustomobject]@{ Cancelled = $false; Files = $fileCount; HashedFiles = $hashedFiles; ReusedFiles = $reusedFiles; Bytes = $totalBytes; SkippedDeviceFiles = $skippedDeviceFiles }
 }
 
 function Test-M24ChecksumManifest {
@@ -277,6 +298,9 @@ function Test-M24ChecksumManifest {
                 if (-not $manifest.Entries.ContainsKey($path)) { throw "Checksum entry missing: $path" }
                 if (-not $hash.Equals([string]$manifest.Entries[$path].Sha256, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Checksum mismatch: $path" }
             } catch {
+                # Dateien mit reservierten Geraetenamen (z. B. "nul") gelten
+                # nie als Integritaetsfehler; sie sind Artefakte ohne Nutzwert.
+                if (Test-M24ReservedDeviceFileName -Name $file.Name) { return }
                 $errorCount++; if ($errors.Count -lt 10) { $errors += $_.Exception.Message }
             }
         }
@@ -286,6 +310,8 @@ function Test-M24ChecksumManifest {
         foreach ($scanError in $scanErrors) { $errorCount++; if ($errors.Count -lt 10) { $errors += $scanError.Exception.Message } }
     }
     foreach ($entry in $manifest.Entries.Values) {
+        $entryLeafName = Split-Path -Path ([string]$entry.Path) -Leaf
+        if (Test-M24ReservedDeviceFileName -Name $entryLeafName) { continue }
         if (-not $seen.Contains([string]$entry.Path)) { $errorCount++; if ($errors.Count -lt 10) { $errors += "File missing: $($entry.Path)" } }
     }
     return [pscustomobject]@{ Cancelled = $false; MissingManifest = $false; Files = $files; Bytes = $bytes; ErrorCount = $errorCount; Errors = @($errors) }

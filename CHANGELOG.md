@@ -4,6 +4,15 @@ Alle wesentlichen Änderungen dieses Projekts werden in dieser Datei
 dokumentiert. Die Versionierung orientiert sich an
 [Semantic Versioning](https://semver.org/lang/de/).
 
+## [1.4.2] – 2026-07-16
+
+### Geändert
+
+- Dateien mit reservierten Windows-Gerätenamen (z. B. `nul`) brechen die
+  Prüfsummenphase auch dann nicht mehr ab, wenn sie sich nicht lesen lassen:
+  Sie werden dann ohne Prüfsumme übersprungen und im Protokoll vermerkt.
+  Auch bei der Integritätsprüfung zählen solche Dateien nie als Fehler
+
 ## [1.4.1] – 2026-07-16
 
 ### Behoben
@@ -107,6 +116,7 @@ Erste öffentliche, releasefähige Version.
 - Portables ZIP und per-user Inno-Setup-Installer
 - Versionsanzeige und SHA-256-Prüfsummen für Release-Artefakte
 
+[1.4.2]: https://github.com/meuse24/m24Backup/releases/tag/v1.4.2
 [1.4.1]: https://github.com/meuse24/m24Backup/releases/tag/v1.4.1
 [1.4.0]: https://github.com/meuse24/m24Backup/releases/tag/v1.4.0
 [1.0.0]: https://github.com/meuse24/m24Backup/releases/tag/v1.0.0

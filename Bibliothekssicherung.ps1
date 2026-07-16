@@ -1122,6 +1122,9 @@ if ($maxCode -le 7) {
                 exit 20
             }
             Add-Content -LiteralPath $logFile -Encoding Unicode -Value ((M "Pruefsummen: {0} Dateien; {1} neu berechnet; {2} wiederverwendet." "Checksums: {0} files; {1} recalculated; {2} reused.") -f $checksumResult.Files, $checksumResult.HashedFiles, $checksumResult.ReusedFiles)
+            if ([int64]$checksumResult.SkippedDeviceFiles -gt 0) {
+                Add-Content -LiteralPath $logFile -Encoding Unicode -Value ((M "Hinweis: {0} Datei(en) mit reserviertem Geraetenamen (z. B. 'nul') wurden ohne Pruefsumme uebersprungen." "Note: {0} file(s) with reserved device names (e.g. 'nul') were skipped without a checksum.") -f $checksumResult.SkippedDeviceFiles)
+            }
         }
     }
     $finishedAt = Get-Date
