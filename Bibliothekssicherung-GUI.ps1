@@ -2282,14 +2282,14 @@ function Show-BackupDeletionTextConfirmation {
     $label.Text = (L $confirmationGerman $confirmationEnglish) -f $Info.ConfirmationText
     $dialog.Controls.Add($label)
 
-    $input = New-Object System.Windows.Forms.TextBox
-    $input.Location = New-Object System.Drawing.Point(18, 101)
-    $input.Size = New-Object System.Drawing.Size(524, 27)
-    $dialog.Controls.Add($input)
+    $confirmationInput = New-Object System.Windows.Forms.TextBox
+    $confirmationInput.Location = New-Object System.Drawing.Point(18, 101)
+    $confirmationInput.Size = New-Object System.Drawing.Size(524, 27)
+    $dialog.Controls.Add($confirmationInput)
 
     $cancel = New-Object System.Windows.Forms.Button
     $cancel.Text = L 'Abbrechen' 'Cancel'
-    $cancel.Location = New-Object System.Drawing.Point(342, 143)
+    $cancel.Location = New-Object System.Drawing.Point(311, 143)
     $cancel.Size = New-Object System.Drawing.Size(95, 31)
     $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $dialog.Controls.Add($cancel)
@@ -2297,23 +2297,23 @@ function Show-BackupDeletionTextConfirmation {
 
     $confirm = New-Object System.Windows.Forms.Button
     $confirm.Text = L 'Endgültig löschen' 'Delete permanently'
-    $confirm.Location = New-Object System.Drawing.Point(443, 143)
-    $confirm.Size = New-Object System.Drawing.Size(99, 31)
+    $confirm.Location = New-Object System.Drawing.Point(412, 143)
+    $confirm.Size = New-Object System.Drawing.Size(130, 31)
     $confirm.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $confirm.Enabled = $false
     $confirm.ForeColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
     $dialog.Controls.Add($confirm)
 
-    $input.Add_TextChanged({
+    $confirmationInput.Add_TextChanged({
         # Statische Equals-Variante verwenden: WinForms kann beim Schließen
         # noch ein TextChanged-Ereignis mit bereits freigegebenem Textwert
         # zustellen. Das darf keine unbehandelte Null-Ausnahme auslösen.
-        $confirm.Enabled = [string]::Equals([string]$input.Text, [string]$Info.ConfirmationText, [System.StringComparison]::Ordinal)
+        $confirm.Enabled = [string]::Equals([string]$confirmationInput.Text, [string]$Info.ConfirmationText, [System.StringComparison]::Ordinal)
         $dialog.AcceptButton = if ($confirm.Enabled) { $confirm } else { $null }
     })
 
     try {
-        $input.Select()
+        $confirmationInput.Select()
         return $dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK -and $confirm.Enabled
     } finally {
         $dialog.Dispose()

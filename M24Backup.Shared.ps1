@@ -473,8 +473,13 @@ function Remove-M24FileEntry {
 function Remove-M24DirectoryEntry {
     param([string]$Path)
     try {
-        [System.IO.Directory]::Delete((ConvertTo-M24ExtendedLengthPath $Path), $false)
-        return -not [System.IO.Directory]::Exists((ConvertTo-M24ExtendedLengthPath $Path))
+        $extendedPath = ConvertTo-M24ExtendedLengthPath $Path
+        $attributes = [System.IO.File]::GetAttributes($extendedPath)
+        if (($attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+            [System.IO.File]::SetAttributes($extendedPath, ($attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)))
+        }
+        [System.IO.Directory]::Delete($extendedPath, $false)
+        return -not [System.IO.Directory]::Exists($extendedPath)
     } catch {
         return $false
     }
@@ -657,9 +662,13 @@ function Remove-M24BackupSafely {
         }
     }
     [void](Remove-M24DirectoryEntry -Path $normalizedRoot)
+    $backupRootRemoved = -not [System.IO.Directory]::Exists((ConvertTo-M24ExtendedLengthPath $normalizedRoot))
+    if (-not $backupRootRemoved -and $ignoredDeviceFiles.Count -eq 0) {
+        throw "Backup directories could not be deleted completely: $normalizedRoot"
+    }
     return [pscustomobject]@{
         BackupRoot = $normalizedRoot
-        BackupRootRemoved = -not [System.IO.Directory]::Exists((ConvertTo-M24ExtendedLengthPath $normalizedRoot))
+        BackupRootRemoved = $backupRootRemoved
         IgnoredDeviceFiles = $ignoredDeviceFiles.Count
         IgnoredDevicePaths = @($ignoredDeviceFiles)
     }

@@ -344,6 +344,20 @@ Ergebnis: Erfolgreich abgeschlossen am 2026-07-16 08:00:00.
         Test-Path -LiteralPath $sibling | Should -Be $true
     }
 
+    It 'removes read-only backup directories after deleting their files' {
+        $nestedDirectory = Join-Path $script:deletionRoot 'Dokumente\Schreibgeschuetzt'
+        New-Item -ItemType Directory -Path $nestedDirectory -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $nestedDirectory 'inside.txt'), 'backup data')
+        [System.IO.File]::SetAttributes($nestedDirectory, ([System.IO.File]::GetAttributes($nestedDirectory) -bor [System.IO.FileAttributes]::ReadOnly))
+        [System.IO.File]::SetAttributes((Join-Path $script:deletionRoot 'Dokumente'), ([System.IO.File]::GetAttributes((Join-Path $script:deletionRoot 'Dokumente')) -bor [System.IO.FileAttributes]::ReadOnly))
+        [System.IO.File]::SetAttributes($script:deletionRoot, ([System.IO.File]::GetAttributes($script:deletionRoot) -bor [System.IO.FileAttributes]::ReadOnly))
+
+        $result = Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+
+        $result.BackupRootRemoved | Should -Be $true
+        Test-Path -LiteralPath $script:deletionRoot | Should -Be $false
+    }
+
     It 'deletes a NUL device-name artifact through its extended path' {
         $devicePath = Join-Path $script:deletionRoot 'Dokumente\nul'
         [System.IO.File]::WriteAllText("\\?\$devicePath", 'device artifact')
