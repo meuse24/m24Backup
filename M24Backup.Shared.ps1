@@ -128,6 +128,39 @@ function ConvertTo-M24ExtendedLengthPath {
     return $Path
 }
 
+function ConvertFrom-M24ExtendedLengthPath {
+    param([string]$Path)
+    if ($Path.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return "\\$($Path.Substring(8))"
+    }
+    if ($Path.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $Path.Substring(4)
+    }
+    return $Path
+}
+
+function Get-M24DirectoryEntries {
+    # Verwendet ausschließlich .NET mit erweitertem Pfad. PowerShells
+    # FileSystem-Provider kann Verzeichnisse wie "nul" zwar vom Elternordner
+    # auflisten, anschließend aber nicht mehr betreten.
+    param([string]$Path)
+    $extendedDirectory = ConvertTo-M24ExtendedLengthPath $Path
+    return @([System.IO.Directory]::GetFileSystemEntries($extendedDirectory) | ForEach-Object {
+        $extendedPath = [string]$_
+        $attributes = [System.IO.File]::GetAttributes($extendedPath)
+        $isDirectory = ($attributes -band [System.IO.FileAttributes]::Directory) -ne 0
+        $normalPath = ConvertFrom-M24ExtendedLengthPath $extendedPath
+        [pscustomobject]@{
+            Name = [System.IO.Path]::GetFileName($normalPath.TrimEnd('\'))
+            FullName = $normalPath
+            ExtendedFullName = $extendedPath
+            PSIsContainer = $isDirectory
+            Attributes = $attributes
+            Length = if ($isDirectory) { [int64]0 } else { [int64](New-Object System.IO.FileInfo($extendedPath)).Length }
+        }
+    })
+}
+
 function Get-M24FileSha256 {
     param([string]$Path, [scriptblock]$CancelCallback)
     $stream = $null
@@ -357,4 +390,277 @@ function Test-IsSameOrNestedPath {
     return $first.Equals($second, [System.StringComparison]::OrdinalIgnoreCase) -or
         $first.StartsWith("$second\", [System.StringComparison]::OrdinalIgnoreCase) -or
         $second.StartsWith("$first\", [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-M24BackupRoot {
+    param(
+        [string]$Drive,
+        [string]$Computer = $env:COMPUTERNAME,
+        [string]$User = $env:USERNAME
+    )
+    return Join-Path $Drive ("Bibliothekssicherung\{0}_{1}" -f $Computer, $User)
+}
+
+function Get-M24BackupMetadataIdentity {
+    param([string[]]$Lines)
+    return [pscustomobject]@{
+        Computer = (($Lines | Where-Object { $_ -like 'Computer:*' } | Select-Object -First 1) -replace '^Computer:\s*', '').Trim()
+        User = (($Lines | Where-Object { $_ -like 'Benutzer:*' } | Select-Object -First 1) -replace '^Benutzer:\s*', '').Trim()
+    }
+}
+
+function Test-M24BackupMetadataIdentity {
+    param(
+        [string[]]$Lines,
+        [string]$Computer = $env:COMPUTERNAME,
+        [string]$User = $env:USERNAME
+    )
+    $identity = Get-M24BackupMetadataIdentity -Lines $Lines
+    return $identity.Computer.Equals($Computer, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $identity.User.Equals($User, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-M24BackupDeletionTarget {
+    param(
+        [string]$BackupRoot,
+        [string]$Drive,
+        [string]$Computer,
+        [string]$User
+    )
+    $expectedRoot = Get-NormalizedFullPath (Get-M24BackupRoot -Drive $Drive -Computer $Computer -User $User)
+    $normalizedRoot = Get-NormalizedFullPath $BackupRoot
+    if (-not $normalizedRoot.Equals($expectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Backup deletion target does not match the expected profile folder: $expectedRoot"
+    }
+    if (-not (Test-Path -LiteralPath $normalizedRoot -PathType Container)) {
+        throw "Backup deletion target was not found: $normalizedRoot"
+    }
+    $rootItem = Get-Item -LiteralPath $normalizedRoot -Force -ErrorAction Stop
+    if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Backup deletion target is a symbolic link or junction. Deletion was refused.'
+    }
+    $metadataFile = Join-Path $normalizedRoot '_Sicherungsinfo.txt'
+    if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) {
+        throw 'Backup metadata is missing. Deletion was refused.'
+    }
+    $metadataLines = @(Get-Content -LiteralPath $metadataFile -ErrorAction Stop)
+    if (-not (Test-M24BackupMetadataIdentity -Lines $metadataLines -Computer $Computer -User $User)) {
+        throw 'Backup metadata does not match the current computer and user. Deletion was refused.'
+    }
+    return [pscustomobject]@{ BackupRoot = $normalizedRoot; MetadataFile = $metadataFile; MetadataLines = $metadataLines }
+}
+
+function Remove-M24ReservedDeviceFile {
+    param([string]$Path)
+    try {
+        return Remove-M24FileEntry -Path $Path
+    } catch {
+        return $false
+    }
+}
+
+function Remove-M24FileEntry {
+    param([string]$Path)
+    $extendedPath = ConvertTo-M24ExtendedLengthPath $Path
+    $attributes = [System.IO.File]::GetAttributes($extendedPath)
+    if (($attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+        [System.IO.File]::SetAttributes($extendedPath, ($attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)))
+    }
+    [System.IO.File]::Delete($extendedPath)
+    return -not [System.IO.File]::Exists($extendedPath)
+}
+
+function Remove-M24DirectoryEntry {
+    param([string]$Path)
+    try {
+        [System.IO.Directory]::Delete((ConvertTo-M24ExtendedLengthPath $Path), $false)
+        return -not [System.IO.Directory]::Exists((ConvertTo-M24ExtendedLengthPath $Path))
+    } catch {
+        return $false
+    }
+}
+
+function Get-M24BackupDeletionInfo {
+    param(
+        [string]$BackupRoot,
+        [string]$Drive,
+        [string]$Computer,
+        [string]$User
+    )
+
+    if ([string]::IsNullOrWhiteSpace($BackupRoot) -or [string]::IsNullOrWhiteSpace($Drive) -or
+        [string]::IsNullOrWhiteSpace($Computer) -or [string]::IsNullOrWhiteSpace($User)) {
+        throw 'Backup deletion validation requires a path, drive, computer, and user.'
+    }
+
+    $target = Assert-M24BackupDeletionTarget -BackupRoot $BackupRoot -Drive $Drive -Computer $Computer -User $User
+    $normalizedDrive = Get-NormalizedFullPath ("{0}\" -f $Drive.TrimEnd('\'))
+    $normalizedRoot = $target.BackupRoot
+    $metadataFile = $target.MetadataFile
+    $metadataLines = $target.MetadataLines
+    $identity = Get-M24BackupMetadataIdentity -Lines $metadataLines
+
+    $items = New-Object System.Collections.Generic.List[object]
+    $pendingDirectories = New-Object 'System.Collections.Generic.Stack[string]'
+    $pendingDirectories.Push($normalizedRoot)
+    while ($pendingDirectories.Count -gt 0) {
+        $currentDirectory = $pendingDirectories.Pop()
+        foreach ($item in @(Get-M24DirectoryEntries -Path $currentDirectory)) {
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Backup contains a symbolic link or junction. Deletion was refused: $($item.FullName)"
+            }
+            $items.Add($item)
+            if ($item.PSIsContainer) { $pendingDirectories.Push($item.FullName) }
+        }
+    }
+    [int64]$bytes = 0
+    [int64]$files = 0
+    [int64]$directories = 0
+    foreach ($item in $items) {
+        if ($item.PSIsContainer) { $directories++ } else { $files++; $bytes += [int64]$item.Length }
+    }
+
+    $resultLine = $metadataLines | Where-Object { $_ -like 'Ergebnis:*' } | Select-Object -Last 1
+    $folderLine = $metadataLines | Where-Object { $_ -like 'Ordner:*' } | Select-Object -First 1
+    return [pscustomobject]@{
+        BackupRoot = $normalizedRoot
+        Drive = $normalizedDrive
+        Computer = $identity.Computer
+        User = $identity.User
+        Result = if ($resultLine) { ($resultLine -replace '^Ergebnis:\s*', '').Trim() } else { '' }
+        Folders = if ($folderLine) { ($folderLine -replace '^Ordner:\s*', '').Trim() } else { '' }
+        ChecksumVerifiedAt = Get-M24ChecksumVerifiedDate -MetadataFile $metadataFile
+        Files = $files
+        Directories = $directories
+        Bytes = $bytes
+        ConfirmationText = ("{0}_{1}" -f $Computer, $User)
+    }
+}
+
+function Remove-M24BackupSafely {
+    param(
+        [string]$BackupRoot,
+        [string]$Drive,
+        [string]$Computer,
+        [string]$User
+    )
+
+    $normalizedRoot = Get-NormalizedFullPath $BackupRoot
+    $expectedRoot = Get-NormalizedFullPath (Get-M24BackupRoot -Drive $Drive -Computer $Computer -User $User)
+    if (-not $normalizedRoot.Equals($expectedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $normalizedRoot -PathType Container)) {
+        throw "Backup deletion target does not match an existing expected profile folder: $expectedRoot"
+    }
+    $lockFile = Join-Path $normalizedRoot '_backup.lock'
+    $lockStream = $null
+    $target = $null
+    $deletionError = $null
+    $ignoredDeviceFiles = New-Object System.Collections.Generic.List[string]
+    $directoriesToRemove = @()
+    try {
+        try {
+            $lockStream = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        } catch {
+            throw 'Another backup, restore, verification, or deletion operation is using this backup.'
+        }
+
+        # Die endgültige Pfad-, Identitäts- und Reparse-Prüfung findet erst
+        # unter dem exklusiven Lock statt. Der Baum wird vollständig geprüft,
+        # bevor die erste Nutzdatei entfernt wird.
+        $target = Assert-M24BackupDeletionTarget -BackupRoot $normalizedRoot -Drive $Drive -Computer $Computer -User $User
+        $allItems = New-Object System.Collections.Generic.List[object]
+        $pendingDirectories = New-Object 'System.Collections.Generic.Stack[string]'
+        $pendingDirectories.Push($target.BackupRoot)
+        while ($pendingDirectories.Count -gt 0) {
+            $currentDirectory = $pendingDirectories.Pop()
+            foreach ($item in @(Get-M24DirectoryEntries -Path $currentDirectory)) {
+                if ($item.FullName.Equals($lockFile, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "Backup contains a symbolic link or junction. Deletion was refused: $($item.FullName)"
+                }
+                $allItems.Add($item)
+                if ($item.PSIsContainer) { $pendingDirectories.Push($item.FullName) }
+            }
+        }
+
+        # Dateien zuerst, Verzeichnisse von innen nach außen. Die Metadatendatei
+        # bleibt bis zuletzt bestehen, damit ein Teilfehler weiter sicher
+        # diagnostiziert und erneut bearbeitet werden kann.
+        foreach ($item in @($allItems | Where-Object { -not $_.PSIsContainer -and -not $_.FullName.Equals($target.MetadataFile, [System.StringComparison]::OrdinalIgnoreCase) })) {
+            if (Test-M24ReservedDeviceFileName -Name $item.Name) {
+                if (-not (Remove-M24ReservedDeviceFile -Path $item.FullName)) {
+                    $ignoredDeviceFiles.Add($item.FullName)
+                }
+                continue
+            }
+            $currentAttributes = [System.IO.File]::GetAttributes((ConvertTo-M24ExtendedLengthPath $item.FullName))
+            if (($currentAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Backup item became a symbolic link before deletion: $($item.FullName)"
+            }
+            if (-not (Remove-M24FileEntry -Path $item.FullName)) {
+                throw "Backup file could not be deleted: $($item.FullName)"
+            }
+        }
+        $directoriesToRemove = @($allItems | Where-Object { $_.PSIsContainer } | Sort-Object { $_.FullName.Length } -Descending)
+        foreach ($item in $directoriesToRemove) {
+            $currentAttributes = [System.IO.File]::GetAttributes((ConvertTo-M24ExtendedLengthPath $item.FullName))
+            if (($currentAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Backup directory became a symbolic link or junction before deletion: $($item.FullName)"
+            }
+            if (-not (Remove-M24DirectoryEntry -Path $item.FullName)) {
+                if (Test-M24ReservedDeviceFileName -Name $item.Name) {
+                    $ignoredDeviceFiles.Add($item.FullName)
+                }
+                # Ein nicht entfernbarer reservierter Gerätename kann seine
+                # Elternverzeichnisse blockieren. Nach dem Durchlauf wird
+                # geprüft, ob wirklich ausschließlich solche Artefakte übrig sind.
+            }
+        }
+
+        $pendingResidualDirectories = New-Object 'System.Collections.Generic.Stack[string]'
+        $pendingResidualDirectories.Push($target.BackupRoot)
+        while ($pendingResidualDirectories.Count -gt 0) {
+            $residualDirectory = $pendingResidualDirectories.Pop()
+            foreach ($residual in @(Get-M24DirectoryEntries -Path $residualDirectory)) {
+                if ($residual.FullName.Equals($lockFile, [System.StringComparison]::OrdinalIgnoreCase) -or
+                    $residual.FullName.Equals($target.MetadataFile, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                if (($residual.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "Backup contents changed to a symbolic link or junction during deletion: $($residual.FullName)"
+                }
+                if ($residual.PSIsContainer) {
+                    $pendingResidualDirectories.Push($residual.FullName)
+                    if ((Test-M24ReservedDeviceFileName -Name $residual.Name) -and
+                        -not $ignoredDeviceFiles.Contains($residual.FullName)) {
+                        $ignoredDeviceFiles.Add($residual.FullName)
+                    }
+                } elseif (Test-M24ReservedDeviceFileName -Name $residual.Name) {
+                    if (-not $ignoredDeviceFiles.Contains($residual.FullName)) { $ignoredDeviceFiles.Add($residual.FullName) }
+                } else {
+                    throw "Backup contents changed during deletion. Metadata was preserved and deletion stopped."
+                }
+            }
+        }
+        Remove-Item -LiteralPath $target.MetadataFile -Force -ErrorAction Stop
+    } catch {
+        $deletionError = $_
+    } finally {
+        if ($lockStream) { $lockStream.Dispose() }
+        Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($deletionError) { throw $deletionError }
+    foreach ($directory in $directoriesToRemove) {
+        $directoryPath = [string]$directory.FullName
+        if (-not [string]::IsNullOrWhiteSpace($directoryPath) -and
+            [System.IO.Directory]::Exists((ConvertTo-M24ExtendedLengthPath $directoryPath))) {
+            [void](Remove-M24DirectoryEntry -Path $directoryPath)
+        }
+    }
+    [void](Remove-M24DirectoryEntry -Path $normalizedRoot)
+    return [pscustomobject]@{
+        BackupRoot = $normalizedRoot
+        BackupRootRemoved = -not [System.IO.Directory]::Exists((ConvertTo-M24ExtendedLengthPath $normalizedRoot))
+        IgnoredDeviceFiles = $ignoredDeviceFiles.Count
+        IgnoredDevicePaths = @($ignoredDeviceFiles)
+    }
 }

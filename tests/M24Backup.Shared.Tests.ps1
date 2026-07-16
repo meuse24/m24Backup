@@ -245,3 +245,184 @@ Describe 'Write-M24AtomicTextFile' {
         @(Get-ChildItem -LiteralPath $TestDrive | Where-Object { $_.Name -like 'atomic.txt.*' }).Count | Should -Be 0
     }
 }
+
+Describe 'Shared backup identity' {
+    It 'builds the profile backup path in one shared helper' {
+        Get-M24BackupRoot -Drive $TestDrive -Computer 'PC' -User 'User' |
+            Should -Be (Join-Path $TestDrive 'Bibliothekssicherung\PC_User')
+    }
+
+    It 'reads and validates computer and user metadata case-insensitively' {
+        $lines = @('Computer: TEST-PC', 'Benutzer: TestUser')
+        $identity = Get-M24BackupMetadataIdentity -Lines $lines
+        $identity.Computer | Should -Be 'TEST-PC'
+        $identity.User | Should -Be 'TestUser'
+        Test-M24BackupMetadataIdentity -Lines $lines -Computer 'test-pc' -User 'testuser' | Should -Be $true
+    }
+}
+
+Describe 'Safe backup deletion' {
+    BeforeEach {
+        $drive = $TestDrive
+        $computer = 'TEST-PC'
+        $user = 'TestUser'
+        $container = Join-Path $drive 'Bibliothekssicherung'
+        $script:deletionRoot = Join-Path $container ("{0}_{1}" -f $computer, $user)
+        New-Item -ItemType Directory -Path (Join-Path $script:deletionRoot 'Dokumente') -Force | Out-Null
+        Write-M24AtomicTextFile -Path (Join-Path $script:deletionRoot '_Sicherungsinfo.txt') -Content @"
+Bibliothekssicherung
+
+Computer: $computer
+Benutzer: $user
+Ordner: Dokumente
+Ergebnis: Erfolgreich abgeschlossen am 2026-07-16 08:00:00.
+"@
+        [System.IO.File]::WriteAllText((Join-Path $script:deletionRoot 'Dokumente\sample.txt'), 'backup data')
+    }
+
+    It 'returns identity, content size, and confirmation text for a valid backup' {
+        $info = Get-M24BackupDeletionInfo -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+        $info.Computer | Should -Be 'TEST-PC'
+        $info.User | Should -Be 'TestUser'
+        $info.Files | Should -Be 2
+        $info.Bytes | Should -BeGreaterThan 0
+        $info.ConfirmationText | Should -Be 'TEST-PC_TestUser'
+    }
+
+    It 'refuses a parent folder or differently named target' {
+        {
+            Get-M24BackupDeletionInfo -BackupRoot (Split-Path $script:deletionRoot -Parent) -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+        } | Should -Throw '*expected profile folder*'
+    }
+
+    It 'refuses metadata belonging to another user' {
+        (Get-Content -LiteralPath (Join-Path $script:deletionRoot '_Sicherungsinfo.txt') -Raw).Replace('Benutzer: TestUser', 'Benutzer: OtherUser') |
+            Set-Content -LiteralPath (Join-Path $script:deletionRoot '_Sicherungsinfo.txt')
+        {
+            Get-M24BackupDeletionInfo -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+        } | Should -Throw '*does not match*'
+    }
+
+    It 'refuses a backup containing a directory junction' {
+        $junction = Join-Path $script:deletionRoot 'linked-content'
+        New-Item -ItemType Junction -Path $junction -Target $TestDrive | Out-Null
+        {
+            Get-M24BackupDeletionInfo -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+        } | Should -Throw '*symbolic link or junction*'
+    }
+
+    It 'rechecks junction safety after the preview and removes its lock on refusal' {
+        Get-M24BackupDeletionInfo -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser' | Out-Null
+        $junction = Join-Path $script:deletionRoot 'late-linked-content'
+        New-Item -ItemType Junction -Path $junction -Target $TestDrive | Out-Null
+        {
+            Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+        } | Should -Throw '*symbolic link or junction*'
+        Test-Path -LiteralPath (Join-Path $script:deletionRoot '_backup.lock') | Should -Be $false
+        Test-Path -LiteralPath (Join-Path $script:deletionRoot '_Sicherungsinfo.txt') | Should -Be $true
+    }
+
+    It 'refuses deletion while the operation lock is held' {
+        $lockPath = Join-Path $script:deletionRoot '_backup.lock'
+        $lock = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
+        try {
+            {
+                Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+            } | Should -Throw '*using this backup*'
+            Test-Path -LiteralPath $script:deletionRoot | Should -Be $true
+        } finally {
+            $lock.Dispose()
+            Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'deletes only the validated profile backup folder' {
+        $sibling = Join-Path (Split-Path $script:deletionRoot -Parent) 'OTHER-PC_OtherUser'
+        New-Item -ItemType Directory -Path $sibling -Force | Out-Null
+        Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser' | Out-Null
+        Test-Path -LiteralPath $script:deletionRoot | Should -Be $false
+        Test-Path -LiteralPath $sibling | Should -Be $true
+    }
+
+    It 'deletes a NUL device-name artifact through its extended path' {
+        $devicePath = Join-Path $script:deletionRoot 'Dokumente\nul'
+        [System.IO.File]::WriteAllText("\\?\$devicePath", 'device artifact')
+        try {
+            $result = Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+            $result.IgnoredDeviceFiles | Should -Be 0
+            $result.BackupRootRemoved | Should -Be $true
+        } finally {
+            if ([System.IO.File]::Exists("\\?\$devicePath")) { [System.IO.File]::Delete("\\?\$devicePath") }
+        }
+    }
+
+    It 'continues deleting the backup when a NUL artifact cannot be removed' {
+        $devicePath = Join-Path $script:deletionRoot 'Dokumente\nul'
+        [System.IO.File]::WriteAllText("\\?\$devicePath", 'device artifact')
+        Mock Remove-M24ReservedDeviceFile { return $false }
+        try {
+            $result = Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+            $result.IgnoredDeviceFiles | Should -Be 1
+            $result.BackupRootRemoved | Should -Be $false
+            Test-Path -LiteralPath (Join-Path $script:deletionRoot '_Sicherungsinfo.txt') | Should -Be $false
+            Test-Path -LiteralPath (Join-Path $script:deletionRoot 'Dokumente\sample.txt') | Should -Be $false
+        } finally {
+            if ([System.IO.File]::Exists("\\?\$devicePath")) { [System.IO.File]::Delete("\\?\$devicePath") }
+        }
+    }
+
+    It 'enumerates and deletes a directory named NUL through extended paths' {
+        $deviceDirectory = Join-Path $script:deletionRoot 'Dokumente\nul'
+        [System.IO.Directory]::CreateDirectory((ConvertTo-M24ExtendedLengthPath $deviceDirectory)) | Out-Null
+        [System.IO.File]::WriteAllText((ConvertTo-M24ExtendedLengthPath (Join-Path $deviceDirectory 'inside.txt')), 'inside')
+        try {
+            $info = Get-M24BackupDeletionInfo -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+            $info.Files | Should -Be 3
+            $result = Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+            $result.IgnoredDeviceFiles | Should -Be 0
+            $result.BackupRootRemoved | Should -Be $true
+        } finally {
+            if ([System.IO.Directory]::Exists((ConvertTo-M24ExtendedLengthPath $deviceDirectory))) {
+                [System.IO.Directory]::Delete((ConvertTo-M24ExtendedLengthPath $deviceDirectory), $true)
+            }
+        }
+    }
+
+    It 'continues when an empty NUL directory itself cannot be removed' {
+        $deviceDirectory = Join-Path $script:deletionRoot 'Dokumente\nul'
+        [System.IO.Directory]::CreateDirectory((ConvertTo-M24ExtendedLengthPath $deviceDirectory)) | Out-Null
+        [System.IO.File]::WriteAllText((ConvertTo-M24ExtendedLengthPath (Join-Path $deviceDirectory 'inside.txt')), 'inside')
+        Mock Remove-M24DirectoryEntry {
+            if ((Split-Path -Path $Path -Leaf) -eq 'nul') { return $false }
+            try {
+                [System.IO.Directory]::Delete((ConvertTo-M24ExtendedLengthPath $Path), $false)
+                return -not [System.IO.Directory]::Exists((ConvertTo-M24ExtendedLengthPath $Path))
+            } catch {
+                return $false
+            }
+        }
+        try {
+            $result = Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+            $result.IgnoredDeviceFiles | Should -Be 1
+            $result.BackupRootRemoved | Should -Be $false
+            [System.IO.File]::Exists((ConvertTo-M24ExtendedLengthPath (Join-Path $deviceDirectory 'inside.txt'))) | Should -Be $false
+            Test-Path -LiteralPath (Join-Path $script:deletionRoot '_Sicherungsinfo.txt') | Should -Be $false
+        } finally {
+            if ([System.IO.Directory]::Exists((ConvertTo-M24ExtendedLengthPath $deviceDirectory))) {
+                [System.IO.Directory]::Delete((ConvertTo-M24ExtendedLengthPath $deviceDirectory), $true)
+            }
+        }
+    }
+
+    It 'preserves metadata and cleans up the lock after a mid-deletion failure' {
+        Mock Remove-Item {
+            if ($LiteralPath -like '*sample.txt') { throw 'simulated file lock' }
+            Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+        }
+        {
+            Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+        } | Should -Throw '*simulated file lock*'
+        Test-Path -LiteralPath (Join-Path $script:deletionRoot '_backup.lock') | Should -Be $false
+        Test-Path -LiteralPath (Join-Path $script:deletionRoot '_Sicherungsinfo.txt') | Should -Be $true
+    }
+}

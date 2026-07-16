@@ -4,6 +4,18 @@ Alle wesentlichen Änderungen dieses Projekts werden in dieser Datei
 dokumentiert. Die Versionierung orientiert sich an
 [Semantic Versioning](https://semver.org/lang/de/).
 
+## [1.5.0] – 2026-07-16
+
+### Hinzugefügt
+
+- Ausgewählte Profil-Backups können nach einer Detailanzeige und zweistufigen
+  Sicherheitsabfrage vollständig gelöscht werden. Pfad-, Metadaten- und
+  Sperrprüfungen schützen andere Backups und laufende Vorgänge.
+- Alte Dateien und Ordner namens `NUL` oder mit ähnlichen reservierten
+  Windows-Gerätenamen werden bei der Backup-Löschung über erweiterte Pfade
+  traversiert und entfernt oder, falls Windows dies verweigert, gemeldet und
+  übersprungen, ohne die übrige Löschung abzubrechen.
+
 ## [1.4.2] – 2026-07-16
 
 ### Geändert

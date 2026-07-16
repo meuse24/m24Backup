@@ -92,6 +92,10 @@ $script:ejectDialogOpen = $false
 $script:verificationPowerShell = $null
 $script:verificationAsyncResult = $null
 $script:verificationCancelFile = $null
+$script:deletionPowerShell = $null
+$script:deletionAsyncResult = $null
+$script:deletionInfo = $null
+$script:deletionDisk = $null
 $script:lastProgressCurrent = 0
 $script:lastProgressTotal = 1
 $script:preCancelStatusText = $null
@@ -325,24 +329,18 @@ function Get-NewestLogFile {
 
 function Get-BackupRoot {
     param([string]$Drive)
-    return Join-Path $Drive ("Bibliothekssicherung\{0}_{1}" -f $env:COMPUTERNAME, $env:USERNAME)
+    return Get-M24BackupRoot -Drive $Drive
 }
 
 function Get-BackupMetadataIdentity {
     param([string[]]$Lines)
-
-    return [pscustomobject]@{
-        Computer = (($Lines | Where-Object { $_ -like 'Computer:*' } | Select-Object -First 1) -replace '^Computer:\s*', '').Trim()
-        User = (($Lines | Where-Object { $_ -like 'Benutzer:*' } | Select-Object -First 1) -replace '^Benutzer:\s*', '').Trim()
-    }
+    return Get-M24BackupMetadataIdentity -Lines $Lines
 }
 
 function Test-BackupMetadataMatchesCurrentProfile {
     param([string[]]$Lines)
 
-    $identity = Get-BackupMetadataIdentity -Lines $Lines
-    return $identity.Computer.Equals($env:COMPUTERNAME, [System.StringComparison]::OrdinalIgnoreCase) -and
-        $identity.User.Equals($env:USERNAME, [System.StringComparison]::OrdinalIgnoreCase)
+    return Test-M24BackupMetadataIdentity -Lines $Lines
 }
 
 function Test-BackupMetadataHasSuccessfulResult {
@@ -379,6 +377,7 @@ function Update-BackupArtifactActions {
         $destinationButton.Enabled = $false
         $historyButton.Enabled = $false
         $verifyButton.Enabled = $false
+        $deleteBackupButton.Enabled = $false
         return
     }
 
@@ -399,6 +398,7 @@ function Update-BackupArtifactActions {
     $logButton.Enabled = -not [string]::IsNullOrWhiteSpace([string]$artifactState.LogFile)
     $historyButton.Enabled = $logButton.Enabled
     $verifyButton.Enabled = $destinationButton.Enabled
+    $deleteBackupButton.Enabled = $destinationButton.Enabled
 }
 
 function Get-NormalizedVolumeSerial {
@@ -464,6 +464,12 @@ function Save-KnownBackupDrive {
     }
     $script:knownDrive = $knownDrive
     $script:settings.KnownBackupDrive = $knownDrive
+    Save-AppSettings
+}
+
+function Clear-KnownBackupDrive {
+    $script:knownDrive = $null
+    $script:settings.KnownBackupDrive = $null
     Save-AppSettings
 }
 
@@ -948,12 +954,25 @@ $verifyButton.Enabled = $false
 $verifyButton.TabIndex = 11
 $form.Controls.Add($verifyButton)
 
+$deleteBackupButton = New-Object System.Windows.Forms.Button
+$deleteBackupButton.Text = L 'Backup löschen' 'Delete backup'
+$deleteBackupButton.Location = New-Object System.Drawing.Point(503, 366)
+$deleteBackupButton.Size = New-Object System.Drawing.Size(187, 27)
+$deleteBackupButton.FlatStyle = 'Flat'
+$deleteBackupButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
+$deleteBackupButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(253, 239, 240)
+$deleteBackupButton.BackColor = $surfaceColor
+$deleteBackupButton.ForeColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
+$deleteBackupButton.Enabled = $false
+$deleteBackupButton.TabIndex = 12
+$form.Controls.Add($deleteBackupButton)
+
 # Das Logo nutzt den freien Bereich rechts neben Ordnerliste und Buttons
 # in voller Hoehe von Beschriftung und Liste.
 # Es ist optional: Fehlt die Datei, bleibt die Flaeche einfach leer.
 $logoBox = New-Object System.Windows.Forms.PictureBox
 $logoBox.Location = New-Object System.Drawing.Point(503, 195)
-$logoBox.Size = New-Object System.Drawing.Size(187, 207)
+$logoBox.Size = New-Object System.Drawing.Size(187, 164)
 $logoBox.SizeMode = 'Zoom'
 $logoBox.BackColor = $surfaceColor
 $logoBox.Anchor = 'Top, Right'
@@ -1162,7 +1181,7 @@ $timer.Interval = 500
 $driveWatchTimer = New-Object System.Windows.Forms.Timer
 $driveWatchTimer.Interval = 2500
 $driveWatchTimer.Add_Tick({
-    if ($script:backupProcess -or $script:pendingEjectDrive -or $script:verificationAsyncResult) { return }
+    if ($script:backupProcess -or $script:pendingEjectDrive -or $script:verificationAsyncResult -or $script:deletionAsyncResult) { return }
     if (-not $form.Visible -or $form.IsDisposed -or -not $form.IsHandleCreated) { return }
     if ($driveCombo.DroppedDown) { return }
     Update-DriveList
@@ -1219,9 +1238,67 @@ $verificationTimer.Add_Tick({
     }
 })
 
+$deletionTimer = New-Object System.Windows.Forms.Timer
+$deletionTimer.Interval = 350
+$deletionTimer.Add_Tick({
+    if (-not $script:deletionAsyncResult -or -not $script:deletionAsyncResult.IsCompleted) { return }
+    $deletionTimer.Stop()
+    try {
+        $output = @($script:deletionPowerShell.EndInvoke($script:deletionAsyncResult))
+        $deleted = $output | Select-Object -Last 1
+        if (-not $deleted -or -not $deleted.BackupRoot) { throw (L 'Der Löschvorgang lieferte kein gültiges Ergebnis.' 'The deletion operation returned no valid result.') }
+
+        $settingsWarning = $null
+        if ($script:deletionDisk -and (Test-IsKnownBackupDrive -Disk $script:deletionDisk)) {
+            try {
+                Clear-KnownBackupDrive
+            } catch {
+                $settingsWarning = L ' Das gespeicherte bekannte Laufwerk konnte nicht zurückgesetzt werden.' ' The remembered backup drive could not be reset.'
+                $script:knownDrive = $null
+                $script:settings.KnownBackupDrive = $null
+            }
+        }
+        $script:artifactCache.Clear()
+        $freedSize = Format-BackupDeletionSize $script:deletionInfo.Bytes
+        $deviceWarning = ''
+        if ([int]$deleted.IgnoredDeviceFiles -gt 0) {
+            $deviceWarningGerman = " {0} nicht löschbare(s) Windows-Geräteartefakt(e), beispielsweise NUL, wurde(n) ignoriert; dadurch kann ein leerer Restordner bestehen bleiben."
+            $deviceWarningEnglish = " {0} undeletable Windows device-name artifact(s), such as NUL, were ignored; an otherwise empty residual folder may remain."
+            $deviceWarning = (L $deviceWarningGerman $deviceWarningEnglish) -f [int]$deleted.IgnoredDeviceFiles
+        }
+        $script:resultSummary = ((L "Backup-Inhalte erfolgreich gelöscht: {0} ({1} freigegeben)." "Backup contents deleted successfully: {0} ({1} freed).") -f $deleted.BackupRoot, $freedSize) + $deviceWarning + $settingsWarning
+        $statusLabel.Text = if ([int]$deleted.IgnoredDeviceFiles -gt 0) {
+            L 'Backup gelöscht; nicht löschbares Geräteartefakt wurde ignoriert.' 'Backup deleted; an undeletable device-name artifact was ignored.'
+        } else {
+            L 'Backup erfolgreich gelöscht.' 'Backup deleted successfully.'
+        }
+        Reset-ProgressIndicator -Maximum 1
+        Update-DriveList -Force
+        Update-BackupArtifactActions
+        Update-BackupHealth
+        Update-LibraryList
+        [System.Windows.Forms.MessageBox]::Show($script:resultSummary, $form.Text, 'OK', 'Information') | Out-Null
+    } catch {
+        $statusLabel.Text = L 'Backup konnte nicht gelöscht werden.' 'Backup could not be deleted.'
+        [System.Windows.Forms.MessageBox]::Show(
+            ((L "Das Backup wurde nicht vollständig gelöscht:`r`n{0}" "The backup was not completely deleted:`r`n{0}") -f $_.Exception.Message),
+            $form.Text, 'OK', 'Error') | Out-Null
+    } finally {
+        if ($script:deletionPowerShell) { $script:deletionPowerShell.Dispose() }
+        $script:deletionPowerShell = $null
+        $script:deletionAsyncResult = $null
+        $script:deletionInfo = $null
+        $script:deletionDisk = $null
+        Stop-BusyProgress
+        $form.UseWaitCursor = $false
+        Set-VerificationControlsEnabled -Enabled $true
+        Update-ResultOverview
+    }
+})
+
 function Set-VerificationControlsEnabled {
     param([bool]$Enabled)
-    foreach ($control in @($startButton, $driveCombo, $refreshButton, $backupRadio, $restoreRadio, $libraryList, $allButton, $noneButton, $historyButton, $logButton, $destinationButton, $closeButton)) {
+    foreach ($control in @($startButton, $driveCombo, $refreshButton, $backupRadio, $restoreRadio, $libraryList, $allButton, $noneButton, $historyButton, $logButton, $destinationButton, $deleteBackupButton, $closeButton)) {
         $control.Enabled = $Enabled
     }
     if ($Enabled) {
@@ -1235,6 +1312,7 @@ function Set-VerificationControlsEnabled {
         $ejectCheckBox.Enabled = $false
         $checksumCheckBox.Enabled = $false
         $verifyButton.Enabled = $false
+        $deleteBackupButton.Enabled = $false
     }
 }
 
@@ -1280,6 +1358,7 @@ function Request-DelayedAutoEject {
     $libraryList.Enabled = $false
     $allButton.Enabled = $false
     $noneButton.Enabled = $false
+    $deleteBackupButton.Enabled = $false
     Update-BackupOptionState
     $ejectTimer.Stop()
     $ejectTimer.Start()
@@ -1306,6 +1385,7 @@ function Complete-DelayedAutoEject {
         $destinationButton.Enabled = $false
         $historyButton.Enabled = $false
         $verifyButton.Enabled = $false
+        $deleteBackupButton.Enabled = $false
     } else {
         $script:ejectAttemptsRemaining--
         if ($script:ejectAttemptsRemaining -gt 0) {
@@ -1696,6 +1776,7 @@ $startButton.Add_Click({
     $destinationButton.Enabled = $false
     $historyButton.Enabled = $false
     $verifyButton.Enabled = $false
+    $deleteBackupButton.Enabled = $false
     $resultBox.Text = L "Vorprüfung wird gestartet ..." "Starting preflight checks ..."
     $statusLabel.ForeColor = [System.Drawing.SystemColors]::ControlText
     $statusLabel.Text = if ($restoreRadio.Checked) {
@@ -2006,6 +2087,7 @@ $timer.Add_Tick({
             $destinationButton.Enabled = $script:lastDestination -and (Test-Path -LiteralPath $script:lastDestination)
             $historyButton.Enabled = $logButton.Enabled
             $verifyButton.Enabled = $destinationButton.Enabled
+            $deleteBackupButton.Enabled = $destinationButton.Enabled
 
             if ($script:backupCancelled) {
                 $statusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
@@ -2171,6 +2253,123 @@ $historyButton.Add_Click({
     }
 })
 
+function Format-BackupDeletionSize {
+    param([int64]$Bytes)
+    if ($Bytes -ge 1GB) { return (L '{0:N2} GB' '{0:N2} GB') -f ($Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return (L '{0:N1} MB' '{0:N1} MB') -f ($Bytes / 1MB) }
+    if ($Bytes -ge 1KB) { return (L '{0:N1} KB' '{0:N1} KB') -f ($Bytes / 1KB) }
+    return (L '{0} Bytes' '{0} bytes') -f $Bytes
+}
+
+function Show-BackupDeletionTextConfirmation {
+    param($Info)
+
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = L 'Backup endgültig löschen' 'Permanently delete backup'
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.ClientSize = New-Object System.Drawing.Size(560, 190)
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.Font = $form.Font
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.Location = New-Object System.Drawing.Point(18, 16)
+    $label.Size = New-Object System.Drawing.Size(524, 78)
+    $confirmationGerman = "Dieser Vorgang kann nicht rückgängig gemacht werden.`r`nGeben Sie zur Bestätigung exakt diesen Backup-Namen ein:`r`n`r`n{0}"
+    $confirmationEnglish = "This action cannot be undone.`r`nTo confirm, enter this exact backup name:`r`n`r`n{0}"
+    $label.Text = (L $confirmationGerman $confirmationEnglish) -f $Info.ConfirmationText
+    $dialog.Controls.Add($label)
+
+    $input = New-Object System.Windows.Forms.TextBox
+    $input.Location = New-Object System.Drawing.Point(18, 101)
+    $input.Size = New-Object System.Drawing.Size(524, 27)
+    $dialog.Controls.Add($input)
+
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.Text = L 'Abbrechen' 'Cancel'
+    $cancel.Location = New-Object System.Drawing.Point(342, 143)
+    $cancel.Size = New-Object System.Drawing.Size(95, 31)
+    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dialog.Controls.Add($cancel)
+    $dialog.CancelButton = $cancel
+
+    $confirm = New-Object System.Windows.Forms.Button
+    $confirm.Text = L 'Endgültig löschen' 'Delete permanently'
+    $confirm.Location = New-Object System.Drawing.Point(443, 143)
+    $confirm.Size = New-Object System.Drawing.Size(99, 31)
+    $confirm.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $confirm.Enabled = $false
+    $confirm.ForeColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
+    $dialog.Controls.Add($confirm)
+
+    $input.Add_TextChanged({
+        # Statische Equals-Variante verwenden: WinForms kann beim Schließen
+        # noch ein TextChanged-Ereignis mit bereits freigegebenem Textwert
+        # zustellen. Das darf keine unbehandelte Null-Ausnahme auslösen.
+        $confirm.Enabled = [string]::Equals([string]$input.Text, [string]$Info.ConfirmationText, [System.StringComparison]::Ordinal)
+        $dialog.AcceptButton = if ($confirm.Enabled) { $confirm } else { $null }
+    })
+
+    try {
+        $input.Select()
+        return $dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK -and $confirm.Enabled
+    } finally {
+        $dialog.Dispose()
+    }
+}
+
+$deleteBackupButton.Add_Click({
+    if ($script:backupProcess -or $script:verificationAsyncResult -or $script:pendingEjectDrive) { return }
+    if (-not $driveCombo.SelectedItem -or -not $script:lastDestination) { return }
+    $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+    try {
+        $info = Get-M24BackupDeletionInfo -BackupRoot $script:lastDestination -Drive $disk.DeviceID -Computer $env:COMPUTERNAME -User $env:USERNAME
+        $verifiedText = if ($info.ChecksumVerifiedAt) { $info.ChecksumVerifiedAt } else { L 'nicht vermerkt' 'not recorded' }
+        $foldersText = if ($info.Folders) { $info.Folders } else { L 'nicht vermerkt' 'not recorded' }
+        $resultText = if ($info.Result) { $info.Result } else { L 'nicht vermerkt' 'not recorded' }
+        $deletionGerman = "Folgendes Backup wird vollständig und endgültig gelöscht:`r`n`r`nPfad: {0}`r`nComputer: {1}`r`nBenutzer: {2}`r`nLetztes Ergebnis: {3}`r`nGesicherte Bibliotheken: {4}`r`nLetzte Prüfsummenprüfung: {5}`r`nInhalt auf Datenträger: {6} Dateien, {7} Verzeichnisse, {8}`r`n`r`nDabei werden alle Nutzdaten, Metadaten, Prüfsummen und Protokolle dieses Backups entfernt. Das Laufwerk und andere Backups bleiben unverändert.`r`n`r`nMöchten Sie zur letzten Sicherheitsabfrage weitergehen?"
+        $deletionEnglish = "The following backup will be deleted completely and permanently:`r`n`r`nPath: {0}`r`nComputer: {1}`r`nUser: {2}`r`nLatest result: {3}`r`nBacked-up libraries: {4}`r`nLatest checksum verification: {5}`r`nOn-disk contents: {6} files, {7} directories, {8}`r`n`r`nAll user data, metadata, checksums, and logs in this backup will be removed. The drive and other backups remain unchanged.`r`n`r`nContinue to the final safety confirmation?"
+        $message = (L $deletionGerman $deletionEnglish) -f
+            $info.BackupRoot, $info.Computer, $info.User, $resultText, $foldersText, $verifiedText,
+            $info.Files, $info.Directories, (Format-BackupDeletionSize $info.Bytes)
+        $answer = [System.Windows.Forms.MessageBox]::Show($message, (L 'Backup löschen' 'Delete backup'), 'YesNo', 'Warning')
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        if (-not (Show-BackupDeletionTextConfirmation -Info $info)) { return }
+
+        Set-VerificationControlsEnabled -Enabled $false
+        $form.UseWaitCursor = $true
+        $statusLabel.Text = L 'Backup wird endgültig gelöscht ...' 'Permanently deleting backup ...'
+        $resultBox.Text = L 'Die ausgewählte Sicherung wird entfernt. Das Laufwerk darf jetzt nicht getrennt werden.' 'The selected backup is being removed. Do not disconnect the drive.'
+        Start-BusyProgress
+        $script:deletionInfo = $info
+        $script:deletionDisk = $disk
+        $deletionScript = {
+            param([string]$sharedScript, [string]$backupRoot, [string]$drive, [string]$computer, [string]$user)
+            . $sharedScript
+            Remove-M24BackupSafely -BackupRoot $backupRoot -Drive $drive -Computer $computer -User $user
+        }
+        $script:deletionPowerShell = [System.Management.Automation.PowerShell]::Create()
+        [void]$script:deletionPowerShell.AddScript($deletionScript.ToString()).AddArgument($sharedScript).AddArgument($info.BackupRoot).AddArgument([string]$disk.DeviceID).AddArgument($env:COMPUTERNAME).AddArgument($env:USERNAME)
+        $script:deletionAsyncResult = $script:deletionPowerShell.BeginInvoke()
+        $deletionTimer.Start()
+    } catch {
+        $statusLabel.Text = L 'Backup konnte nicht gelöscht werden.' 'Backup could not be deleted.'
+        [System.Windows.Forms.MessageBox]::Show(
+            ((L "Das Backup wurde nicht vollständig gelöscht:`r`n{0}" "The backup was not completely deleted:`r`n{0}") -f $_.Exception.Message),
+            $form.Text, 'OK', 'Error') | Out-Null
+        if ($script:deletionPowerShell) { $script:deletionPowerShell.Dispose() }
+        $script:deletionPowerShell = $null
+        $script:deletionAsyncResult = $null
+        $script:deletionInfo = $null
+        $script:deletionDisk = $null
+        Stop-BusyProgress
+        $form.UseWaitCursor = $false
+        Set-VerificationControlsEnabled -Enabled $true
+    }
+})
+
 $verifyButton.Add_Click({
     if ($script:backupProcess -or $script:verificationAsyncResult) { return }
     if (-not $script:lastDestination -or -not (Test-Path -LiteralPath $script:lastDestination -PathType Container)) { return }
@@ -2313,6 +2512,9 @@ $form.Add_FormClosing({
     } elseif ($script:verificationAsyncResult -and -not $script:verificationAsyncResult.IsCompleted) {
         $eventArgs.Cancel = $true
         [System.Windows.Forms.MessageBox]::Show((L 'Die Backup-Prüfung läuft noch. Bitte warten Sie bis zum Abschluss.' 'Backup verification is still running. Wait until it completes.'), $form.Text, 'OK', 'Information') | Out-Null
+    } elseif ($script:deletionAsyncResult -and -not $script:deletionAsyncResult.IsCompleted) {
+        $eventArgs.Cancel = $true
+        [System.Windows.Forms.MessageBox]::Show((L 'Das Backup wird gerade gelöscht. Bitte warten Sie bis zum Abschluss.' 'The backup is currently being deleted. Wait until it completes.'), $form.Text, 'OK', 'Information') | Out-Null
     } elseif ($script:pendingEjectDrive) {
         $eventArgs.Cancel = $true
         [System.Windows.Forms.MessageBox]::Show((L "Der automatische Auswurf wird gerade vorbereitet. Bitte warten Sie einen Moment." "Automatic eject is being prepared. Please wait a moment."), $form.Text, "OK", "Information") | Out-Null
@@ -2371,7 +2573,7 @@ if ($form.Height -gt $workingArea.Height) {
 } finally {
     if ($logoBox -and $logoBox.Image) { try { $logoBox.Image.Dispose() } catch {} }
     if ($notifyIcon) { try { $notifyIcon.Visible = $false; $notifyIcon.Dispose() } catch {} }
-    foreach ($resource in @($appIcon, $healthToolTip, $driveToolTip, $resultContextMenu, $timer, $driveWatchTimer, $ejectTimer, $notificationTimer, $verificationTimer)) {
+    foreach ($resource in @($appIcon, $healthToolTip, $driveToolTip, $resultContextMenu, $timer, $driveWatchTimer, $ejectTimer, $notificationTimer, $verificationTimer, $deletionTimer)) {
         if ($resource) { try { $resource.Dispose() } catch {} }
     }
     if ($form) { try { $form.Dispose() } catch {} }

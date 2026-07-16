@@ -134,6 +134,31 @@ backup for the current computer and user:
 Details include date, folder count, and duration when the metadata provides
 enough information.
 
+<a id="delete-backup"></a>
+## Deleting a backup
+
+Use **Delete backup** to completely remove the current computer and user's
+backup from the selected drive. This action does not delete the drive or
+backups belonging to other computers or users.
+
+Before deletion, the app displays the full path, computer, user, latest backup
+result, included folders, latest checksum verification, file and folder count,
+and occupied space. Two confirmations are then required:
+
+1. Explicitly confirm the displayed backup information.
+2. Enter the displayed backup name `<Computer>_<User>` exactly.
+
+Only then are this profile backup's user data, metadata, checksums, and logs
+deleted permanently. This action cannot be undone. The feature is disabled
+while a backup, restore, or verification is running. Missing metadata or
+metadata that does not match the current profile also prevents deletion.
+
+Older backups may contain files or folders with reserved Windows device names
+such as `NUL`. The app traverses and removes them through extended Windows
+paths. If Windows still cannot delete such an artifact, all other backup
+contents continue to be removed and the remaining artifact is reported
+explicitly.
+
 ## Backup behavior
 
 - New and changed files are copied.
@@ -197,6 +222,7 @@ The folder contains:
 
 - `_Sicherungsinfo.txt`: identity and backup metadata.
 - `_Ordner.json`: original paths for additional folders.
+- `_Pruefsummen.tsv`: SHA-256 checksums for backed-up files.
 - `_logs\`: technical backup and restore logs.
 
 ## Logs

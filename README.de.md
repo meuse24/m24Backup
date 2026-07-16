@@ -28,6 +28,9 @@ auf Englisch.
   Laufwerkswahl und kann die Ergebnisübersicht kopieren.
 - Merkt sich die Ordnerauswahl, zeigt einen Verlauf und prüft gesicherte Dateien
   vollständig gegen dateiweise SHA-256-Prüfsummen.
+- Kann die Sicherung des aktuellen Computers und Benutzers auf dem ausgewählten
+  Laufwerk nach einer Detailanzeige und zweistufigen Sicherheitsabfrage
+  vollständig löschen.
 - Informiert nach Vorgängen über eine Windows-Benachrichtigung, wenn die App im
   Hintergrund liegt.
 - Zeigt eine Backup-Ampel mit Alter, Dauer und Ordnerzahl der letzten Sicherung

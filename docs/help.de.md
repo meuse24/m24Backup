@@ -142,6 +142,34 @@ für diesen Computer und Benutzer:
 Die Details enthalten Datum, Anzahl der gesicherten Ordner und die Laufzeit,
 sofern diese aus den Metadaten ermittelt werden kann.
 
+<a id="delete-backup"></a>
+## Backup löschen
+
+Mit **Backup löschen** kann die Sicherung des aktuellen Computers und
+Benutzers vom ausgewählten Laufwerk vollständig entfernt werden. Die Funktion
+löscht weder das Laufwerk noch Sicherungen anderer Computer oder Benutzer.
+
+Vor dem Löschen zeigt die App den vollständigen Pfad, Computer, Benutzer,
+letztes Sicherungsergebnis, enthaltene Ordner, letzte Prüfsummenprüfung,
+Datei- und Ordnerzahl sowie den belegten Speicherplatz an. Anschließend sind
+zwei Bestätigungen erforderlich:
+
+1. Die angezeigten Backup-Informationen müssen ausdrücklich bestätigt werden.
+2. Der angezeigte Backup-Name `<Computer>_<Benutzer>` muss exakt eingegeben
+   werden.
+
+Erst danach werden Nutzdaten, Metadaten, Prüfsummen und Protokolle dieses
+Profil-Backups endgültig gelöscht. Der Vorgang kann nicht rückgängig gemacht
+werden. Während einer Sicherung, Wiederherstellung oder Backup-Prüfung ist die
+Funktion gesperrt. Fehlende oder nicht zum aktuellen Profil passende Metadaten
+verhindern die Löschung ebenfalls.
+
+Ältere Sicherungen können vereinzelt Dateien oder Ordner mit reservierten
+Windows-Gerätenamen wie `NUL` enthalten. Die App traversiert und entfernt diese
+über erweiterte Windows-Pfade. Falls Windows ein solches Artefakt trotzdem
+nicht löschen kann, werden alle übrigen Backup-Inhalte weiter entfernt und das
+verbliebene Artefakt ausdrücklich gemeldet.
+
 ## Verhalten der Sicherung
 
 - Neue und geänderte Dateien werden kopiert.
@@ -211,6 +239,7 @@ In diesem Ordner befinden sich:
 
 - `_Sicherungsinfo.txt`: Zuordnung und Angaben zur Sicherung.
 - `_Ordner.json`: Originalpfade frei hinzugefügter Ordner.
+- `_Pruefsummen.tsv`: SHA-256-Prüfsummen der gesicherten Dateien.
 - `_logs\`: technische Backup- und Restore-Protokolle.
 
 ## Protokolle

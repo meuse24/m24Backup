@@ -27,6 +27,9 @@ Windows systems and in English on all other systems.
   can copy the result summary.
 - Remembers folder selections, shows recent operations, and verifies complete
   file contents against per-file SHA-256 checksums.
+- Can completely delete the current computer and user's backup from the
+  selected drive after showing its details and requiring two safety
+  confirmations.
 - Shows a Windows notification after operations while the app is in the
   background.
 - Shows a traffic-light health indicator with the age, duration, and folder

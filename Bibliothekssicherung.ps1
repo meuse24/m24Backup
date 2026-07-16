@@ -544,13 +544,9 @@ function Assert-BackupIdentity {
         throw (M "Die Sicherungsmetadaten fehlen. Eine sichere Zuordnung zu Computer und Benutzer ist nicht moeglich." "Backup metadata is missing. The backup cannot be safely matched to this computer and user.")
     }
     $metadataLines = @(Get-Content -LiteralPath $MetadataFile -ErrorAction Stop)
-    $metadataComputerLine = $metadataLines | Where-Object { $_ -like 'Computer:*' } | Select-Object -First 1
-    $metadataUserLine = $metadataLines | Where-Object { $_ -like 'Benutzer:*' } | Select-Object -First 1
-    $metadataComputer = if ($metadataComputerLine) { ($metadataComputerLine -replace '^Computer:\s*', '').Trim() } else { '' }
-    $metadataUser = if ($metadataUserLine) { ($metadataUserLine -replace '^Benutzer:\s*', '').Trim() } else { '' }
-    if (-not $metadataComputer.Equals($env:COMPUTERNAME, [System.StringComparison]::OrdinalIgnoreCase) -or
-        -not $metadataUser.Equals($env:USERNAME, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw ((M "Die Sicherung gehoert zu Computer '{0}' und Benutzer '{1}', nicht zu diesem Profil." "The backup belongs to computer '{0}' and user '{1}', not to this profile.") -f $metadataComputer, $metadataUser)
+    $identity = Get-M24BackupMetadataIdentity -Lines $metadataLines
+    if (-not (Test-M24BackupMetadataIdentity -Lines $metadataLines)) {
+        throw ((M "Die Sicherung gehoert zu Computer '{0}' und Benutzer '{1}', nicht zu diesem Profil." "The backup belongs to computer '{0}' and user '{1}', not to this profile.") -f $identity.Computer, $identity.User)
     }
 }
 
