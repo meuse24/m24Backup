@@ -306,20 +306,32 @@ Ergebnis: Erfolgreich abgeschlossen am 2026-07-16 08:00:00.
     It 'refuses a backup containing a directory junction' {
         $junction = Join-Path $script:deletionRoot 'linked-content'
         New-Item -ItemType Junction -Path $junction -Target $TestDrive | Out-Null
-        {
-            Get-M24BackupDeletionInfo -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
-        } | Should -Throw '*symbolic link or junction*'
+        try {
+            {
+                Get-M24BackupDeletionInfo -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+            } | Should -Throw '*symbolic link or junction*'
+        } finally {
+            # Die Junction ist nur Testdaten und darf die folgenden Tests nicht
+            # beeinflussen. Directory.Delete entfernt den Reparse-Point selbst.
+            [System.IO.Directory]::Delete((ConvertTo-M24ExtendedLengthPath $junction), $false)
+        }
     }
 
     It 'rechecks junction safety after the preview and removes its lock on refusal' {
         Get-M24BackupDeletionInfo -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser' | Out-Null
         $junction = Join-Path $script:deletionRoot 'late-linked-content'
         New-Item -ItemType Junction -Path $junction -Target $TestDrive | Out-Null
-        {
-            Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
-        } | Should -Throw '*symbolic link or junction*'
-        Test-Path -LiteralPath (Join-Path $script:deletionRoot '_backup.lock') | Should -Be $false
-        Test-Path -LiteralPath (Join-Path $script:deletionRoot '_Sicherungsinfo.txt') | Should -Be $true
+        try {
+            {
+                Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
+            } | Should -Throw '*symbolic link or junction*'
+            Test-Path -LiteralPath (Join-Path $script:deletionRoot '_backup.lock') | Should -Be $false
+            Test-Path -LiteralPath (Join-Path $script:deletionRoot '_Sicherungsinfo.txt') | Should -Be $true
+        } finally {
+            # Auch diese absichtlich nach der Vorschau angelegte Junction darf
+            # nicht in die nachfolgenden Loeschtests durchschlagen.
+            [System.IO.Directory]::Delete((ConvertTo-M24ExtendedLengthPath $junction), $false)
+        }
     }
 
     It 'refuses deletion while the operation lock is held' {
@@ -429,9 +441,10 @@ Ergebnis: Erfolgreich abgeschlossen am 2026-07-16 08:00:00.
     }
 
     It 'preserves metadata and cleans up the lock after a mid-deletion failure' {
-        Mock Remove-Item {
-            if ($LiteralPath -like '*sample.txt') { throw 'simulated file lock' }
-            Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+        Mock Remove-M24FileEntry {
+            param([string]$Path)
+            if ($Path -like '*sample.txt') { throw 'simulated file lock' }
+            return $true
         }
         {
             Remove-M24BackupSafely -BackupRoot $script:deletionRoot -Drive $TestDrive -Computer 'TEST-PC' -User 'TestUser'
