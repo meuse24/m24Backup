@@ -294,6 +294,7 @@ function Get-BackupPreflight {
     $largeFiles = @()
     $scanWarnings = @()
     $requiredByRoot = @{}
+    $additionalByRoot = @{}
     [int64]$missingFileCount = 0
     [int64]$overwriteFileCount = 0
     [int64]$protectedNewerFileCount = 0
@@ -340,6 +341,9 @@ function Get-BackupPreflight {
                         $relative = $file.FullName.Substring($sourceRootLength).TrimStart('\')
                         $targetFile = Join-Path $targetRootPath $relative
                         $needsCopy = $true
+                        # Netto-Mehrbedarf am Ziel: Eine zu ueberschreibende Zieldatei
+                        # gibt ihren Platz wieder frei, es zaehlt nur die Differenz.
+                        [int64]$additionalLength = $file.Length
                         if ([System.IO.File]::Exists($targetFile)) {
                             try {
                                 $existing = New-Object System.IO.FileInfo($targetFile)
@@ -359,6 +363,7 @@ function Get-BackupPreflight {
                                 if ($needsCopy) {
                                     $overwriteFileCount++
                                     if ($overwriteExamples.Count -lt 10) { $overwriteExamples += $targetFile }
+                                    $additionalLength = [math]::Max([int64]0, [int64]$file.Length - [int64]$existing.Length)
                                 }
                             } catch { $needsCopy = $true }
                         } else {
@@ -369,6 +374,8 @@ function Get-BackupPreflight {
                             $requiredBytes += $file.Length
                             if (-not $requiredByRoot.ContainsKey($targetDriveRoot)) { $requiredByRoot[$targetDriveRoot] = [int64]0 }
                             $requiredByRoot[$targetDriveRoot] = [int64]$requiredByRoot[$targetDriveRoot] + $file.Length
+                            if (-not $additionalByRoot.ContainsKey($targetDriveRoot)) { $additionalByRoot[$targetDriveRoot] = [int64]0 }
+                            $additionalByRoot[$targetDriveRoot] = [int64]$additionalByRoot[$targetDriveRoot] + $additionalLength
                         }
                     } catch {
                         [void]$folderScanWarnings.Add($_.Exception.Message)
@@ -391,6 +398,7 @@ function Get-BackupPreflight {
         LargeFiles = @($largeFiles)
         ScanWarnings = @($scanWarnings)
         RequiredByRoot = $requiredByRoot
+        AdditionalByRoot = $additionalByRoot
         MissingFileCount = $missingFileCount
         OverwriteFileCount = $overwriteFileCount
         ProtectedNewerFileCount = $protectedNewerFileCount
@@ -825,12 +833,17 @@ if ($preflight.ScanWarnings.Count -gt 0) {
     }
 }
 if (-not $DryRun) {
-    foreach ($targetRoot in $preflight.RequiredByRoot.Keys) {
+    foreach ($targetRoot in $preflight.AdditionalByRoot.Keys) {
         # Die Zielwurzeln sind oben bereits als Laufwerksbuchstaben validiert.
+        # Verglichen wird der Netto-Mehrbedarf: Zu ueberschreibende Zieldateien
+        # geben ihren Platz wieder frei und zaehlen nur mit der Groessendifferenz.
+        # Die Mindestreserve deckt Protokolle, Manifest und Metadaten ab.
         $spaceDisk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $targetRoot) -ErrorAction Stop
-        $requiredWithReserve = [int64]([int64]$preflight.RequiredByRoot[$targetRoot] * 1.05)
+        $additionalBytes = [int64]$preflight.AdditionalByRoot[$targetRoot]
+        $reserveBytes = [int64][math]::Max($additionalBytes * 0.05, 200MB)
+        $requiredWithReserve = $additionalBytes + $reserveBytes
         if ($requiredWithReserve -gt [int64]$spaceDisk.FreeSpace) {
-            throw ((M "Nicht genug freier Speicherplatz auf {0}. Benoetigt werden voraussichtlich {1:N1} GB, frei sind {2:N1} GB." "Not enough free space on {0}. Approximately {1:N1} GB is required; {2:N1} GB is available.") -f $targetRoot, ([int64]$preflight.RequiredByRoot[$targetRoot] / 1GB), ([int64]$spaceDisk.FreeSpace / 1GB))
+            throw ((M "Nicht genug freier Speicherplatz auf {0}. Benoetigt werden voraussichtlich {1:N1} GB zusaetzlich (inkl. Reserve), frei sind {2:N1} GB." "Not enough free space on {0}. Approximately {1:N1} GB of additional space is required (including reserve); {2:N1} GB is available.") -f $targetRoot, ($requiredWithReserve / 1GB), ([int64]$spaceDisk.FreeSpace / 1GB))
         }
     }
 }

@@ -4,6 +4,22 @@ Alle wesentlichen Änderungen dieses Projekts werden in dieser Datei
 dokumentiert. Die Versionierung orientiert sich an
 [Semantic Versioning](https://semver.org/lang/de/).
 
+## [1.5.1] – 2026-07-17
+
+### Behoben
+
+- Die Speicherplatz-Vorprüfung zählte Dateien, die am Ziel bereits vorhanden
+  sind und nur überschrieben werden müssen (z. B. wegen abweichender
+  Zeitstempel), mit ihrer vollen Größe als zusätzlichen Platzbedarf.
+  Folgesicherungen auf einen Datenträger mit weitgehend aktuellem Backup brachen
+  dadurch fälschlich mit „Nicht genug freier Speicherplatz“ ab. Geprüft wird
+  jetzt der Netto-Mehrbedarf: fehlende Dateien mit voller Größe, zu
+  überschreibende Dateien nur mit der Größendifferenz (mindestens 0 Byte).
+- Die Fehlermeldung bei zu wenig Speicherplatz nennt jetzt den tatsächlich
+  verglichenen Wert inklusive Reserve (5 %, mindestens 200 MB). Bisher wurde
+  der Bedarf ohne Reserve angezeigt, wodurch die Meldung scheinbar
+  widersprüchlich einen kleineren Bedarf als den freien Speicher auswies.
+
 ## [1.5.0] – 2026-07-16
 
 ### Hinzugefügt
