@@ -6,8 +6,15 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ## [Unreleased]
 
+## [1.8.0] – 2026-07-18
+
 ### Hinzugefügt
 
+- Standardmäßig aktivierte Backup-Erinnerung beim Windows-Start: Nach 14 Tagen ohne
+  erfolgreiches GUI-Backup erscheint für den aktuellen Benutzer eine native
+  Windows-Benachrichtigung. Die Funktion benötigt weder Dienst noch
+  Administratorrechte, ist über die GUI abschaltbar und repariert ihren
+  Autostartpfad nach einem Verschieben der portablen App selbst.
 - GUI-Worker überwachen jetzt die exakte Eigentümerinstanz per PID und
   Prozessstartzeit. Verschwindet die GUI, beendet sich der Worker über den
   kontrollierten Abbruchpfad; Ergebnisdateien unterscheiden `User` und
@@ -21,6 +28,21 @@ dokumentiert. Die Versionierung orientiert sich an
   Dateisystem und akzeptiert mehrdeutige Treffer nicht automatisch.
 - CI führt Pester mit Windows PowerShell 5.1 und PowerShell 7 aus und baut das
   portable Paket als nicht signierten Smoke-Test.
+
+### Geändert
+
+- Die kompakte Option **Erinnern** ist standardmäßig aktiv und weist beim
+  Windows-Start nach 14 Tagen ohne erfolgreiches GUI-Backup auf die fällige
+  Sicherung hin. Bestehende Einstellungen werden einmalig auf das neue
+  Standardverhalten migriert; eine anschließende Deaktivierung bleibt erhalten.
+- Der Splashscreen zeigt vor dem Öffnen des Hauptfensters kurz den vollständig
+  gefüllten Fortschrittsbalken und den Status **Bereit** an.
+
+### Behoben
+
+- Das Registrieren der Backup-Erinnerung aktualisiert ausschließlich den
+  anwendungseigenen Autostartwert `M24Backup`. Andere Werte im gemeinsamen
+  Windows-Run-Key bleiben vollständig erhalten.
 
 ## [1.7.0] – 2026-07-18
 

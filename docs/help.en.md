@@ -165,6 +165,18 @@ backup for the current computer and user:
 Details include date, folder count, and duration when the metadata provides
 enough information.
 
+## Backup reminder at Windows startup
+
+The **Reminder** setting is enabled by default and displays a notification at
+sign-in when the last successful backup made through the app is at least 14 days
+old, or when no backup has been made yet. It stays silent
+while the backup is current; clicking the notification opens Library Backup.
+
+No background service or administrator rights are required. Windows only starts
+a short hidden check for the current user account. Clear the checkbox at any
+time to disable the feature, or disable **M24Backup** under **Startup apps** in
+Task Manager. Focus Assist or disabled Windows notifications may suppress it.
+
 <a id="delete-backup"></a>
 ## Deleting a backup
 

@@ -1,6 +1,6 @@
 Option Explicit
 
-Dim shell, command, scriptPath, fso, scriptDirectory
+Dim shell, command, scriptPath, fso, scriptDirectory, argument
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 scriptDirectory = fso.GetParentFolderName(WScript.ScriptFullName)
@@ -14,6 +14,11 @@ If Not fso.FileExists(scriptPath) Then
 End If
 
 command = "powershell.exe -NoLogo -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File """ & scriptPath & """"
+For Each argument In WScript.Arguments
+    If LCase(argument) = "/silentstartup" Or LCase(argument) = "-silentstartup" Then
+        command = command & " -SilentStartup"
+    End If
+Next
 shell.Run command, 0, False
 
 Set shell = Nothing

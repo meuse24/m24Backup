@@ -13,6 +13,9 @@ auf Englisch.
 
 ## Funktionen
 
+- Erinnert standardmäßig beim Windows-Start, wenn das letzte erfolgreiche
+  GUI-Backup mindestens 14 Tage zurückliegt – ohne
+  Dienst und ohne Administratorrechte.
 - Sichert Desktop, Dokumente, Downloads, Bilder, Musik, Videos, Favoriten,
   gespeicherte Spiele und weitere erkannte Benutzerordner.
 - Nutzt Robocopy und löscht keine Dateien aus dem Sicherungsziel.

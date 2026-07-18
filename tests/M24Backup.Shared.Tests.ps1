@@ -1091,6 +1091,77 @@ Describe 'Single-instance mutex lifecycle' {
     }
 }
 
+Describe 'Backup reminder policy' {
+    It 'treats a missing or invalid successful-backup date as never backed up and due' {
+        foreach ($value in @($null, '', 'not-a-date')) {
+            $state = Get-M24BackupReminderState -LastSuccessfulBackup $value -Now ([DateTimeOffset]'2026-07-18T12:00:00Z') -ThresholdDays 7
+            $state.IsDue | Should -BeTrue
+            $state.NeverBackedUp | Should -BeTrue
+            $state.DaysSinceBackup | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'is due exactly at the default fourteen-day boundary across time zones' {
+        $state = Get-M24BackupReminderState -LastSuccessfulBackup '2026-07-03T10:00:00.0000000+02:00' `
+            -Now ([DateTimeOffset]'2026-07-17T08:00:00Z')
+        $state.IsDue | Should -BeTrue
+        $state.NeverBackedUp | Should -BeFalse
+        $state.DaysSinceBackup | Should -Be 14
+        $state.ThresholdDays | Should -Be 14
+    }
+
+    It 'is not due just before fourteen days or for a future timestamp' {
+        (Get-M24BackupReminderState -LastSuccessfulBackup '2026-07-03T10:00:00Z' -Now ([DateTimeOffset]'2026-07-17T09:59:59Z')).IsDue | Should -BeFalse
+        $future = Get-M24BackupReminderState -LastSuccessfulBackup '2026-07-20T10:00:00Z' -Now ([DateTimeOffset]'2026-07-18T10:00:00Z')
+        $future.IsDue | Should -BeFalse
+        $future.DaysSinceBackup | Should -Be 0
+    }
+
+    It 'builds a fully quoted startup command for paths with spaces' {
+        $command = Get-M24StartupReminderCommand -VbsPath 'C:\Program Files\M24 Backup\Bibliothekssicherung starten.vbs' -WscriptPath 'C:\Windows\System32\wscript.exe'
+        $command | Should -Be '"C:\Windows\System32\wscript.exe" "C:\Program Files\M24 Backup\Bibliothekssicherung starten.vbs" /SilentStartup'
+    }
+
+    It 'derives a stable user-specific GUI mutex name' {
+        $first = Get-M24GuiMutexName -UserSid 'S-1-5-21-1000'
+        $second = Get-M24GuiMutexName -UserSid 'S-1-5-21-1000'
+        $other = Get-M24GuiMutexName -UserSid 'S-1-5-21-2000'
+        $first | Should -Be $second
+        $first | Should -Match '^Local\\M24Backup\.GUI\.[0-9A-F]{16}$'
+        $other | Should -Not -Be $first
+    }
+
+    It 'round-trips reminder registration only in an isolated HKCU test key' {
+        $testRegistryPath = 'HKCU:\Software\M24Backup\Tests\{0}' -f [guid]::NewGuid().ToString('N')
+        try {
+            Get-M24StartupReminderRegistration -RegistryPath $testRegistryPath | Should -BeNullOrEmpty
+            Set-M24StartupReminderRegistration -RegistryPath $testRegistryPath -Command 'test-command'
+            Get-M24StartupReminderRegistration -RegistryPath $testRegistryPath | Should -Be 'test-command'
+            Remove-M24StartupReminderRegistration -RegistryPath $testRegistryPath
+            Get-M24StartupReminderRegistration -RegistryPath $testRegistryPath | Should -BeNullOrEmpty
+            { Remove-M24StartupReminderRegistration -RegistryPath $testRegistryPath } | Should -Not -Throw
+        } finally {
+            if (Test-Path -LiteralPath $testRegistryPath) { Remove-Item -LiteralPath $testRegistryPath -Recurse -Force }
+        }
+    }
+
+    It 'preserves unrelated values in an existing registry key' {
+        $testRegistryPath = 'HKCU:\Software\M24Backup\Tests\{0}' -f [guid]::NewGuid().ToString('N')
+        try {
+            [void](New-Item -Path $testRegistryPath -Force)
+            [void](New-ItemProperty -LiteralPath $testRegistryPath -Name 'ForeignStartupEntry' -Value 'keep-me' -PropertyType String -Force)
+
+            Set-M24StartupReminderRegistration -RegistryPath $testRegistryPath -Command 'm24-command'
+
+            $values = Get-ItemProperty -LiteralPath $testRegistryPath
+            $values.ForeignStartupEntry | Should -Be 'keep-me'
+            $values.M24Backup | Should -Be 'm24-command'
+        } finally {
+            if (Test-Path -LiteralPath $testRegistryPath) { Remove-Item -LiteralPath $testRegistryPath -Recurse -Force }
+        }
+    }
+}
+
 Describe 'GUI worker launch and drive discovery contract' {
     BeforeAll {
         # AST-basierte Vertragstests: Sie pruefen Struktur und Reihenfolge der
@@ -1226,8 +1297,59 @@ Describe 'GUI worker launch and drive discovery contract' {
 
     It 'acquires and releases the per-user GUI mutex' {
         $script:guiText | Should -Match 'Enter-M24SingleInstance'
-        $script:guiText | Should -Match 'WindowsIdentity.*GetCurrent'
+        $script:guiText | Should -Match 'Get-M24GuiMutexName'
         $script:guiText | Should -Match 'Exit-M24SingleInstance'
+    }
+
+    It 'branches SilentStartup before loading WinForms or constructing the splash' {
+        $silentBranch = $script:guiAst.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                $node.Clauses[0].Item1.Extent.Text -eq '$SilentStartup'
+            }, $true)
+        $silentBranch | Should -Not -BeNullOrEmpty
+        $silentIndex = $script:guiText.IndexOf('if ($SilentStartup)')
+        $firstAddTypeIndex = $script:guiText.IndexOf('Add-Type -AssemblyName System.Windows.Forms')
+        $silentIndex | Should -BeGreaterThan (-1)
+        $firstAddTypeIndex | Should -BeGreaterThan $silentIndex
+        $silentBranch.Extent.Text | Should -Match 'Get-M24BackupReminderState'
+        $silentBranch.Extent.Text | Should -Match '\[int\]::TryParse'
+        $silentBranch.Extent.Text | Should -Match 'ShowBalloonTip'
+        $silentBranch.Extent.Text | Should -Match 'BalloonTipClicked'
+        $silentBranch.Extent.Text | Should -Not -Match 'MessageBox'
+        $silentBranch.Extent.Text | Should -Not -Match 'Update-DriveList'
+        $fontProbeIndex = $script:guiText.IndexOf('$installedFontNames =')
+        $fontProbeIndex | Should -BeGreaterThan $silentBranch.Extent.EndOffset
+    }
+
+    It 'completes the startup progress at 100 percent before closing the splash' {
+        $script:guiText | Should -Match 'Complete-StartupSplash\s+Close-StartupSplash\s+\[void\]\$form\.ShowDialog'
+        $script:guiText | Should -Match ([regex]::Escape('$script:splashProgress.Value = 100'))
+        $script:guiText | Should -Match ([regex]::Escape('$script:splashProgress.Value = 99'))
+        $script:guiText | Should -Match ([regex]::Escape('$script:splashProgress.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous'))
+        $script:guiText | Should -Match 'Start-Sleep -Milliseconds 300'
+    }
+
+    It 'persists reminder settings and successful GUI backup time' {
+        foreach ($field in @('LastSuccessfulBackup', 'ReminderEnabled', 'ReminderDays')) {
+            $script:guiText | Should -Match $field
+        }
+        $script:guiText | Should -Match ([regex]::Escape("`$script:settings.LastSuccessfulBackup = (Get-Date).ToString('o')"))
+        $script:guiText | Should -Match 'GUI\.ReminderSelfHeal'
+    }
+
+    It 'places the short reminder checkbox in the shared options row' {
+        $script:guiText | Should -Not -Match '\$reminderSurface = New-SurfacePanel'
+        $script:guiText | Should -Match '\$reminderCheckBox = New-Object System\.Windows\.Forms\.CheckBox'
+        $script:guiText | Should -Match ([regex]::Escape("`$reminderCheckBox.Text = L 'Erinnern' 'Reminder'"))
+        $script:guiText | Should -Match ([regex]::Escape('$reminderCheckBox.Location = New-Object System.Drawing.Point(570, 426)'))
+    }
+
+    It 'enables reminders by default and migrates the original seven-day default to fourteen days' {
+        $script:guiText | Should -Match 'Version = 4;.*ReminderEnabled = \$true; ReminderDays = 14'
+        $script:guiText | Should -Match '\$migrateReminderDefaults = \$parsedVersion -lt 4'
+        $script:guiText | Should -Match '\$parsedDays -eq 7\) \{ 14 \}'
+        $script:guiText | Should -Match 'GUI\.ReminderMigration'
     }
 
     It 'collects layered identity and refuses ambiguous automatic matches' {
@@ -1246,5 +1368,21 @@ Describe 'Dual-runtime CI process cleanup contract' {
         $workflow | Should -Match '\$_.ProcessId -ne \$PID'
         $testSource = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'tests\M24Backup.Shared.Tests.ps1') -Raw
         ([regex]::Matches($testSource, 'M24Backup\.PesterChild')).Count | Should -BeGreaterOrEqual 2
+    }
+}
+
+Describe 'Reminder launcher and installer contract' {
+    It 'forwards only the recognized silent-startup switch through VBS' {
+        $vbs = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Bibliothekssicherung starten.vbs') -Raw
+        $vbs | Should -Match 'For Each argument In WScript\.Arguments'
+        $vbs | Should -Match '/silentstartup'
+        $vbs | Should -Match 'command = command & " -SilentStartup"'
+    }
+
+    It 'removes the per-user Run value during uninstall without creating it at install time' {
+        $installer = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'installer\Bibliothekssicherung.iss') -Raw
+        $installer | Should -Match '\[Registry\]'
+        $installer | Should -Match 'ValueName: "M24Backup"'
+        $installer | Should -Match 'Flags: uninsdeletevalue dontcreatekey'
     }
 }

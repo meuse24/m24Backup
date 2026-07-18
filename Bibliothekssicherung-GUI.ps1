@@ -4,12 +4,9 @@ Die Sicherung läuft in einem separaten PowerShell-Prozess. Ein Timer liest
 den aktuellen Status aus einer temporären Datei, damit das Fenster bedienbar
 bleibt und nicht auf frei formulierte Konsolenausgaben angewiesen ist.
 #>
+param([switch]$SilentStartup)
 
 $ErrorActionPreference = 'Stop'
-
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
 
 $sharedScript = Join-Path $PSScriptRoot 'M24Backup.Shared.ps1'
 if (Test-Path -LiteralPath $sharedScript -PathType Leaf) {
@@ -53,11 +50,6 @@ function Open-HelpTopic {
     ) | Out-Null
 }
 
-$installedFontNames = @([System.Drawing.FontFamily]::Families | ForEach-Object { $_.Name })
-$textFontName = if ($installedFontNames -contains 'Segoe UI Variable Text') { 'Segoe UI Variable Text' } else { 'Segoe UI' }
-$semiboldFontName = if ($installedFontNames -contains 'Segoe UI Variable Text Semibold') { 'Segoe UI Variable Text Semibold' } else { 'Segoe UI Semibold' }
-$displayFontName = if ($installedFontNames -contains 'Segoe UI Variable Display Semib') { 'Segoe UI Variable Display Semib' } else { 'Segoe UI Semibold' }
-
 $coreScript = Join-Path $PSScriptRoot "Bibliothekssicherung.ps1"
 $helpFile = Join-Path $PSScriptRoot $(if ($script:isGerman) { 'Hilfe\index.de.html' } else { 'Hilfe\index.en.html' })
 $helpBuildFile = Join-Path $PSScriptRoot $(if ($script:isGerman) { 'build\staging\Hilfe\index.de.html' } else { 'build\staging\Hilfe\index.en.html' })
@@ -68,6 +60,7 @@ $logoFile = Join-Path $PSScriptRoot 'logo.jpg'
 $script:splashForm = $null
 $script:splashLogoImage = $null
 $script:splashStatusLabel = $null
+$script:splashProgress = $null
 $script:mainWindowShown = $false
 $script:fatalGuiError = $false
 
@@ -77,6 +70,26 @@ function Set-StartupSplashStatus {
     $script:splashStatusLabel.Text = $Text
     $script:splashForm.Refresh()
     [System.Windows.Forms.Application]::DoEvents()
+}
+
+function Complete-StartupSplash {
+    if (-not $script:splashForm -or $script:splashForm.IsDisposed -or -not $script:splashProgress) { return }
+    $script:splashStatusLabel.Text = L 'Bereit.' 'Ready.'
+    $script:splashProgress.MarqueeAnimationSpeed = 0
+    $script:splashProgress.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
+    $script:splashProgress.Minimum = 0
+    $script:splashProgress.Maximum = 100
+    # The native Windows progress control animates forward changes. Briefly
+    # stepping backwards forces it to snap to the completed position before
+    # the splash is closed instead of animating after the form is already gone.
+    $script:splashProgress.Value = 100
+    $script:splashProgress.Value = 99
+    $script:splashProgress.Value = 100
+    $script:splashProgress.Refresh()
+    $script:splashForm.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+    # Keep the rendered completion state visible long enough to be perceived.
+    Start-Sleep -Milliseconds 300
 }
 
 function Close-StartupSplash {
@@ -90,15 +103,111 @@ function Close-StartupSplash {
         $script:splashLogoImage = $null
     }
     $script:splashStatusLabel = $null
+    $script:splashProgress = $null
 }
+
+# Der Login-Pfad zweigt vor WinForms, Splashscreen und Laufwerkserkennung ab.
+# Ist keine Erinnerung faellig, beschraenkt er sich auf Shared-Funktionen und
+# das direkte Lesen der kleinen lokalen Settings-Datei.
+if ($SilentStartup) {
+    $script:silentReminderLaunchRequested = $false
+    $silentMutexHandle = $null
+    $silentNotifyIcon = $null
+    $silentIcon = $null
+    $silentTimer = $null
+    $silentContext = $null
+    try {
+        $silentSettingsDirectory = [Environment]::GetFolderPath('LocalApplicationData')
+        if ([string]::IsNullOrWhiteSpace($silentSettingsDirectory)) { exit 0 }
+        $silentSettingsFile = Join-Path (Join-Path $silentSettingsDirectory 'M24Backup') 'settings.json'
+        if (-not (Test-Path -LiteralPath $silentSettingsFile -PathType Leaf)) { exit 0 }
+        $silentSettings = Get-Content -LiteralPath $silentSettingsFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (-not $silentSettings.PSObject.Properties['ReminderEnabled'] -or -not [bool]$silentSettings.ReminderEnabled) { exit 0 }
+        $reminderDays = 14
+        $parsedReminderDays = 0
+        if ($silentSettings.PSObject.Properties['ReminderDays'] -and
+            [int]::TryParse([string]$silentSettings.ReminderDays, [ref]$parsedReminderDays) -and
+            $parsedReminderDays -ge 1 -and $parsedReminderDays -le 3650) {
+            # Migrate the original, non-configurable seven-day default.
+            $reminderDays = if ($parsedReminderDays -eq 7) { 14 } else { $parsedReminderDays }
+        }
+        $lastSuccessfulBackup = if ($silentSettings.PSObject.Properties['LastSuccessfulBackup']) { [string]$silentSettings.LastSuccessfulBackup } else { '' }
+        $reminderState = Get-M24BackupReminderState -LastSuccessfulBackup $lastSuccessfulBackup -ThresholdDays $reminderDays
+        if (-not $reminderState.IsDue) { exit 0 }
+
+        $silentMutexHandle = Enter-M24SingleInstance -Name (Get-M24GuiMutexName)
+        if (-not $silentMutexHandle.Acquired) { exit 0 }
+
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+        [System.Windows.Forms.Application]::EnableVisualStyles()
+        $silentNotifyIcon = New-Object System.Windows.Forms.NotifyIcon
+        $silentIconPath = Join-Path $PSScriptRoot 'app.ico'
+        if (Test-Path -LiteralPath $silentIconPath -PathType Leaf) {
+            $silentIcon = New-Object System.Drawing.Icon($silentIconPath)
+            $silentNotifyIcon.Icon = $silentIcon
+        } else {
+            $silentNotifyIcon.Icon = [System.Drawing.SystemIcons]::Information
+        }
+        $silentNotifyIcon.Text = L 'Bibliothekssicherung' 'Library Backup'
+        $silentNotifyIcon.Visible = $true
+        $silentContext = New-Object System.Windows.Forms.ApplicationContext
+        $silentTimer = New-Object System.Windows.Forms.Timer
+        $silentTimer.Interval = 30000
+        $silentTimer.Add_Tick({
+            $silentTimer.Stop()
+            $silentContext.ExitThread()
+        })
+        $silentNotifyIcon.Add_BalloonTipClicked({
+            $script:silentReminderLaunchRequested = $true
+            $silentContext.ExitThread()
+        })
+        $silentNotifyIcon.Add_BalloonTipClosed({ $silentContext.ExitThread() })
+        $reminderText = if ($reminderState.NeverBackedUp) {
+            L 'Es wurde noch keine Sicherung erstellt. Bitte schließen Sie Ihr Sicherungslaufwerk an.' 'No backup has been created yet. Connect your backup drive.'
+        } else {
+            (L 'Ihr letztes Backup ist {0} Tage alt. Bitte schließen Sie Ihr Sicherungslaufwerk an.' 'Your last backup is {0} days old. Connect your backup drive.') -f $reminderState.DaysSinceBackup
+        }
+        $silentNotifyIcon.ShowBalloonTip(10000, (L 'Backup-Erinnerung' 'Backup reminder'), $reminderText, [System.Windows.Forms.ToolTipIcon]::Warning)
+        $silentTimer.Start()
+        [System.Windows.Forms.Application]::Run($silentContext)
+    } catch {
+        # Autostart-Erinnerungen sind best effort und zeigen niemals Fehlerdialoge.
+    } finally {
+        if ($silentTimer) { try { $silentTimer.Stop(); $silentTimer.Dispose() } catch { # Best-effort cleanup.
+            } }
+        if ($silentNotifyIcon) { try { $silentNotifyIcon.Visible = $false; $silentNotifyIcon.Dispose() } catch { # Best-effort cleanup.
+            } }
+        if ($silentIcon) { try { $silentIcon.Dispose() } catch { # Best-effort cleanup.
+            } }
+        if ($silentContext) { try { $silentContext.Dispose() } catch { # Best-effort cleanup.
+            } }
+        Exit-M24SingleInstance -Handle $silentMutexHandle
+    }
+    if ($script:silentReminderLaunchRequested) {
+        try {
+            $silentLauncher = Join-Path $PSScriptRoot 'Bibliothekssicherung starten.vbs'
+            $silentWscript = Join-Path ([Environment]::SystemDirectory) 'wscript.exe'
+            Start-Process -FilePath $silentWscript -ArgumentList (ConvertTo-M24ProcessArgument $silentLauncher) -WindowStyle Hidden
+        } catch {
+            # A notification click must not surface launcher errors.
+        }
+    }
+    exit 0
+}
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+$installedFontNames = @([System.Drawing.FontFamily]::Families | ForEach-Object { $_.Name })
+$textFontName = if ($installedFontNames -contains 'Segoe UI Variable Text') { 'Segoe UI Variable Text' } else { 'Segoe UI' }
+$semiboldFontName = if ($installedFontNames -contains 'Segoe UI Variable Text Semibold') { 'Segoe UI Variable Text Semibold' } else { 'Segoe UI Semibold' }
+$displayFontName = if ($installedFontNames -contains 'Segoe UI Variable Display Semib') { 'Segoe UI Variable Display Semib' } else { 'Segoe UI Semibold' }
 
 $script:guiInstanceHandle = $null
 try {
-    $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $sidBytes = [System.Text.Encoding]::UTF8.GetBytes($currentSid)
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    try { $sidHash = ([BitConverter]::ToString($sha256.ComputeHash($sidBytes))).Replace('-', '').Substring(0, 16) } finally { $sha256.Dispose() }
-    $script:guiInstanceHandle = Enter-M24SingleInstance -Name ("Local\M24Backup.GUI.{0}" -f $sidHash)
+    $script:guiInstanceHandle = Enter-M24SingleInstance -Name (Get-M24GuiMutexName)
     if (-not $script:guiInstanceHandle.Acquired) {
         [System.Windows.Forms.MessageBox]::Show(
             (L 'Bibliothekssicherung ist bereits geöffnet.' 'Library Backup is already open.'),
@@ -149,12 +258,12 @@ try {
     $script:splashStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(31, 55, 74)
     $script:splashForm.Controls.Add($script:splashStatusLabel)
 
-    $splashProgress = New-Object System.Windows.Forms.ProgressBar
-    $splashProgress.Location = New-Object System.Drawing.Point(45, 262)
-    $splashProgress.Size = New-Object System.Drawing.Size(300, 8)
-    $splashProgress.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
-    $splashProgress.MarqueeAnimationSpeed = 24
-    $script:splashForm.Controls.Add($splashProgress)
+    $script:splashProgress = New-Object System.Windows.Forms.ProgressBar
+    $script:splashProgress.Location = New-Object System.Drawing.Point(45, 262)
+    $script:splashProgress.Size = New-Object System.Drawing.Size(300, 8)
+    $script:splashProgress.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+    $script:splashProgress.MarqueeAnimationSpeed = 24
+    $script:splashForm.Controls.Add($script:splashProgress)
 
     $script:splashForm.Show()
     $script:splashForm.Refresh()
@@ -225,6 +334,10 @@ $settingsFile = Join-Path $settingsDirectory 'settings.json'
 $script:knownDrive = $null
 $script:settingsWritable = $true
 $script:settings = $null
+$script:reminderSettingInitializing = $false
+$script:settingsNeedSave = $false
+$startupReminderVbsPath = Join-Path $PSScriptRoot 'Bibliothekssicherung starten.vbs'
+$startupReminderCommand = Get-M24StartupReminderCommand -VbsPath $startupReminderVbsPath
 
 function Get-LibraryNames {
     param([switch]$IncludeMissing)
@@ -524,15 +637,38 @@ function Get-NormalizedVolumeSerial {
 
 function Get-AppSettings {
     if (-not (Test-Path -LiteralPath $settingsFile -PathType Leaf)) {
-        return [ordered]@{ Version = 3; KnownBackupDrive = $null; FolderSelection = $null }
+        $script:settingsNeedSave = $true
+        return [ordered]@{ Version = 4; KnownBackupDrive = $null; FolderSelection = $null; LastSuccessfulBackup = $null; ReminderEnabled = $true; ReminderDays = 14 }
     }
     try {
         $parsed = Get-Content -LiteralPath $settingsFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        return [ordered]@{ Version = 3; KnownBackupDrive = $parsed.KnownBackupDrive; FolderSelection = $parsed.FolderSelection }
+        $parsedVersion = 0
+        if ($parsed.PSObject.Properties['Version']) { [void][int]::TryParse([string]$parsed.Version, [ref]$parsedVersion) }
+        $migrateReminderDefaults = $parsedVersion -lt 4
+        $reminderDays = 14
+        $parsedDays = 0
+        if ($parsed.PSObject.Properties['ReminderDays'] -and [int]::TryParse([string]$parsed.ReminderDays, [ref]$parsedDays) -and $parsedDays -ge 1 -and $parsedDays -le 3650) {
+            # Version 3 originally emitted 7 as a fixed default. Preserve any
+            # other valid value in case it was deliberately customized.
+            $reminderDays = if ($migrateReminderDefaults -or $parsedDays -eq 7) { 14 } else { $parsedDays }
+        }
+        $hasReminderEnabled = [bool]$parsed.PSObject.Properties['ReminderEnabled']
+        $hasReminderDays = [bool]$parsed.PSObject.Properties['ReminderDays']
+        if ($migrateReminderDefaults -or -not $hasReminderEnabled -or -not $hasReminderDays -or $parsedDays -eq 7) {
+            $script:settingsNeedSave = $true
+        }
+        return [ordered]@{
+            Version = 4
+            KnownBackupDrive = $parsed.KnownBackupDrive
+            FolderSelection = $parsed.FolderSelection
+            LastSuccessfulBackup = $(if ($parsed.PSObject.Properties['LastSuccessfulBackup']) { [string]$parsed.LastSuccessfulBackup } else { $null })
+            ReminderEnabled = $(if ($migrateReminderDefaults -or -not $hasReminderEnabled) { $true } else { [bool]$parsed.ReminderEnabled })
+            ReminderDays = $reminderDays
+        }
     } catch {
         # Eine nur voruebergehend nicht lesbare Datei darf nicht ueberschrieben werden.
         $script:settingsWritable = $false
-        return [ordered]@{ Version = 3; KnownBackupDrive = $null; FolderSelection = $null }
+        return [ordered]@{ Version = 4; KnownBackupDrive = $null; FolderSelection = $null; LastSuccessfulBackup = $null; ReminderEnabled = $false; ReminderDays = 14 }
     }
 }
 
@@ -1116,7 +1252,7 @@ if (Test-Path -LiteralPath $logoFile -PathType Leaf) {
 }
 $form.Controls.Add($logoBox)
 
-# Kurze Bezeichnungen halten alle vier Optionen in einer Zeile; ausfuehrliche
+# Kurze Bezeichnungen halten alle fünf Optionen in einer Zeile; ausfuehrliche
 # Erklaerungen stehen bei den nicht selbsterklaerenden Modi im Tooltip.
 $optionsSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 418)) -Size (New-Object System.Drawing.Size(692, 34))
 
@@ -1130,7 +1266,7 @@ $form.Controls.Add($dryRunCheckBox)
 $ejectCheckBox = New-Object System.Windows.Forms.CheckBox
 $ejectCheckBox.Text = L "Nach Erfolg auswerfen" "Eject after success"
 $ejectCheckBox.AutoSize = $true
-$ejectCheckBox.Location = New-Object System.Drawing.Point(155, 426)
+$ejectCheckBox.Location = New-Object System.Drawing.Point(135, 426)
 $ejectCheckBox.BackColor = $surfaceColor
 $ejectCheckBox.TabIndex = 13
 $form.Controls.Add($ejectCheckBox)
@@ -1138,7 +1274,7 @@ $form.Controls.Add($ejectCheckBox)
 $checksumCheckBox = New-Object System.Windows.Forms.CheckBox
 $checksumCheckBox.Text = L "Prüfsummen" "Checksums"
 $checksumCheckBox.AutoSize = $true
-$checksumCheckBox.Location = New-Object System.Drawing.Point(385, 426)
+$checksumCheckBox.Location = New-Object System.Drawing.Point(320, 426)
 $checksumCheckBox.BackColor = $surfaceColor
 $checksumCheckBox.Checked = $true
 $checksumCheckBox.TabIndex = 14
@@ -1148,7 +1284,7 @@ $form.Controls.Add($checksumCheckBox)
 $superFastCheckBox = New-Object System.Windows.Forms.CheckBox
 $superFastCheckBox.Text = L "Superschnell" "Super fast"
 $superFastCheckBox.AutoSize = $true
-$superFastCheckBox.Location = New-Object System.Drawing.Point(535, 426)
+$superFastCheckBox.Location = New-Object System.Drawing.Point(435, 426)
 $superFastCheckBox.BackColor = $surfaceColor
 $superFastCheckBox.TabIndex = 15
 $form.Controls.Add($superFastCheckBox)
@@ -1157,6 +1293,17 @@ $optionsToolTip.AutoPopDelay = 20000
 $optionsToolTip.SetToolTip($superFastCheckBox, (L `
     "Maximale Geschwindigkeit: keine Datei-Vorprüfung, keine Speicherplatz- und 4-GB-Dateiprüfung, keine Prüfsummenaktualisierung, keine BitLocker-Abfrage, keine Kopierwiederholungen. Fehler (z. B. volles Ziel) fallen ggf. erst beim Kopieren auf." `
     "Maximum speed: no file preflight, no disk-space or 4 GB file check, no checksum update, no BitLocker query, no copy retries. Errors (e.g. a full destination) may only surface while copying."))
+$reminderCheckBox = New-Object System.Windows.Forms.CheckBox
+$reminderCheckBox.Text = L 'Erinnern' 'Reminder'
+$reminderCheckBox.AutoSize = $true
+$reminderCheckBox.Location = New-Object System.Drawing.Point(570, 426)
+$reminderCheckBox.BackColor = $surfaceColor
+$reminderCheckBox.TabIndex = 16
+$form.Controls.Add($reminderCheckBox)
+$optionsToolTip.SetToolTip($reminderCheckBox, (L `
+    'Beim Windows-Login wird nach 14 Tagen ohne erfolgreiches GUI-Backup erinnert. Es wird kein Hintergrunddienst installiert.' `
+    'At Windows login, a reminder appears after 14 days without a successful GUI backup. No background service is installed.'))
+
 $activitySurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 460)) -Size (New-Object System.Drawing.Size(692, 148))
 
 $statusCaption = New-Object System.Windows.Forms.Label
@@ -1248,7 +1395,7 @@ $startButton.FlatAppearance.BorderSize = 0
 $startButton.FlatAppearance.MouseOverBackColor = $accentHoverColor
 $startButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $startButton.Anchor = "Top, Left"
-$startButton.TabIndex = 16
+$startButton.TabIndex = 17
 $form.Controls.Add($startButton)
 $form.AcceptButton = $startButton
 
@@ -1264,7 +1411,7 @@ $logButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(
 $logButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $logButton.Enabled = $false
 $logButton.Anchor = "Top, Left"
-$logButton.TabIndex = 17
+$logButton.TabIndex = 18
 $form.Controls.Add($logButton)
 
 $closeButton = New-Object System.Windows.Forms.Button
@@ -1280,7 +1427,7 @@ $destinationButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::F
 $destinationButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $destinationButton.Enabled = $false
 $destinationButton.Anchor = "Top, Left"
-$destinationButton.TabIndex = 18
+$destinationButton.TabIndex = 19
 $form.Controls.Add($destinationButton)
 
 $closeButton.Text = L "Schließen" "Close"
@@ -1292,7 +1439,7 @@ $closeButton.FlatAppearance.BorderSize = 1
 $closeButton.FlatAppearance.BorderColor = $buttonBorderColor
 $closeButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
 $closeButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
-$closeButton.TabIndex = 19
+$closeButton.TabIndex = 20
 $closeButton.Anchor = "Top, Right"
 $form.Controls.Add($closeButton)
 
@@ -1310,7 +1457,7 @@ $cancelButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 # Der Abbrechen-Button ersetzt den Start-Button an derselben Position und
 # muss deshalb auch gleich verankert sein.
 $cancelButton.Anchor = "Top, Left"
-$cancelButton.TabIndex = 16
+$cancelButton.TabIndex = 17
 $cancelButton.Visible = $false
 $form.Controls.Add($cancelButton)
 
@@ -1987,6 +2134,41 @@ $restoreRadio.Add_CheckedChanged({
 })
 $dryRunCheckBox.Add_CheckedChanged({ Update-BackupOptionState })
 $superFastCheckBox.Add_CheckedChanged({ Update-BackupOptionState })
+$reminderCheckBox.Add_CheckedChanged({
+    if ($script:reminderSettingInitializing -or -not $script:settings) { return }
+    $newEnabled = [bool]$reminderCheckBox.Checked
+    $oldEnabled = [bool]$script:settings.ReminderEnabled
+    if ($newEnabled -eq $oldEnabled) { return }
+    $oldRegistration = $null
+    try {
+        $oldRegistration = Get-M24StartupReminderRegistration
+        if ($newEnabled) {
+            Set-M24StartupReminderRegistration -Command $startupReminderCommand
+        } else {
+            Remove-M24StartupReminderRegistration
+        }
+        $script:settings.ReminderEnabled = $newEnabled
+        Save-AppSettings
+    } catch {
+        $reminderError = $_
+        $script:settings.ReminderEnabled = $oldEnabled
+        try {
+            if ($oldEnabled) {
+                Set-M24StartupReminderRegistration -Command $(if ($oldRegistration) { $oldRegistration } else { $startupReminderCommand })
+            } else {
+                Remove-M24StartupReminderRegistration
+            }
+        } catch {
+            # Preserve the original settings/registry error for the user.
+        }
+        $script:reminderSettingInitializing = $true
+        try { $reminderCheckBox.Checked = $oldEnabled } finally { $script:reminderSettingInitializing = $false }
+        Write-M24DiagnosticLog -EventId 'GUI.ReminderSetting' -Message 'Failed to update the startup reminder setting.' -Exception $reminderError -Context ('Requested={0}' -f $newEnabled)
+        [System.Windows.Forms.MessageBox]::Show(
+            ((L "Die Backup-Erinnerung konnte nicht geändert werden:`r`n{0}" "The backup reminder could not be changed:`r`n{0}") -f $reminderError.Exception.Message),
+            $form.Text, 'OK', 'Warning') | Out-Null
+    }
+})
 
 $startButton.Add_Click({
     if ($script:verificationAsyncResult) { return }
@@ -2505,13 +2687,30 @@ $timer.Add_Tick({
                 } else {
                     $resultBox.Text = L "Vorgang erfolgreich abgeschlossen." "Operation completed successfully."
                 }
-                if ($script:activeMode -eq 'Backup' -and -not $isDryRun -and $script:activeDrive) {
+                if ($script:activeMode -eq 'Backup' -and -not $isDryRun) {
+                    $script:settings.LastSuccessfulBackup = (Get-Date).ToString('o')
                     try {
-                        Save-KnownBackupDrive -Disk $script:activeDrive
-                        $driveToolTip.SetToolTip($driveCombo, (L 'Dieses Laufwerk ist jetzt als bekanntes Sicherungslaufwerk gespeichert.' 'This drive is now remembered as the backup drive.'))
+                        if ($script:activeDrive) {
+                            # Save-KnownBackupDrive persistiert den gesamten
+                            # Settings-Vertrag einschließlich des neuen Datums.
+                            Save-KnownBackupDrive -Disk $script:activeDrive
+                            $driveToolTip.SetToolTip($driveCombo, (L 'Dieses Laufwerk ist jetzt als bekanntes Sicherungslaufwerk gespeichert.' 'This drive is now remembered as the backup drive.'))
+                        } else {
+                            Save-AppSettings
+                        }
                     } catch {
+                        $knownDriveSaveError = $_
+                        $backupDateSaved = $false
+                        try { Save-AppSettings; $backupDateSaved = $true } catch {
+                            # The original persistence error remains the actionable cause.
+                        }
+                        $settingsWarning = if ($backupDateSaved) {
+                            L "Die Sicherung war erfolgreich und ihr Datum wurde gespeichert. Das bekannte Sicherungslaufwerk konnte jedoch nicht aktualisiert werden:`r`n{0}" "The backup succeeded and its date was saved, but the known backup drive could not be updated:`r`n{0}"
+                        } else {
+                            L "Die Sicherung war erfolgreich, die lokalen App-Einstellungen konnten jedoch nicht gespeichert werden:`r`n{0}" "The backup succeeded, but the local app settings could not be saved:`r`n{0}"
+                        }
                         [System.Windows.Forms.MessageBox]::Show(
-                            ((L "Die Sicherung war erfolgreich, das Laufwerk konnte aber nicht für die automatische Wiedererkennung gespeichert werden:`r`n{0}" "The backup succeeded, but the drive could not be saved for automatic recognition:`r`n{0}") -f $_.Exception.Message),
+                            ($settingsWarning -f $knownDriveSaveError.Exception.Message),
                             $form.Text,
                             'OK',
                             'Warning'
@@ -2925,6 +3124,28 @@ Remove-M24StaleTempArtifacts
 Set-StartupSplashStatus (L 'Einstellungen werden geladen ...' 'Loading settings ...')
 $script:settings = Get-AppSettings
 $script:knownDrive = Get-KnownBackupDrive
+if ($script:settingsNeedSave) {
+    try {
+        Save-AppSettings
+        $script:settingsNeedSave = $false
+    } catch {
+        Write-M24DiagnosticLog -EventId 'GUI.ReminderMigration' -Message 'Failed to persist reminder defaults or migration.' -Exception $_
+    }
+}
+$script:reminderSettingInitializing = $true
+try { $reminderCheckBox.Checked = [bool]$script:settings.ReminderEnabled } finally { $script:reminderSettingInitializing = $false }
+try {
+    if ($script:settings.ReminderEnabled) {
+        $registeredReminder = Get-M24StartupReminderRegistration
+        if (-not $registeredReminder -or -not $registeredReminder.Equals($startupReminderCommand, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Set-M24StartupReminderRegistration -Command $startupReminderCommand
+        }
+    } else {
+        Remove-M24StartupReminderRegistration
+    }
+} catch {
+    Write-M24DiagnosticLog -EventId 'GUI.ReminderSelfHeal' -Message 'Failed to reconcile the startup reminder registration.' -Exception $_ -Context ('Enabled={0}' -f $script:settings.ReminderEnabled)
+}
 $savedSelection = Get-SavedFolderSelection
 if ($savedSelection) {
     $savedNames = @($savedSelection.SelectedNames | ForEach-Object { [string]$_ })
@@ -2956,6 +3177,7 @@ if ($form.Height -gt $workingArea.Height) {
 # Der Splash muss vor ShowDialog vollstaendig geschlossen sein. Andernfalls
 # kann WinForms das modale Hauptfenster implizit dem noch aktiven Splash als
 # Owner zuordnen; dessen Schliessen wuerde dann auch die Haupt-GUI schliessen.
+Complete-StartupSplash
 Close-StartupSplash
 [void]$form.ShowDialog()
 } catch {

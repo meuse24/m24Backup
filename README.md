@@ -12,6 +12,9 @@ Windows systems and in English on all other systems.
 
 ## Features
 
+- Enables a per-user Windows startup reminder by default when the last
+  successful GUI backup is at least 14 days old, without installing a service or
+  requiring administrator rights.
 - Backs up Desktop, Documents, Downloads, Pictures, Music, Videos, Favorites,
   Saved Games, and other detected user folders.
 - Uses Robocopy and never deletes files from the backup destination.

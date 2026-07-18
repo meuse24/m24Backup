@@ -179,6 +179,21 @@ für diesen Computer und Benutzer:
 Die Details enthalten Datum, Anzahl der gesicherten Ordner und die Laufzeit,
 sofern diese aus den Metadaten ermittelt werden kann.
 
+## Backup-Erinnerung beim Windows-Start
+
+Die standardmäßig aktivierte Einstellung **Erinnern** erinnert beim Anmelden,
+wenn das letzte erfolgreiche Backup über die App mindestens 14 Tage zurückliegt
+oder noch nie ein Backup erstellt wurde.
+Die Benachrichtigung bleibt bei einem aktuellen Backup aus; ein Klick darauf
+öffnet die Bibliothekssicherung.
+
+Es wird kein Hintergrunddienst installiert und es sind keine Administratorrechte
+nötig. Windows startet lediglich einen kurzen, unsichtbaren Prüfpfad für das
+aktuelle Benutzerkonto. Die Funktion lässt sich jederzeit durch Entfernen des
+Hakens abschalten. Alternativ kann **M24Backup** im Task-Manager unter
+**Autostart-Apps** deaktiviert werden. Fokus-Assistent oder deaktivierte
+Windows-Benachrichtigungen können die Anzeige unterdrücken.
+
 <a id="delete-backup"></a>
 ## Backup löschen
 

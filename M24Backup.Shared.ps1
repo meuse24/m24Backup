@@ -534,6 +534,118 @@ function Exit-M24SingleInstance {
     try { $Handle.Mutex.Dispose() } catch {}
 }
 
+function Get-M24GuiMutexName {
+    param([string]$UserSid)
+
+    if ([string]::IsNullOrWhiteSpace($UserSid)) {
+        $UserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    }
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $sidBytes = [System.Text.Encoding]::UTF8.GetBytes($UserSid)
+        $sidHash = ([BitConverter]::ToString($sha256.ComputeHash($sidBytes))).Replace('-', '').Substring(0, 16)
+    } finally {
+        $sha256.Dispose()
+    }
+    return "Local\M24Backup.GUI.$sidHash"
+}
+
+function Get-M24BackupReminderState {
+    param(
+        [AllowNull()][string]$LastSuccessfulBackup,
+        [DateTimeOffset]$Now = [DateTimeOffset]::Now,
+        [int]$ThresholdDays = 14
+    )
+
+    $effectiveThreshold = [Math]::Max(1, [Math]::Min(3650, $ThresholdDays))
+    $lastBackup = [DateTimeOffset]::MinValue
+    $parsed = -not [string]::IsNullOrWhiteSpace($LastSuccessfulBackup) -and
+        [DateTimeOffset]::TryParse(
+            $LastSuccessfulBackup,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$lastBackup)
+    if (-not $parsed) {
+        return [pscustomobject]@{
+            IsDue = $true
+            NeverBackedUp = $true
+            DaysSinceBackup = $null
+            ThresholdDays = $effectiveThreshold
+        }
+    }
+
+    $age = $Now.ToUniversalTime() - $lastBackup.ToUniversalTime()
+    $ageDays = [Math]::Max(0, [int][Math]::Floor($age.TotalDays))
+    return [pscustomobject]@{
+        IsDue = [bool]($age.TotalDays -ge $effectiveThreshold)
+        NeverBackedUp = $false
+        DaysSinceBackup = $ageDays
+        ThresholdDays = $effectiveThreshold
+    }
+}
+
+function Get-M24StartupReminderCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$VbsPath,
+        [string]$WscriptPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($WscriptPath)) {
+        $WscriptPath = Join-Path ([Environment]::SystemDirectory) 'wscript.exe'
+    }
+    $fullVbsPath = [System.IO.Path]::GetFullPath($VbsPath)
+    $fullWscriptPath = [System.IO.Path]::GetFullPath($WscriptPath)
+    return ('"{0}" "{1}" /SilentStartup' -f $fullWscriptPath, $fullVbsPath)
+}
+
+function Get-M24StartupReminderRegistration {
+    param(
+        [string]$RegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
+        [string]$ValueName = 'M24Backup'
+    )
+
+    try {
+        if (-not (Test-Path -LiteralPath $RegistryPath -ErrorAction Stop)) { return $null }
+        $item = Get-ItemProperty -LiteralPath $RegistryPath -Name $ValueName -ErrorAction Stop
+        return [string]$item.$ValueName
+    } catch [System.Management.Automation.PSArgumentException] {
+        return $null
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return $null
+    }
+}
+
+function Set-M24StartupReminderRegistration {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [string]$RegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
+        [string]$ValueName = 'M24Backup'
+    )
+
+    # The Windows Run key is shared with other applications. Recreating an
+    # existing registry key with New-Item -Force can discard its other values.
+    if (-not (Test-Path -LiteralPath $RegistryPath -ErrorAction Stop)) {
+        [void](New-Item -Path $RegistryPath -ErrorAction Stop)
+    }
+    [void](New-ItemProperty -LiteralPath $RegistryPath -Name $ValueName -Value $Command -PropertyType String -Force -ErrorAction Stop)
+}
+
+function Remove-M24StartupReminderRegistration {
+    param(
+        [string]$RegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
+        [string]$ValueName = 'M24Backup'
+    )
+
+    try {
+        if (-not (Test-Path -LiteralPath $RegistryPath -ErrorAction Stop)) { return }
+        Remove-ItemProperty -LiteralPath $RegistryPath -Name $ValueName -Force -ErrorAction Stop
+    } catch [System.Management.Automation.PSArgumentException] {
+        # An already missing value is the desired state.
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        # An already missing key/value is the desired state.
+    }
+}
+
 function Compare-M24DriveFingerprint {
     # Pure Vergleichslogik. Die GUI entscheidet erst nach dem Vergleich aller
     # sichtbaren Laufwerke, ob ein Treffer eindeutig ist.
