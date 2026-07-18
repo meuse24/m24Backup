@@ -1132,8 +1132,10 @@ Describe 'Backup reminder policy' {
     }
 
     It 'round-trips reminder registration only in an isolated HKCU test key' {
-        $testRegistryPath = 'HKCU:\Software\M24Backup\Tests\{0}' -f [guid]::NewGuid().ToString('N')
+        $testRegistryRoot = 'HKCU:\Software\M24BackupReminderTests_{0}' -f [guid]::NewGuid().ToString('N')
+        $testRegistryPath = Join-Path $testRegistryRoot 'Run'
         try {
+            [void](New-Item -Path $testRegistryRoot -Force)
             Get-M24StartupReminderRegistration -RegistryPath $testRegistryPath | Should -BeNullOrEmpty
             Set-M24StartupReminderRegistration -RegistryPath $testRegistryPath -Command 'test-command'
             Get-M24StartupReminderRegistration -RegistryPath $testRegistryPath | Should -Be 'test-command'
@@ -1141,13 +1143,15 @@ Describe 'Backup reminder policy' {
             Get-M24StartupReminderRegistration -RegistryPath $testRegistryPath | Should -BeNullOrEmpty
             { Remove-M24StartupReminderRegistration -RegistryPath $testRegistryPath } | Should -Not -Throw
         } finally {
-            if (Test-Path -LiteralPath $testRegistryPath) { Remove-Item -LiteralPath $testRegistryPath -Recurse -Force }
+            if (Test-Path -LiteralPath $testRegistryRoot) { Remove-Item -LiteralPath $testRegistryRoot -Recurse -Force }
         }
     }
 
     It 'preserves unrelated values in an existing registry key' {
-        $testRegistryPath = 'HKCU:\Software\M24Backup\Tests\{0}' -f [guid]::NewGuid().ToString('N')
+        $testRegistryRoot = 'HKCU:\Software\M24BackupReminderTests_{0}' -f [guid]::NewGuid().ToString('N')
+        $testRegistryPath = Join-Path $testRegistryRoot 'Run'
         try {
+            [void](New-Item -Path $testRegistryRoot -Force)
             [void](New-Item -Path $testRegistryPath -Force)
             [void](New-ItemProperty -LiteralPath $testRegistryPath -Name 'ForeignStartupEntry' -Value 'keep-me' -PropertyType String -Force)
 
@@ -1157,7 +1161,7 @@ Describe 'Backup reminder policy' {
             $values.ForeignStartupEntry | Should -Be 'keep-me'
             $values.M24Backup | Should -Be 'm24-command'
         } finally {
-            if (Test-Path -LiteralPath $testRegistryPath) { Remove-Item -LiteralPath $testRegistryPath -Recurse -Force }
+            if (Test-Path -LiteralPath $testRegistryRoot) { Remove-Item -LiteralPath $testRegistryRoot -Recurse -Force }
         }
     }
 }
