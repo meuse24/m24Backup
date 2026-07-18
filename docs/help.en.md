@@ -34,6 +34,9 @@ Normally, start the app with `Bibliothekssicherung starten.vbs`. Use
 `Bibliothekssicherung starten.bat` for diagnostics when a visible console
 window is useful.
 
+Only one instance of the app runs per Windows user session. A second
+start shows a notice and exits without changing anything.
+
 ## Creating a backup
 
 1. Select **Back up** at the top.
@@ -54,7 +57,8 @@ log, and `Ctrl+O` opens the backup folder. Never remove the destination drive
 while an operation is running.
 
 A star (`★`) marks the drive used for the last successful backup. The app
-recognizes it by its volume identifier. Before backing up to a different drive,
+recognizes it using a layered fingerprint of volume and disk identifiers, size,
+and file system. Ambiguous matches are never accepted automatically. Before backing up to a different drive,
 the app asks for confirmation; the new drive is remembered only after a
 successful run.
 
@@ -219,9 +223,11 @@ recommended for backup drives. Formatting a drive deletes its existing data.
 
 The preview shows missing local files, possible overwrites, protected newer
 local files, data volume, and example paths. It also shows the backup's
-integrity status: when the SHA-256 checksums were last fully verified, or
-that this verification is still pending. Before an important restore, run
-**Verify backup** first. No files are restored without explicit confirmation.
+integrity status. If a manifest exists but has not been fully verified since the
+latest backup, the GUI verifies it automatically before the first copy. A failed
+or cancelled verification blocks restore. If no manifest exists, no later scan
+can prove the original contents; the GUI therefore requires a second explicit
+risk confirmation. No files are restored without explicit confirmation.
 
 ## Restore protection
 
@@ -238,6 +244,11 @@ stopped immediately; the file being transferred at that moment may remain
 incomplete at the destination. Files already copied completely remain in
 place. After a cancellation, run the backup again or use **Verify backup**;
 a cancelled run does not count as a successful backup.
+
+If the application window ends unexpectedly during a running operation
+(for example through sign-out or a crash), the background worker stops
+itself safely — using the same controlled path as a button cancellation.
+Such a run also does not count as a successful backup.
 
 ## Backup location
 
@@ -336,9 +347,10 @@ Examples:
 | `-DryRun` | Simulate a backup with Robocopy `/L` without writing user data or successful-backup metadata. Backup only; cannot be combined with `-SuperFast`. |
 | `-SkipChecksums` | Do not update `_Pruefsummen.tsv` after a successful backup. The existing manifest may become outdated. |
 | `-SuperFast` | Skip preflight, file-based disk-space/4 GB checks, checksum updates, and the BitLocker query; run Robocopy without retries and with 32 threads by default. Backup only; cannot be combined with `-DryRun`. |
+| `-RestoreIntegrityPolicy <Verify, RequireVerified, or Warn>` | Restore integrity policy. `Verify` checks an existing manifest when needed, `RequireVerified` accepts only an already verified state, and `Warn` preserves interactive CLI behavior. Direct-call default: `Warn`; the GUI uses `Verify`. |
 | `-Threads 1..128` | Number of parallel Robocopy threads. Default: 8; when `-SuperFast` is used without an explicit value: 32. An explicit value always wins. |
 
-`-ParentProcessId`, `-StatusFile`, `-ResultFile`, `-CancelFile`, `-PreviewFile`,
+`-ParentProcessId`, `-ParentProcessStartTimeUtcTicks`, `-StatusFile`, `-ResultFile`, `-CancelFile`, `-PreviewFile`,
 and `-ApprovalFile` form the internal communication channel between the GUI and
 worker. They are not required for normal direct runs. Custom automation may use
 `-ResultFile` for a structured JSON summary; the status, cancellation, and

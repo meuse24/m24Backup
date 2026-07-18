@@ -4,6 +4,24 @@ Alle wesentlichen Änderungen dieses Projekts werden in dieser Datei
 dokumentiert. Die Versionierung orientiert sich an
 [Semantic Versioning](https://semver.org/lang/de/).
 
+## [Unreleased]
+
+### Hinzugefügt
+
+- GUI-Worker überwachen jetzt die exakte Eigentümerinstanz per PID und
+  Prozessstartzeit. Verschwindet die GUI, beendet sich der Worker über den
+  kontrollierten Abbruchpfad; Ergebnisdateien unterscheiden `User` und
+  `GuiExited`.
+- Die GUI ist pro Windows-Benutzersitzung auf eine Instanz begrenzt.
+- Restores aus der GUI prüfen ein vorhandenes SHA-256-Manifest automatisch,
+  wenn seit dem letzten Backup noch keine erfolgreiche Vollprüfung vorliegt.
+  Ohne Manifest ist eine zweite ausdrückliche Risikobestätigung erforderlich.
+- Die Erkennung des bekannten Sicherungslaufwerks verwendet einen gestuften
+  Fingerprint aus Volume-GUID, Datenträger-ID, Volume-Seriennummer, Größe und
+  Dateisystem und akzeptiert mehrdeutige Treffer nicht automatisch.
+- CI führt Pester mit Windows PowerShell 5.1 und PowerShell 7 aus und baut das
+  portable Paket als nicht signierten Smoke-Test.
+
 ## [1.7.0] – 2026-07-18
 
 ### Hinzugefügt

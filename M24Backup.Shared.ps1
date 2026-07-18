@@ -438,6 +438,194 @@ function Stop-M24WorkerProcess {
     return $exitConfirmed
 }
 
+function New-M24CancellationMonitor {
+    return [pscustomobject]@{
+        ConsecutiveOwnerFailures = 0
+        LastOwnerCheckUtc = [datetime]::MinValue
+        LastOwnerAlive = $true
+    }
+}
+
+function Get-M24CancellationState {
+    # Einheitliche, gedrosselte Auswertung des Cancel-Markers und der exakten
+    # GUI-Prozessidentitaet. Ein Startzeit-Mismatch ist definitive PID-
+    # Wiederverwendung; fehlende oder voruebergehend nicht lesbare Prozesse
+    # werden dagegen entprellt.
+    param(
+        [string]$CancelFile,
+        [int]$ParentProcessId = 0,
+        [int64]$ParentProcessStartTimeUtcTicks = 0,
+        $Monitor,
+        [int]$OwnerFailureThreshold = 2,
+        [int]$MinimumOwnerCheckIntervalMilliseconds = 2000
+    )
+
+    if (-not $Monitor) { $Monitor = New-M24CancellationMonitor }
+    $threshold = [Math]::Max(1, [Math]::Min(10, $OwnerFailureThreshold))
+    $interval = [Math]::Max(0, [Math]::Min(30000, $MinimumOwnerCheckIntervalMilliseconds))
+
+    if ($CancelFile -and [System.IO.File]::Exists($CancelFile)) {
+        return [pscustomobject]@{ Requested = $true; Reason = 'User'; Message = 'Cancellation was requested by the user.' }
+    }
+    if ($ParentProcessId -le 0) {
+        return [pscustomobject]@{ Requested = $false; Reason = 'None'; Message = '' }
+    }
+
+    $now = [datetime]::UtcNow
+    if ($Monitor.LastOwnerCheckUtc -ne [datetime]::MinValue -and
+        ($now - [datetime]$Monitor.LastOwnerCheckUtc).TotalMilliseconds -lt $interval) {
+        if (-not $Monitor.LastOwnerAlive -and [int]$Monitor.ConsecutiveOwnerFailures -ge $threshold) {
+            return [pscustomobject]@{ Requested = $true; Reason = 'GuiExited'; Message = 'The owning user interface is no longer running.' }
+        }
+        return [pscustomobject]@{ Requested = $false; Reason = 'None'; Message = '' }
+    }
+
+    $Monitor.LastOwnerCheckUtc = $now
+    $owner = $null
+    try { $owner = Get-Process -Id $ParentProcessId -ErrorAction Stop } catch {}
+    if ($owner) {
+        if ($ParentProcessStartTimeUtcTicks -gt 0) {
+            try {
+                $actualTicks = [int64]$owner.StartTime.ToUniversalTime().Ticks
+                if ($actualTicks -ne $ParentProcessStartTimeUtcTicks) {
+                    $Monitor.LastOwnerAlive = $false
+                    $Monitor.ConsecutiveOwnerFailures = $threshold
+                    return [pscustomobject]@{ Requested = $true; Reason = 'GuiExited'; Message = 'The owning user interface process identity no longer matches.' }
+                }
+            } catch {
+                $owner = $null
+            }
+        }
+    }
+
+    if ($owner) {
+        $Monitor.LastOwnerAlive = $true
+        $Monitor.ConsecutiveOwnerFailures = 0
+        return [pscustomobject]@{ Requested = $false; Reason = 'None'; Message = '' }
+    }
+
+    $Monitor.LastOwnerAlive = $false
+    $Monitor.ConsecutiveOwnerFailures = [int]$Monitor.ConsecutiveOwnerFailures + 1
+    if ([int]$Monitor.ConsecutiveOwnerFailures -ge $threshold) {
+        return [pscustomobject]@{ Requested = $true; Reason = 'GuiExited'; Message = 'The owning user interface is no longer running.' }
+    }
+    return [pscustomobject]@{ Requested = $false; Reason = 'None'; Message = '' }
+}
+
+function Enter-M24SingleInstance {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $mutex = $null
+    $acquired = $false
+    try {
+        $mutex = New-Object System.Threading.Mutex($false, $Name)
+        try { $acquired = $mutex.WaitOne(0, $false) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+        return [pscustomobject]@{ Acquired = [bool]$acquired; Mutex = $mutex; Name = $Name }
+    } catch {
+        if ($mutex) { try { $mutex.Dispose() } catch {} }
+        throw
+    }
+}
+
+function Exit-M24SingleInstance {
+    param($Handle)
+    if (-not $Handle -or -not $Handle.Mutex) { return }
+    if ($Handle.Acquired) { try { $Handle.Mutex.ReleaseMutex() } catch {} }
+    try { $Handle.Mutex.Dispose() } catch {}
+}
+
+function Compare-M24DriveFingerprint {
+    # Pure Vergleichslogik. Die GUI entscheidet erst nach dem Vergleich aller
+    # sichtbaren Laufwerke, ob ein Treffer eindeutig ist.
+    param($Known, $Candidate)
+
+    if (-not $Known -or -not $Candidate) {
+        return [pscustomobject]@{ IsMatch = $false; Confidence = 'None'; Score = 0; Reason = 'MissingFingerprint' }
+    }
+    $value = {
+        param($Object, [string]$Name)
+        $property = $Object.PSObject.Properties[$Name]
+        if (-not $property -or $null -eq $property.Value) { return '' }
+        return ([string]$property.Value).Trim().ToUpperInvariant()
+    }
+    $knownVolumeGuid = & $value $Known 'VolumeGuid'
+    $candidateVolumeGuid = & $value $Candidate 'VolumeGuid'
+    $knownDiskId = & $value $Known 'DiskUniqueId'
+    $candidateDiskId = & $value $Candidate 'DiskUniqueId'
+    if ($knownVolumeGuid -and $candidateVolumeGuid) {
+        if ($knownVolumeGuid -eq $candidateVolumeGuid) { return [pscustomobject]@{ IsMatch = $true; Confidence = 'Strong'; Score = 100; Reason = 'VolumeGuid' } }
+        return [pscustomobject]@{ IsMatch = $false; Confidence = 'None'; Score = 0; Reason = 'VolumeGuidMismatch' }
+    }
+    if ($knownDiskId -and $candidateDiskId) {
+        $knownDiskVolumeSerial = & $value $Known 'VolumeSerialNumber'
+        $candidateDiskVolumeSerial = & $value $Candidate 'VolumeSerialNumber'
+        if ($knownDiskId -eq $candidateDiskId -and $knownDiskVolumeSerial -and $knownDiskVolumeSerial -eq $candidateDiskVolumeSerial) {
+            return [pscustomobject]@{ IsMatch = $true; Confidence = 'Strong'; Score = 90; Reason = 'DiskUniqueIdAndVolumeSerial' }
+        }
+        return [pscustomobject]@{ IsMatch = $false; Confidence = 'None'; Score = 0; Reason = 'DiskUniqueIdMismatch' }
+    }
+
+    $knownPhysicalSerial = & $value $Known 'DiskSerialNumber'
+    $candidatePhysicalSerial = & $value $Candidate 'DiskSerialNumber'
+    if ($knownPhysicalSerial -and $candidatePhysicalSerial) {
+        $knownPhysicalVolumeSerial = & $value $Known 'VolumeSerialNumber'
+        $candidatePhysicalVolumeSerial = & $value $Candidate 'VolumeSerialNumber'
+        if ($knownPhysicalSerial -eq $candidatePhysicalSerial -and $knownPhysicalVolumeSerial -and $knownPhysicalVolumeSerial -eq $candidatePhysicalVolumeSerial) {
+            return [pscustomobject]@{ IsMatch = $true; Confidence = 'Strong'; Score = 80; Reason = 'DiskSerialAndVolumeSerial' }
+        }
+        return [pscustomobject]@{ IsMatch = $false; Confidence = 'None'; Score = 0; Reason = 'DiskSerialMismatch' }
+    }
+
+    $knownSerial = & $value $Known 'VolumeSerialNumber'
+    if (-not $knownSerial) { $knownSerial = & $value $Known 'SerialNumber' }
+    $candidateSerial = & $value $Candidate 'VolumeSerialNumber'
+    if (-not $candidateSerial) { $candidateSerial = & $value $Candidate 'SerialNumber' }
+    if (-not $knownSerial -or $knownSerial -ne $candidateSerial) {
+        return [pscustomobject]@{ IsMatch = $false; Confidence = 'None'; Score = 0; Reason = 'VolumeSerialMismatch' }
+    }
+
+    $knownSize = & $value $Known 'SizeBytes'
+    $candidateSize = & $value $Candidate 'SizeBytes'
+    $knownFs = & $value $Known 'FileSystem'
+    $candidateFs = & $value $Candidate 'FileSystem'
+    if ($knownSize -and $candidateSize -and $knownFs -and $candidateFs) {
+        if ($knownSize -eq $candidateSize -and $knownFs -eq $candidateFs) {
+            return [pscustomobject]@{ IsMatch = $true; Confidence = 'Fallback'; Score = 60; Reason = 'VolumeSerialSizeFileSystem' }
+        }
+        return [pscustomobject]@{ IsMatch = $false; Confidence = 'None'; Score = 0; Reason = 'FallbackMismatch' }
+    }
+    return [pscustomobject]@{ IsMatch = $true; Confidence = 'Legacy'; Score = 20; Reason = 'LegacyVolumeSerial' }
+}
+
+function Resolve-M24RestoreApproval {
+    param(
+        [ValidateSet('Verify', 'RequireVerified', 'Warn')][string]$Policy,
+        [string]$ApprovalValue,
+        [bool]$ManifestExists,
+        [bool]$AlreadyVerified
+    )
+
+    $value = ([string]$ApprovalValue).Trim().ToLowerInvariant()
+    if ($value -eq 'cancel') { return [pscustomobject]@{ Allowed = $false; Cancelled = $true; RequiresVerification = $false; UnverifiedOverride = $false; Reason = 'Cancelled' } }
+    if ($Policy -eq 'RequireVerified') {
+        $allowed = $AlreadyVerified -and $value -eq 'continue-verified'
+        return [pscustomobject]@{ Allowed = $allowed; Cancelled = $false; RequiresVerification = $false; UnverifiedOverride = $false; Reason = $(if ($allowed) { 'Verified' } else { 'VerificationRequired' }) }
+    }
+    if ($value -eq 'continue-verified' -and $AlreadyVerified) {
+        return [pscustomobject]@{ Allowed = $true; Cancelled = $false; RequiresVerification = $false; UnverifiedOverride = $false; Reason = 'Verified' }
+    }
+    if ($value -eq 'verify-then-continue' -and $ManifestExists) {
+        return [pscustomobject]@{ Allowed = $true; Cancelled = $false; RequiresVerification = $true; UnverifiedOverride = $false; Reason = 'Verify' }
+    }
+    if ($value -eq 'continue-unverified' -and -not $ManifestExists -and $Policy -in @('Verify', 'Warn')) {
+        return [pscustomobject]@{ Allowed = $true; Cancelled = $false; RequiresVerification = $false; UnverifiedOverride = $true; Reason = 'MissingManifestOverride' }
+    }
+    if ($Policy -eq 'Warn' -and $value -eq 'continue') {
+        return [pscustomobject]@{ Allowed = $true; Cancelled = $false; RequiresVerification = $false; UnverifiedOverride = $true; Reason = 'LegacyWarnApproval' }
+    }
+    return [pscustomobject]@{ Allowed = $false; Cancelled = $false; RequiresVerification = $false; UnverifiedOverride = $false; Reason = 'InvalidApproval' }
+}
+
 function Test-M24ExcludedFileName {
     param([string]$Name, [string[]]$Patterns)
     foreach ($pattern in $Patterns) {

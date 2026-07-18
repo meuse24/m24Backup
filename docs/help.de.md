@@ -36,6 +36,10 @@ Starten Sie die App normalerweise mit `Bibliothekssicherung starten.vbs`.
 Die Datei `Bibliothekssicherung starten.bat` ist für Diagnosefälle gedacht,
 wenn ein sichtbares Konsolenfenster hilfreich ist.
 
+Pro Windows-Benutzersitzung läuft immer nur eine Instanz der App. Ein
+zweiter Start zeigt einen Hinweis und beendet sich, ohne etwas zu
+verändern.
+
 ## Sicherung erstellen
 
 1. Oben den Modus **Sichern** wählen.
@@ -58,7 +62,9 @@ ausgewählt. `F5` erzwingt eine sofortige Aktualisierung. `F1` öffnet die Hilfe
 Entfernen Sie das Ziellaufwerk niemals, solange der Vorgang läuft.
 
 Ein Stern (`★`) kennzeichnet das zuletzt erfolgreich verwendete
-Sicherungslaufwerk. Die App erkennt es anhand seiner Datenträger-ID wieder. Vor
+Sicherungslaufwerk. Die App erkennt es anhand eines gestuften Fingerprints aus
+Volume- und Datenträgerkennungen, Größe und Dateisystem wieder. Mehrdeutige
+Treffer werden nicht automatisch akzeptiert. Vor
 einer Sicherung auf ein anderes Laufwerk fragt sie nach; erst nach einem
 erfolgreichen Lauf wird das neue Laufwerk für die künftige Wiedererkennung
 gespeichert.
@@ -235,11 +241,13 @@ dessen vorhandene Daten gelöscht.
 
 Die Konfliktvorschau zeigt lokal fehlende Dateien, mögliche
 Überschreibungen, geschützte neuere lokale Dateien, Datenmenge und
-Beispielpfade. Zusätzlich zeigt sie den Integritätsstatus des Backups: wann
-die SHA-256-Prüfsummen zuletzt vollständig geprüft wurden oder ob diese
-Prüfung noch aussteht. Vor einer wichtigen Wiederherstellung wird empfohlen,
-zuerst **Backup prüfen** auszuführen. Ohne ausdrückliche Bestätigung werden
-keine Dateien wiederhergestellt.
+Beispielpfade. Zusätzlich zeigt sie den Integritätsstatus des Backups. Ist ein
+Manifest vorhanden, aber seit dem letzten Backup noch nicht vollständig
+geprüft, führt die GUI diese Prüfung automatisch vor dem ersten Kopiervorgang
+aus. Schlägt sie fehl oder wird sie abgebrochen, startet die Wiederherstellung
+nicht. Fehlt das Manifest, ist keine nachträgliche Echtheitsprüfung möglich;
+die GUI verlangt dann eine zweite ausdrückliche Risikobestätigung. Ohne
+ausdrückliche Bestätigung werden keine Dateien wiederhergestellt.
 
 ## Schutz bei der Wiederherstellung
 
@@ -259,6 +267,12 @@ unvollständig im Ziel zurückbleiben. Bereits vollständig kopierte Dateien
 bleiben erhalten. Nach einem Abbruch sollte die Sicherung erneut ausgeführt
 oder das Backup mit **Backup prüfen** kontrolliert werden; ein abgebrochener
 Lauf gilt nicht als erfolgreiche Sicherung.
+
+Wird das Programmfenster während eines laufenden Vorgangs unerwartet
+beendet (zum Beispiel durch Abmelden oder einen Absturz), stoppt der im
+Hintergrund laufende Sicherungsprozess von selbst kontrolliert – auf dem
+gleichen sicheren Weg wie bei einem Abbruch per Schaltfläche. Ein solcher
+Lauf gilt ebenfalls nicht als erfolgreiche Sicherung.
 
 ## Speicherort der Sicherung
 
@@ -357,9 +371,10 @@ Beispiele:
 | `-DryRun` | Backup mit Robocopy `/L` simulieren, ohne Nutzdaten oder erfolgreiche Backup-Metadaten zu schreiben. Nur mit `-Mode Backup`; nicht mit `-SuperFast`. |
 | `-SkipChecksums` | Nach einem erfolgreichen Backup `_Pruefsummen.tsv` nicht aktualisieren. Das vorhandene Manifest kann dadurch veralten. |
 | `-SuperFast` | Preflight, dateibasierte Speicherplatz-/4-GB-Prüfung, Prüfsummenaktualisierung und BitLocker-Abfrage auslassen; Robocopy ohne Wiederholung und standardmäßig mit 32 Threads starten. Nur für Backups und nicht mit `-DryRun`. |
+| `-RestoreIntegrityPolicy <Verify, RequireVerified oder Warn>` | Integritätsrichtlinie für Restores. `Verify` prüft ein vorhandenes Manifest bei Bedarf, `RequireVerified` akzeptiert nur einen bereits bestätigten Stand, `Warn` erhält das interaktive CLI-Verhalten. Standard für direkte Aufrufe: `Warn`; die GUI verwendet `Verify`. |
 | `-Threads 1..128` | Anzahl paralleler Robocopy-Threads. Standard: 8; bei `-SuperFast` ohne explizite Angabe: 32. Ein expliziter Wert hat immer Vorrang. |
 
-`-ParentProcessId`, `-StatusFile`, `-ResultFile`, `-CancelFile`, `-PreviewFile`
+`-ParentProcessId`, `-ParentProcessStartTimeUtcTicks`, `-StatusFile`, `-ResultFile`, `-CancelFile`, `-PreviewFile`
 und `-ApprovalFile` bilden den internen Kommunikationskanal zwischen GUI und
 Worker. Für normale direkte Aufrufe sind sie nicht erforderlich. Bei eigener
 Automatisierung kann `-ResultFile` eine strukturierte JSON-Zusammenfassung

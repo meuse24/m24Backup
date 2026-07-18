@@ -847,7 +847,8 @@ Describe 'Stop-M24WorkerProcess' {
             param([string]$Command)
             $startInfo = New-Object System.Diagnostics.ProcessStartInfo
             $startInfo.FileName = $script:windowsPowerShell
-            $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -Command ' + (ConvertTo-M24ProcessArgument $Command)
+            $markedCommand = "# M24Backup.PesterChild`r`n{0}" -f $Command
+            $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -Command ' + (ConvertTo-M24ProcessArgument $markedCommand)
             $startInfo.UseShellExecute = $false
             $startInfo.CreateNoWindow = $true
             $child = New-Object System.Diagnostics.Process
@@ -950,6 +951,143 @@ Describe 'Stop-M24WorkerProcess' {
             }, $true)
         $stopFunction | Should -Not -BeNullOrEmpty
         ([regex]::Matches($stopFunction.Extent.Text, [regex]::Escape('[Math]::Min(10000, [Math]::Max(0,'))).Count | Should -Be 2
+    }
+}
+
+Describe 'GUI owner cancellation policy' {
+    It 'does not request cancellation for a direct CLI run' {
+        $state = Get-M24CancellationState -ParentProcessId 0 -Monitor (New-M24CancellationMonitor) -MinimumOwnerCheckIntervalMilliseconds 0
+        $state.Requested | Should -BeFalse
+        $state.Reason | Should -Be 'None'
+    }
+
+    It 'accepts the matching current process identity' {
+        $process = [System.Diagnostics.Process]::GetCurrentProcess()
+        $state = Get-M24CancellationState -ParentProcessId $PID -ParentProcessStartTimeUtcTicks $process.StartTime.ToUniversalTime().Ticks `
+            -Monitor (New-M24CancellationMonitor) -MinimumOwnerCheckIntervalMilliseconds 0
+        $state.Requested | Should -BeFalse
+    }
+
+    It 'rejects a reused PID immediately when the start time differs' {
+        $state = Get-M24CancellationState -ParentProcessId $PID -ParentProcessStartTimeUtcTicks 1 `
+            -Monitor (New-M24CancellationMonitor) -MinimumOwnerCheckIntervalMilliseconds 0
+        $state.Requested | Should -BeTrue
+        $state.Reason | Should -Be 'GuiExited'
+    }
+
+    It 'debounces a missing owner but eventually reports GUI exit' {
+        $monitor = New-M24CancellationMonitor
+        (Get-M24CancellationState -ParentProcessId 2147483000 -Monitor $monitor -MinimumOwnerCheckIntervalMilliseconds 0).Requested | Should -BeFalse
+        $state = Get-M24CancellationState -ParentProcessId 2147483000 -Monitor $monitor -MinimumOwnerCheckIntervalMilliseconds 0
+        $state.Requested | Should -BeTrue
+        $state.Reason | Should -Be 'GuiExited'
+    }
+
+    It 'gives an explicit cancel marker precedence over owner loss' {
+        $cancel = Join-Path $TestDrive 'cancel.marker'
+        Set-Content -LiteralPath $cancel -Value cancel
+        $state = Get-M24CancellationState -CancelFile $cancel -ParentProcessId 2147483000 -ParentProcessStartTimeUtcTicks 1 `
+            -Monitor (New-M24CancellationMonitor) -MinimumOwnerCheckIntervalMilliseconds 0
+        $state.Reason | Should -Be 'User'
+    }
+}
+
+Describe 'Restore integrity approval policy' {
+    It 'accepts a current verified marker without rehashing' {
+        $decision = Resolve-M24RestoreApproval -Policy Verify -ApprovalValue continue-verified -ManifestExists $true -AlreadyVerified $true
+        $decision.Allowed | Should -BeTrue
+        $decision.RequiresVerification | Should -BeFalse
+    }
+
+    It 'requires verification for an existing unverified manifest' {
+        $decision = Resolve-M24RestoreApproval -Policy Verify -ApprovalValue verify-then-continue -ManifestExists $true -AlreadyVerified $false
+        $decision.Allowed | Should -BeTrue
+        $decision.RequiresVerification | Should -BeTrue
+    }
+
+    It 'allows only the explicit override when the manifest is missing' {
+        (Resolve-M24RestoreApproval -Policy Verify -ApprovalValue verify-then-continue -ManifestExists $false -AlreadyVerified $false).Allowed | Should -BeFalse
+        $override = Resolve-M24RestoreApproval -Policy Verify -ApprovalValue continue-unverified -ManifestExists $false -AlreadyVerified $false
+        $override.Allowed | Should -BeTrue
+        $override.UnverifiedOverride | Should -BeTrue
+    }
+
+    It 'does not let RequireVerified create or bypass verification' {
+        (Resolve-M24RestoreApproval -Policy RequireVerified -ApprovalValue verify-then-continue -ManifestExists $true -AlreadyVerified $false).Allowed | Should -BeFalse
+        (Resolve-M24RestoreApproval -Policy RequireVerified -ApprovalValue continue-unverified -ManifestExists $false -AlreadyVerified $false).Allowed | Should -BeFalse
+    }
+
+    It 'keeps legacy continue limited to Warn' {
+        (Resolve-M24RestoreApproval -Policy Warn -ApprovalValue continue -ManifestExists $false -AlreadyVerified $false).Allowed | Should -BeTrue
+        (Resolve-M24RestoreApproval -Policy Verify -ApprovalValue continue -ManifestExists $true -AlreadyVerified $false).Allowed | Should -BeFalse
+    }
+}
+
+Describe 'Layered known-drive fingerprint' {
+    It 'prefers an exact volume GUID' {
+        $known = [pscustomobject]@{ VolumeGuid = '\\?\Volume{11111111-1111-1111-1111-111111111111}\'; VolumeSerialNumber = 'AAAA' }
+        $candidate = [pscustomobject]@{ VolumeGuid = $known.VolumeGuid; VolumeSerialNumber = 'BBBB' }
+        $match = Compare-M24DriveFingerprint -Known $known -Candidate $candidate
+        $match.IsMatch | Should -BeTrue
+        $match.Confidence | Should -Be 'Strong'
+    }
+
+    It 'rejects a conflicting strong identifier' {
+        $known = [pscustomobject]@{ DiskUniqueId = 'DISK-A'; VolumeSerialNumber = 'AAAA' }
+        $candidate = [pscustomobject]@{ DiskUniqueId = 'DISK-B'; VolumeSerialNumber = 'AAAA' }
+        (Compare-M24DriveFingerprint -Known $known -Candidate $candidate).IsMatch | Should -BeFalse
+    }
+
+    It 'uses serial size and file system as a fallback' {
+        $known = [pscustomobject]@{ VolumeSerialNumber = 'ABCD'; SizeBytes = 1000; FileSystem = 'NTFS' }
+        $candidate = [pscustomobject]@{ VolumeSerialNumber = 'ABCD'; SizeBytes = 1000; FileSystem = 'ntfs' }
+        (Compare-M24DriveFingerprint -Known $known -Candidate $candidate).Confidence | Should -Be 'Fallback'
+    }
+
+    It 'recognizes legacy serial records without overstating confidence' {
+        $known = [pscustomobject]@{ SerialNumber = 'AB-CD' }
+        $candidate = [pscustomobject]@{ VolumeSerialNumber = 'AB-CD' }
+        (Compare-M24DriveFingerprint -Known $known -Candidate $candidate).Confidence | Should -Be 'Legacy'
+    }
+}
+
+Describe 'Single-instance mutex lifecycle' {
+    It 'acquires, releases, and reacquires a unique mutex' {
+        $name = 'Local\M24Backup.Test.{0}' -f [guid]::NewGuid().ToString('N')
+        $first = Enter-M24SingleInstance -Name $name
+        try { $first.Acquired | Should -BeTrue } finally { Exit-M24SingleInstance -Handle $first }
+        $second = Enter-M24SingleInstance -Name $name
+        try { $second.Acquired | Should -BeTrue } finally { Exit-M24SingleInstance -Handle $second }
+    }
+
+    It 'rejects the same mutex while another process owns it' {
+        $name = 'Local\M24Backup.Test.{0}' -f [guid]::NewGuid().ToString('N')
+        $ready = Join-Path $TestDrive 'mutex-ready.txt'
+        $release = Join-Path $TestDrive 'mutex-release.txt'
+        $shared = Join-Path (Split-Path $PSScriptRoot -Parent) 'M24Backup.Shared.ps1'
+        $escape = { param([string]$text) $text.Replace("'", "''") }
+        $childCommand = "# M24Backup.PesterChild`r`n. '{0}'; `$h=Enter-M24SingleInstance -Name '{1}'; try {{ if(`$h.Acquired){{[IO.File]::WriteAllText('{2}','ready'); while(-not [IO.File]::Exists('{3}')){{Start-Sleep -Milliseconds 50}}}} }} finally {{ Exit-M24SingleInstance -Handle `$h }}" -f `
+            (& $escape $shared), (& $escape $name), (& $escape $ready), (& $escape $release)
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $startInfo.Arguments = (@('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', $childCommand) |
+            ForEach-Object { ConvertTo-M24ProcessArgument ([string]$_) }) -join ' '
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $child = New-Object System.Diagnostics.Process
+        $child.StartInfo = $startInfo
+        try {
+            [void]$child.Start()
+            $deadline = [datetime]::UtcNow.AddSeconds(5)
+            while (-not (Test-Path -LiteralPath $ready) -and [datetime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
+            Test-Path -LiteralPath $ready | Should -BeTrue
+            $contender = Enter-M24SingleInstance -Name $name
+            try { $contender.Acquired | Should -BeFalse } finally { Exit-M24SingleInstance -Handle $contender }
+        } finally {
+            [System.IO.File]::WriteAllText($release, 'release')
+            if (-not $child.WaitForExit(2000)) { $child.Kill(); [void]$child.WaitForExit(2000) }
+            $child.Dispose()
+        }
     }
 }
 
@@ -1057,5 +1195,56 @@ Describe 'GUI worker launch and drive discovery contract' {
         $driveCatch | Should -Not -BeNullOrEmpty
         $driveCatch.Extent.Text | Should -Match ([regex]::Escape('[DateTime]::UtcNow.AddSeconds(30)'))
         $driveCatch.Extent.Text | Should -Match ([regex]::Escape('$driveInfoLabel.Text'))
+    }
+
+    It 'invalidates both drive snapshots after discovery failure' {
+        $driveCatch = $script:updateDriveList.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.CatchClauseAst]
+            }, $true)
+        $driveCatch | Should -Not -BeNullOrEmpty
+        $driveCatch.Extent.Text | Should -Match ([regex]::Escape('$script:driveSnapshot = $null'))
+        $driveCatch.Extent.Text | Should -Match ([regex]::Escape("`$script:driveLogicalSnapshot = ''"))
+    }
+
+    It 'uses expandable strings for line breaks in the mutex failure dialog' {
+        $script:guiText | Should -Match 'L\s+"Die Einzelinstanz-Sperre[^\r\n]+`r`n\{0\}"\s+"The single-instance guard[^\r\n]+`r`n\{0\}"'
+        $script:guiText | Should -Not -Match "L\s+'Die Einzelinstanz-Sperre[^']*`r`n"
+    }
+
+    It 'passes exact GUI ownership and the Verify policy to restore workers' {
+        $script:launchTryText | Should -Match ([regex]::Escape("'-ParentProcessStartTimeUtcTicks'"))
+        $script:launchTryText | Should -Match ([regex]::Escape("@('-RestoreIntegrityPolicy', 'Verify')"))
+    }
+
+    It 'uses distinct restore approval values while retaining scan-warning continue' {
+        $script:guiText | Should -Match 'continue-verified'
+        $script:guiText | Should -Match 'verify-then-continue'
+        $script:guiText | Should -Match 'continue-unverified'
+        $script:guiText | Should -Match "SCANWARNUNG[\s\S]+-Value 'continue'"
+    }
+
+    It 'acquires and releases the per-user GUI mutex' {
+        $script:guiText | Should -Match 'Enter-M24SingleInstance'
+        $script:guiText | Should -Match 'WindowsIdentity.*GetCurrent'
+        $script:guiText | Should -Match 'Exit-M24SingleInstance'
+    }
+
+    It 'collects layered identity and refuses ambiguous automatic matches' {
+        $script:updateDriveListText | Should -Match 'M24VolumeGuid'
+        $script:updateDriveListText | Should -Match 'M24DiskUniqueId'
+        $script:updateDriveListText | Should -Match 'knownCandidates\.Count -eq 1'
+        $script:updateDriveListText | Should -Match 'M24KnownMatchAmbiguous'
+    }
+}
+
+Describe 'Dual-runtime CI process cleanup contract' {
+    It 'checks command-line-marked Pester children after both runtime runs' {
+        $workflow = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) '.github\workflows\powershell.yml') -Raw
+        ([regex]::Matches($workflow, 'Check test child cleanup \(')).Count | Should -Be 2
+        ([regex]::Matches($workflow, [regex]::Escape("CommandLine -match 'M24Backup\.PesterChild'"))).Count | Should -Be 2
+        $workflow | Should -Match '\$_.ProcessId -ne \$PID'
+        $testSource = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'tests\M24Backup.Shared.Tests.ps1') -Raw
+        ([regex]::Matches($testSource, 'M24Backup\.PesterChild')).Count | Should -BeGreaterOrEqual 2
     }
 }

@@ -10,15 +10,23 @@ permissions:
 jobs:
   test:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install test tools
+      - name: Install test tools (Windows PowerShell 5.1)
         shell: powershell
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
           Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser -SkipPublisherCheck
-          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser
+
+      - name: Install test tools (PowerShell 7)
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser -SkipPublisherCheck
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser
 
       - name: Run PSScriptAnalyzer
         shell: powershell
@@ -27,7 +35,7 @@ jobs:
           $results | Format-Table -AutoSize
           if ($results) { throw "PSScriptAnalyzer reported $($results.Count) error(s)." }
 
-      - name: Run Pester
+      - name: Run Pester (Windows PowerShell 5.1)
         shell: powershell
         run: |
           $config = New-PesterConfiguration
@@ -35,3 +43,47 @@ jobs:
           $config.Run.Exit = $true
           $config.Output.Verbosity = 'Detailed'
           Invoke-Pester -Configuration $config
+
+      - name: Check test child cleanup (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $leaked = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction Stop |
+            Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'M24Backup\.PesterChild' })
+          if ($leaked) {
+            $leaked | Select-Object ProcessId, Name, CommandLine | Format-List
+            throw "Pester left $($leaked.Count) marked child process(es) running."
+          }
+
+      - name: Run Pester (PowerShell 7)
+        shell: pwsh
+        run: |
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'tests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
+
+      - name: Check test child cleanup (PowerShell 7)
+        shell: pwsh
+        run: |
+          $leaked = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction Stop |
+            Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'M24Backup\.PesterChild' })
+          if ($leaked) {
+            $leaked | Select-Object ProcessId, Name, CommandLine | Format-List
+            throw "Pester left $($leaked.Count) marked child process(es) running."
+          }
+
+      - name: Build portable package
+        shell: powershell
+        run: |
+          .\build.ps1 -Version 0.0.0-ci -SkipInstaller
+          $zip = Get-Item -LiteralPath 'dist\Bibliothekssicherung-Portable-0.0.0-ci.zip' -ErrorAction Stop
+          $sums = Get-Content -LiteralPath 'dist\SHA256SUMS.txt' -ErrorAction Stop
+          $expectedHash = (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sums -notcontains "$expectedHash  $($zip.Name)") { throw 'Portable ZIP checksum is missing or incorrect.' }
+          $expanded = Join-Path $env:RUNNER_TEMP 'm24-portable-smoke'
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath $expanded -Force
+          $root = Get-ChildItem -LiteralPath $expanded -Directory | Select-Object -First 1
+          foreach ($relativePath in @('Bibliothekssicherung-GUI.ps1', 'Bibliothekssicherung.ps1', 'M24Backup.Shared.ps1', 'Bibliothekssicherung starten.vbs', 'app.ico', 'LICENSE', 'version.txt', 'Hilfe\index.de.html', 'Hilfe\index.en.html')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $root.FullName $relativePath) -PathType Leaf)) { throw "Missing portable file: $relativePath" }
+          }

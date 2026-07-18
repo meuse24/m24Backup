@@ -13,6 +13,9 @@ param(
     [string]$Mode = 'Backup',
     # GUI-Prozess fuer einen Restore-Handshake ohne starren Timeout.
     [int]$ParentProcessId = 0,
+    # Exakte Prozessidentitaet; verhindert, dass eine wiederverwendete PID als
+    # weiterhin laufende GUI akzeptiert wird.
+    [int64]$ParentProcessStartTimeUtcTicks = 0,
     # Optionales Ziellaufwerk. Akzeptiert zum Beispiel E, E: oder E:\.
     [string]$UsbDrive,
     # Unterdrueckt Auswahl und Rueckfrage; -UsbDrive sollte dann angegeben sein.
@@ -39,6 +42,9 @@ param(
     # BitLocker-Abfrage, keine Kopierwiederholungen; Thread-Standard 32.
     # Nur fuer -Mode Backup und nicht zusammen mit -DryRun zulaessig.
     [switch]$SuperFast,
+    # CLI bleibt kompatibel; die GUI verwendet den sicheren Verify-Standard.
+    [ValidateSet('Verify', 'RequireVerified', 'Warn')]
+    [string]$RestoreIntegrityPolicy = 'Warn',
     # Anzahl der parallelen Robocopy-Threads.
     [int]$Threads = 8
 )
@@ -46,6 +52,8 @@ param(
 # Behandelt auch Fehler ausserhalb einzelner Funktionen als Abbruch.
 $ErrorActionPreference = 'Stop'
 $script:backupMetadataStarted = $false
+$script:cancellationMonitor = $null
+$script:lastCancellationReason = $null
 $sharedScript = Join-Path $PSScriptRoot 'M24Backup.Shared.ps1'
 if (Test-Path -LiteralPath $sharedScript -PathType Leaf) {
     . $sharedScript
@@ -86,6 +94,7 @@ function New-BackupResultRecord {
     $record = [ordered]@{
         Success = $false
         Cancelled = $false
+        CancellationReason = $script:lastCancellationReason
         Mode = $Mode
         DryRun = $DryRun.IsPresent
         SuperFast = $SuperFast.IsPresent
@@ -97,6 +106,10 @@ function New-BackupResultRecord {
         ScannedFiles = $(if ($performed -and $scan) { $scan.FileCount } else { $null })
         PlannedFiles = $(if ($performed -and $scan) { $scan.RequiredFileCount } else { $null })
         PlannedBytes = $(if ($performed -and $scan) { $scan.RequiredBytes } else { $null })
+        IntegrityPolicy = $(if ($Mode -eq 'Restore') { $RestoreIntegrityPolicy } else { $null })
+        IntegrityVerified = [bool](Get-Variable -Name restoreIntegrityVerified -ValueOnly -ErrorAction SilentlyContinue)
+        IntegrityOverride = [bool](Get-Variable -Name restoreIntegrityOverride -ValueOnly -ErrorAction SilentlyContinue)
+        IntegrityVerificationPerformed = [bool](Get-Variable -Name restoreIntegrityVerificationPerformed -ValueOnly -ErrorAction SilentlyContinue)
         FinishedAt = (Get-Date).ToString('o')
     }
     foreach ($key in $Values.Keys) { $record[$key] = $Values[$key] }
@@ -206,6 +219,82 @@ function Write-BackupStatus {
     }
 }
 
+$script:cancellationMonitor = New-M24CancellationMonitor
+
+function Get-WorkerCancellationState {
+    param([switch]$ForceOwnerCheck)
+    return Get-M24CancellationState -CancelFile $CancelFile -ParentProcessId $ParentProcessId `
+        -ParentProcessStartTimeUtcTicks $ParentProcessStartTimeUtcTicks -Monitor $script:cancellationMonitor `
+        -MinimumOwnerCheckIntervalMilliseconds $(if ($ForceOwnerCheck) { 0 } else { 2000 })
+}
+
+function Get-WorkerFinalCancellationState {
+    $state = Get-WorkerCancellationState
+    if (-not $state.Requested -and $ParentProcessId -gt 0 -and [int]$script:cancellationMonitor.ConsecutiveOwnerFailures -gt 0) {
+        # Nur im Verdachtsfall warten: Ein Erfolg darf nicht zwischen dem
+        # ersten fehlgeschlagenen Owner-Check und dessen Entprellung festgeschrieben werden.
+        Start-Sleep -Milliseconds 2000
+        $state = Get-WorkerCancellationState -ForceOwnerCheck
+    }
+    return $state
+}
+
+function Get-WorkerCancellationMessage {
+    param([string]$Reason)
+    if ($Reason -eq 'GuiExited') {
+        return M 'Die Bedienoberflaeche wurde unerwartet geschlossen; der Vorgang wurde kontrolliert beendet.' 'The user interface closed unexpectedly; the operation was stopped safely.'
+    }
+    return $(if ($Mode -eq 'Restore') { M 'Wiederherstellung wurde auf Wunsch beendet.' 'Restore was cancelled by request.' } else { M 'Sicherung wurde auf Wunsch beendet.' 'Backup was cancelled by request.' })
+}
+
+function Stop-M24CancelledOperation {
+    param(
+        $State,
+        [string]$InterruptedFolder,
+        [bool]$HardStopped = $false
+    )
+    if (-not $State -or -not $State.Requested) { return }
+    $script:lastCancellationReason = [string]$State.Reason
+    $message = Get-WorkerCancellationMessage -Reason $script:lastCancellationReason
+    Write-BackupStatus -Type 'ABGEBROCHEN' -Text $message
+
+    $metadata = Get-Variable -Name metadataFile -ValueOnly -ErrorAction SilentlyContinue
+    if ($Mode -eq 'Backup' -and -not $DryRun -and $script:backupMetadataStarted -and $metadata) {
+        try { Set-BackupResultMetadata -Path $metadata -Result $(if ($script:lastCancellationReason -eq 'GuiExited') { 'Nach Schliessen der Bedienoberflaeche abgebrochen' } else { 'Vom Benutzer abgebrochen' }) } catch {}
+    }
+    $log = Get-Variable -Name logFile -ValueOnly -ErrorAction SilentlyContinue
+    if ($log) {
+        try { Add-Content -LiteralPath $log -Encoding Unicode -Value ("Abbruchgrund: {0}. {1}" -f $script:lastCancellationReason, $message) } catch {}
+    }
+    if ($ResultFile) {
+        try {
+            $values = @{
+                Cancelled = $true; CancellationReason = $script:lastCancellationReason; Message = $message
+                Destination = $(Get-Variable -Name destination -ValueOnly -ErrorAction SilentlyContinue)
+                LogFile = $log; InterruptedFolder = $InterruptedFolder
+                HardStopped = $HardStopped; PartialFilesMayRemain = $HardStopped
+            }
+            $started = Get-Variable -Name backupStartedAt -ValueOnly -ErrorAction SilentlyContinue
+            if ($started) { $values.StartedAt = $started.ToString('o') }
+            foreach ($resultArray in @('successfulFolders', 'foldersWithHints', 'failedFolders', 'robocopyWarnings')) {
+                $resultArrayValue = Get-Variable -Name $resultArray -ValueOnly -ErrorAction SilentlyContinue
+                if ($null -ne $resultArrayValue) {
+                    $resultName = switch ($resultArray) {
+                        'successfulFolders' { 'SuccessfulFolders' }
+                        'foldersWithHints' { 'HintFolders' }
+                        'failedFolders' { 'FailedFolders' }
+                        'robocopyWarnings' { 'RobocopyWarnings' }
+                    }
+                    $values[$resultName] = @($resultArrayValue)
+                }
+            }
+            New-BackupResultRecord -Values $values | Write-AtomicJsonFile -Path $ResultFile -Depth 4
+        } catch {}
+    }
+    Exit-OperationLock
+    exit 20
+}
+
 function Set-ProcessArguments {
     param(
         [System.Diagnostics.ProcessStartInfo]$StartInfo,
@@ -246,7 +335,8 @@ function Invoke-RobocopyWithCancel {
         }
 
         while (-not $process.WaitForExit(500)) {
-            if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
+            $cancellation = Get-WorkerCancellationState
+            if ($cancellation.Requested) {
                 Write-BackupStatus -Type 'ABBRUCHLAEUFT' -Text ("{0}|{1}|{2}" -f $CurrentFolder, $TotalFolders, $FolderName)
                 try {
                     if (-not $process.HasExited) { $process.Kill() }
@@ -264,7 +354,7 @@ function Invoke-RobocopyWithCancel {
                     }
                     Write-BackupStatus -Type 'ABBRUCHWARTET' -Text ("{0}|{1}|{2}|{3}" -f $CurrentFolder, $TotalFolders, $FolderName, $waitedSeconds)
                 }
-                return [pscustomobject]@{ Cancelled = $true; ExitCode = 20; HardStopped = $true }
+                return [pscustomobject]@{ Cancelled = $true; CancellationState = $cancellation; ExitCode = 20; HardStopped = $true }
             }
 
             $now = Get-Date
@@ -283,7 +373,8 @@ function Invoke-RobocopyWithCancel {
 function Wait-GuiApproval {
     param(
         [string]$CancelMessage,
-        [string]$ClosedMessage
+        [string]$ClosedMessage,
+        [string[]]$AllowedValues = @('continue')
     )
 
     # Wartet auf die Freigabedatei der GUI. Abbruchsignal und ein Ende des
@@ -291,30 +382,16 @@ function Wait-GuiApproval {
     # gilt ein Zeitlimit von zehn Minuten.
     $approvalDeadline = (Get-Date).AddMinutes(10)
     while (-not (Test-Path -LiteralPath $ApprovalFile)) {
-        if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
-            if ($ResultFile) {
-                New-BackupResultRecord -Values @{ Cancelled = $true; Message = $CancelMessage } |
-                    Write-AtomicJsonFile -Path $ResultFile
-            }
-            Write-BackupStatus -Type 'ABGEBROCHEN' -Text $CancelMessage
-            exit 20
-        }
-        if ($ParentProcessId -gt 0) {
-            if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) {
-                if ($ResultFile) {
-                    New-BackupResultRecord -Values @{ Cancelled = $true; Message = $ClosedMessage } |
-                        Write-AtomicJsonFile -Path $ResultFile
-                }
-                Write-BackupStatus -Type 'ABGEBROCHEN' -Text $ClosedMessage
-                exit 20
-            }
-        } elseif ((Get-Date) -gt $approvalDeadline) {
+        $cancellation = Get-WorkerCancellationState
+        if ($cancellation.Requested) { Stop-M24CancelledOperation -State $cancellation }
+        if ($ParentProcessId -le 0 -and (Get-Date) -gt $approvalDeadline) {
             throw (M 'Die Freigabe ist abgelaufen.' 'The approval timed out.')
         }
         Start-Sleep -Milliseconds 200
     }
     $approvalValue = (Get-Content -LiteralPath $ApprovalFile -Raw -ErrorAction Stop).Trim()
-    if ($approvalValue -cne 'continue') { throw (M 'Die Freigabedatei enthaelt keine gueltige Bestaetigung.' 'The approval file does not contain a valid confirmation.') }
+    if ($AllowedValues -cnotcontains $approvalValue) { throw (M 'Die Freigabedatei enthaelt keine gueltige Bestaetigung.' 'The approval file does not contain a valid confirmation.') }
+    return $approvalValue
 }
 
 function Get-BackupPreflight {
@@ -322,7 +399,8 @@ function Get-BackupPreflight {
         [array]$Folders,
         [string[]]$ExcludedFiles,
         [ValidateSet('Backup', 'Restore')]
-        [string]$OperationMode = 'Backup'
+        [string]$OperationMode = 'Backup',
+        [scriptblock]$CancelCallback
     )
 
     [int64]$totalBytes = 0
@@ -340,6 +418,10 @@ function Get-BackupPreflight {
     $index = 0
 
     foreach ($folder in $Folders) {
+        if ($CancelCallback) {
+            $cancelState = & $CancelCallback
+            if ($cancelState.Requested) { return [pscustomobject]@{ Cancelled = $true; CancellationState = $cancelState } }
+        }
         $index++
         Write-BackupStatus -Type 'PRUEFUNG' -Text ("{0}|{1}|{2}" -f $index, @($Folders).Count, $folder.Name)
         try {
@@ -355,6 +437,10 @@ function Get-BackupPreflight {
             $pendingDirectories = New-Object 'System.Collections.Generic.Stack[System.IO.DirectoryInfo]'
             $pendingDirectories.Push((New-Object System.IO.DirectoryInfo($folder.Path)))
             while ($pendingDirectories.Count -gt 0) {
+                if ($CancelCallback) {
+                    $cancelState = & $CancelCallback
+                    if ($cancelState.Requested) { return [pscustomobject]@{ Cancelled = $true; CancellationState = $cancelState } }
+                }
                 $directory = $pendingDirectories.Pop()
                 $directoryErrors = @()
                 $entries = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction SilentlyContinue -ErrorVariable +directoryErrors)
@@ -362,6 +448,10 @@ function Get-BackupPreflight {
                     [void]$folderScanWarnings.Add($directoryError.Exception.Message)
                 }
                 foreach ($entry in $entries) {
+                    if ($CancelCallback) {
+                        $cancelState = & $CancelCallback
+                        if ($cancelState.Requested) { return [pscustomobject]@{ Cancelled = $true; CancellationState = $cancelState } }
+                    }
                     if ($entry.PSIsContainer) {
                         if ([string]$entry.LinkType -ne 'Junction') {
                             $pendingDirectories.Push([System.IO.DirectoryInfo]$entry)
@@ -842,9 +932,14 @@ $excludedFiles = @(Get-M24DefaultExcludedFiles)
 # und normale Sicherungen laufen unveraendert mit Vorpruefung.
 $preflightPerformed = -not $runPolicy.SkipPreflight
 $preflight = $null
+$initialCancellation = Get-WorkerCancellationState
+if ($initialCancellation.Requested) { Stop-M24CancelledOperation -State $initialCancellation }
 if ($preflightPerformed) {
-    $preflight = Get-BackupPreflight -Folders $backupFolders -ExcludedFiles $excludedFiles -OperationMode $Mode
+    $preflight = Get-BackupPreflight -Folders $backupFolders -ExcludedFiles $excludedFiles -OperationMode $Mode -CancelCallback { Get-WorkerCancellationState }
+    if ($preflight.Cancelled) { Stop-M24CancelledOperation -State $preflight.CancellationState }
 }
+$postPreflightCancellation = Get-WorkerCancellationState
+if ($postPreflightCancellation.Requested) { Stop-M24CancelledOperation -State $postPreflightCancellation }
 if ($preflightPerformed -and $preflight.ScanWarnings.Count -gt 0) {
     # Bei einer Wiederherstellung deuten Lesefehler auf dem Sicherungsmedium
     # auf einen Defekt hin; hier bleibt der Abbruch bestehen. Bei einer
@@ -897,11 +992,16 @@ if ($Mode -eq 'Backup' -and $fat32Warning -and $preflightPerformed -and $preflig
     throw ((M "FAT32 kann {0} ausgewaehlte Datei(en) ab 4 GB nicht speichern. Verwenden Sie exFAT oder NTFS. Beispiele: {1}" "FAT32 cannot store {0} selected file(s) of 4 GB or larger. Use exFAT or NTFS. Examples: {1}") -f $preflight.LargeFiles.Count, $examples)
 }
 
+$restoreIntegrityVerified = $false
+$restoreIntegrityOverride = $false
+$restoreIntegrityVerificationPerformed = $false
+$restoreVerificationRequired = $false
 if ($Mode -eq 'Restore') {
     # Integritaetsstatus fuer die Freigabeentscheidung: Gibt es ein
     # Pruefsummenmanifest und wann wurde es zuletzt vollstaendig geprueft?
     $checksumManifestExists = Test-Path -LiteralPath $checksumManifestFile -PathType Leaf
-    $checksumsVerifiedAt = Get-M24ChecksumVerifiedDate -MetadataFile $metadataFile
+    $checksumsVerifiedAt = if ($checksumManifestExists) { Get-M24ChecksumVerifiedDate -MetadataFile $metadataFile } else { $null }
+    $restoreIntegrityVerified = [bool]$checksumsVerifiedAt
     if ($PreviewFile) {
         [pscustomobject]@{
             MissingFiles = $preflight.MissingFileCount
@@ -912,12 +1012,33 @@ if ($Mode -eq 'Restore') {
             OverwriteExamples = @($preflight.OverwriteExamples)
             ChecksumManifestExists = $checksumManifestExists
             ChecksumsVerifiedAt = $checksumsVerifiedAt
+            RestoreIntegrityPolicy = $RestoreIntegrityPolicy
         } | Write-AtomicJsonFile -Path $PreviewFile -Depth 4
     }
     if ($Silent) {
         if (-not $ApprovalFile) { throw (M 'Im stillen Restore-Modus ist eine Freigabedatei erforderlich.' 'Silent restore mode requires an approval file.') }
         Write-BackupStatus -Type 'VORSCHAU' -Text (M 'Konfliktvorschau ist bereit.' 'Conflict preview is ready.')
-        Wait-GuiApproval -CancelMessage (M 'Wiederherstellung vor dem Kopieren abgebrochen.' 'Restore cancelled before copying.') -ClosedMessage (M 'Die Bedienoberflaeche wurde geschlossen.' 'The user interface was closed.')
+        $approvalValue = Wait-GuiApproval -CancelMessage (M 'Wiederherstellung vor dem Kopieren abgebrochen.' 'Restore cancelled before copying.') -ClosedMessage (M 'Die Bedienoberflaeche wurde geschlossen.' 'The user interface was closed.') `
+            -AllowedValues @('continue-verified', 'verify-then-continue', 'continue-unverified', 'continue', 'cancel')
+        $approvalDecision = Resolve-M24RestoreApproval -Policy $RestoreIntegrityPolicy -ApprovalValue $approvalValue `
+            -ManifestExists $checksumManifestExists -AlreadyVerified $restoreIntegrityVerified
+        if ($approvalDecision.Cancelled) {
+            Stop-M24CancelledOperation -State ([pscustomobject]@{ Requested = $true; Reason = 'User' })
+        }
+        if (-not $approvalDecision.Allowed) {
+            throw (M 'Die Restore-Freigabe entspricht nicht der gewaehlten Integritaetsrichtlinie.' 'The restore approval does not satisfy the selected integrity policy.')
+        }
+        $restoreVerificationRequired = [bool]$approvalDecision.RequiresVerification
+        $restoreIntegrityOverride = [bool]$approvalDecision.UnverifiedOverride
+    } elseif ($RestoreIntegrityPolicy -eq 'RequireVerified' -and -not $restoreIntegrityVerified) {
+        throw (M 'Die Wiederherstellung erfordert ein bereits erfolgreich geprueftes Backup.' 'Restore requires a backup that has already passed verification.')
+    } elseif ($RestoreIntegrityPolicy -eq 'Verify' -and -not $restoreIntegrityVerified) {
+        if (-not $checksumManifestExists) {
+            throw (M 'Die Wiederherstellung kann nicht geprueft werden, weil kein Pruefsummenmanifest vorhanden ist.' 'Restore cannot be verified because no checksum manifest exists.')
+        }
+        $restoreVerificationRequired = $true
+    } elseif ($RestoreIntegrityPolicy -eq 'Warn' -and -not $restoreIntegrityVerified) {
+        $restoreIntegrityOverride = $true
     }
 }
 
@@ -976,8 +1097,11 @@ if (-not $Silent) {
     }
 }
 
-# Erst nach der Bestaetigung wird auf das Ziellaufwerk geschrieben. Ein
-# abgelehnter Vorgang hinterlaesst so weder Ordner noch veraenderte Metadaten.
+$beforeLockCancellation = Get-WorkerCancellationState
+if ($beforeLockCancellation.Requested) { Stop-M24CancelledOperation -State $beforeLockCancellation }
+
+# Ab der Bestaetigung stabilisiert die Sperre den gesamten Bestand - auch
+# waehrend einer vorgeschalteten Restore-Integritaetspruefung.
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 $script:operationLockFile = Join-Path $destination '_backup.lock'
 try {
@@ -994,6 +1118,33 @@ try {
 } catch {
     Exit-OperationLock
     throw (M 'Fuer dieses Sicherungsziel laeuft bereits ein anderer Sicherungs- oder Wiederherstellungsvorgang.' 'Another backup or restore operation is already running for this destination.')
+}
+
+if ($Mode -eq 'Restore' -and $restoreVerificationRequired) {
+    Write-BackupStatus -Type 'RESTOREPRUEFUNG' -Text (M 'Backup-Integritaet wird vor der Wiederherstellung geprueft.' 'Backup integrity is being verified before restore.')
+    $restoreIntegrityVerificationPerformed = $true
+    # Das Manifest beschreibt den gesamten Backup-Bestand. Auch bei einer
+    # Teilwiederherstellung muss deshalb das komplette Backup geprüft werden;
+    # andernfalls würden Manifest-Einträge nicht ausgewählter Ordner fälschlich
+    # als fehlend gelten.
+    $restoreIntegrityFolders = @(Get-ChildItem -LiteralPath $destination -Directory -Force -ErrorAction Stop |
+        Where-Object { -not $_.Name.StartsWith('_') } |
+        ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.FullName } })
+    $verification = Test-M24ChecksumManifest -Folders $restoreIntegrityFolders -ManifestPath $checksumManifestFile -ExcludedFiles $excludedFiles `
+        -StatusCallback { param($current, $total, $name) Write-BackupStatus -Type 'RESTOREPRUEFUNG' -Text ("{0}|{1}|{2}" -f $current, $total, $name) } `
+        -CancelCallback { return (Get-WorkerCancellationState).Requested }
+    if ($verification.Cancelled) {
+        $verificationCancellation = Get-WorkerCancellationState
+        if (-not $verificationCancellation.Requested) { $verificationCancellation = [pscustomobject]@{ Requested = $true; Reason = 'User' } }
+        Stop-M24CancelledOperation -State $verificationCancellation
+    }
+    if ($verification.MissingManifest -or [int]$verification.ErrorCount -gt 0) {
+        $firstIntegrityError = @($verification.Errors | Select-Object -First 1)
+        throw ((M 'Die Integritaetspruefung ist fehlgeschlagen. Die Wiederherstellung wurde nicht gestartet. Erstes Problem: {0}' 'Integrity verification failed. Restore was not started. First problem: {0}') -f $firstIntegrityError)
+    }
+    Set-M24ChecksumVerifiedMetadata -MetadataFile $metadataFile
+    $restoreIntegrityVerified = $true
+    $checksumsVerifiedAt = Get-M24ChecksumVerifiedDate -MetadataFile $metadataFile
 }
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 if ($Mode -eq 'Backup' -and -not $DryRun) {
@@ -1034,25 +1185,14 @@ $cancelMessage = if ($Mode -eq 'Restore') { M 'Wiederherstellung wurde auf Wunsc
     ("Robocopy-Wiederholungen: /R:{0} /W:{1}" -f $runPolicy.RetryCount, $runPolicy.RetryWaitSeconds),
     ("Superschnell-Modus: {0}" -f $(if ($runPolicy.SuperFast) { 'Ja - Vorpruefung, Pruefsummen und BitLocker-Abfrage uebersprungen.' } else { 'Nein' })),
     ("Dry-Run: {0}" -f $(if ($DryRun) { 'Ja - es werden keine Nutzdaten kopiert.' } else { 'Nein' })),
+    $(if ($Mode -eq 'Restore') { "Restore-Integritaetsrichtlinie: $RestoreIntegrityPolicy" }),
+    $(if ($Mode -eq 'Restore') { "Restore-Integritaet bestaetigt: $restoreIntegrityVerified; ungepruefte Ausnahme: $restoreIntegrityOverride; Pruefung in diesem Lauf: $restoreIntegrityVerificationPerformed" }),
     ""
-) | Add-Content -LiteralPath $logFile -Encoding Unicode
+) | Where-Object { $null -ne $_ } | Add-Content -LiteralPath $logFile -Encoding Unicode
 
 foreach ($folder in $backupFolders) {
-    if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
-        Write-BackupStatus -Type 'ABGEBROCHEN' -Text (M 'Vorgang wurde auf Wunsch beendet.' 'Operation was cancelled by request.')
-        if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen' }
-        if ($ResultFile) {
-            New-BackupResultRecord -Values @{
-                Cancelled = $true; Message = $cancelMessage
-                Destination = $destination; LogFile = $logFile
-                StartedAt = $backupStartedAt.ToString('o')
-                SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
-                RobocopyWarnings = @($robocopyWarnings)
-            } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
-        }
-        Exit-OperationLock
-        exit 20
-    }
+    $folderCancellation = Get-WorkerCancellationState
+    if ($folderCancellation.Requested) { Stop-M24CancelledOperation -State $folderCancellation }
     $folderNumber++
     $target = $folder.TargetPath
     $displayFolderName = Get-M24FolderDisplayName $folder.Name $script:isGerman
@@ -1093,26 +1233,11 @@ foreach ($folder in $backupFolders) {
 
     $robocopyResult = Invoke-RobocopyWithCancel -Arguments $robocopyArgs -CancelFile $CancelFile -CurrentFolder $folderNumber -TotalFolders $folderCount -FolderName $folder.Name
     if ($robocopyResult.Cancelled) {
-        Write-BackupStatus -Type 'ABGEBROCHEN' -Text (M 'Vorgang wurde auf Wunsch beendet.' 'Operation was cancelled by request.')
-        if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen' }
-        if ($ResultFile) {
-            New-BackupResultRecord -Values @{
-                Cancelled = $true; Message = $cancelMessage
-                Destination = $destination; LogFile = $logFile
-                StartedAt = $backupStartedAt.ToString('o')
-                SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
-                RobocopyWarnings = @($robocopyWarnings)
-                InterruptedFolder = $folder.Name
-                HardStopped = [bool]$robocopyResult.HardStopped
-                PartialFilesMayRemain = [bool]$robocopyResult.HardStopped
-            } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
-        }
         Add-Content -LiteralPath $logFile -Encoding Unicode -Value ((M "Abbruch: Robocopy wurde waehrend '{0}' beendet." "Cancellation: Robocopy was stopped while processing '{0}'.") -f $displayFolderName)
         if ($robocopyResult.HardStopped) {
             Add-Content -LiteralPath $logFile -Encoding Unicode -Value (M "Warnung: Die zuletzt aktive Datei kann unvollstaendig im Ziel liegen. Starten Sie die Sicherung erneut oder pruefen Sie das Backup." "Warning: The last active file may remain incomplete at the destination. Run the backup again or verify the backup.")
         }
-        Exit-OperationLock
-        exit 20
+        Stop-M24CancelledOperation -State $robocopyResult.CancellationState -InterruptedFolder $folder.Name -HardStopped ([bool]$robocopyResult.HardStopped)
     }
     $code = [int]$robocopyResult.ExitCode
     if (($code -band 1) -ne 0) { $filesCopiedThisRun = $true }
@@ -1141,21 +1266,8 @@ foreach ($folder in $backupFolders) {
     }
 }
 
-if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
-    Write-BackupStatus -Type 'ABGEBROCHEN' -Text (M 'Vorgang wurde auf Wunsch beendet.' 'Operation was cancelled by request.')
-    if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen' }
-    if ($ResultFile) {
-        New-BackupResultRecord -Values @{
-            Cancelled = $true; Message = $cancelMessage
-            Destination = $destination; LogFile = $logFile
-            StartedAt = $backupStartedAt.ToString('o')
-            SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
-            RobocopyWarnings = @($robocopyWarnings)
-        } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
-    }
-    Exit-OperationLock
-    exit 20
-}
+$afterFoldersCancellation = Get-WorkerCancellationState
+if ($afterFoldersCancellation.Requested) { Stop-M24CancelledOperation -State $afterFoldersCancellation }
 
 Write-Host ""
 if ($maxCode -le 7) {
@@ -1179,16 +1291,11 @@ if ($maxCode -le 7) {
                 -ManifestPath $checksumManifestFile `
                 -ExcludedFiles $excludedFiles `
                 -StatusCallback { param($current, $total, $name) Write-BackupStatus -Type 'PRUEFSUMME' -Text ("{0}|{1}|{2}" -f $current, $total, $name) } `
-                -CancelCallback { return $CancelFile -and (Test-Path -LiteralPath $CancelFile) }
+                -CancelCallback { return (Get-WorkerCancellationState).Requested }
             if ($checksumResult.Cancelled) {
-                Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen'
-                Write-BackupStatus -Type 'ABGEBROCHEN' -Text $cancelMessage
-                if ($ResultFile) {
-                    New-BackupResultRecord -Values @{ Cancelled = $true; Message = $cancelMessage; Destination = $destination; LogFile = $logFile; StartedAt = $backupStartedAt.ToString('o'); SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @() } |
-                        Write-AtomicJsonFile -Path $ResultFile -Depth 4
-                }
-                Exit-OperationLock
-                exit 20
+                $checksumCancellation = Get-WorkerCancellationState
+                if (-not $checksumCancellation.Requested) { $checksumCancellation = [pscustomobject]@{ Requested = $true; Reason = 'User' } }
+                Stop-M24CancelledOperation -State $checksumCancellation
             }
             Add-Content -LiteralPath $logFile -Encoding Unicode -Value ((M "Pruefsummen: {0} Dateien; {1} neu berechnet; {2} wiederverwendet." "Checksums: {0} files; {1} recalculated; {2} reused.") -f $checksumResult.Files, $checksumResult.HashedFiles, $checksumResult.ReusedFiles)
             if ([int64]$checksumResult.SkippedDeviceFiles -gt 0) {
@@ -1196,6 +1303,8 @@ if ($maxCode -le 7) {
             }
         }
     }
+    $beforeSuccessCancellation = Get-WorkerFinalCancellationState
+    if ($beforeSuccessCancellation.Requested) { Stop-M24CancelledOperation -State $beforeSuccessCancellation }
     $finishedAt = Get-Date
     $remainingDisk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drive) -ErrorAction SilentlyContinue
     if ($Mode -eq 'Backup' -and -not $DryRun) {

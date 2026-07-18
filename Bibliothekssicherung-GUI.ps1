@@ -92,6 +92,28 @@ function Close-StartupSplash {
     $script:splashStatusLabel = $null
 }
 
+$script:guiInstanceHandle = $null
+try {
+    $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $sidBytes = [System.Text.Encoding]::UTF8.GetBytes($currentSid)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { $sidHash = ([BitConverter]::ToString($sha256.ComputeHash($sidBytes))).Replace('-', '').Substring(0, 16) } finally { $sha256.Dispose() }
+    $script:guiInstanceHandle = Enter-M24SingleInstance -Name ("Local\M24Backup.GUI.{0}" -f $sidHash)
+    if (-not $script:guiInstanceHandle.Acquired) {
+        [System.Windows.Forms.MessageBox]::Show(
+            (L 'Bibliothekssicherung ist bereits geöffnet.' 'Library Backup is already open.'),
+            (L 'Bereits geöffnet' 'Already open'), 'OK', 'Information') | Out-Null
+        Exit-M24SingleInstance -Handle $script:guiInstanceHandle
+        $script:guiInstanceHandle = $null
+        exit 0
+    }
+} catch {
+    [System.Windows.Forms.MessageBox]::Show(
+        ((L "Die Einzelinstanz-Sperre konnte nicht eingerichtet werden:`r`n{0}" "The single-instance guard could not be initialized:`r`n{0}") -f $_.Exception.Message),
+        (L 'Start fehlgeschlagen' 'Startup failed'), 'OK', 'Error') | Out-Null
+    exit 1
+}
+
 # Das Hauptfenster erscheint erst nach Laufwerks- und Metadatenabfragen. Der
 # Splashscreen gibt waehrend dieser Startphase sofort sichtbares Feedback.
 try {
@@ -161,6 +183,7 @@ $script:backupStartedAt = $null
 $script:backupCancelled = $false
 $script:driveMap = @{}
 $script:driveSnapshot = ''
+$script:driveLogicalSnapshot = ''
 $script:driveDeviceIds = @()
 # Nach einem Fehlschlag der Laufwerkserkennung pausiert das automatische
 # Polling bis zu diesem UTC-Zeitpunkt, damit eine haengende CIM-Abfrage die
@@ -501,15 +524,15 @@ function Get-NormalizedVolumeSerial {
 
 function Get-AppSettings {
     if (-not (Test-Path -LiteralPath $settingsFile -PathType Leaf)) {
-        return [ordered]@{ Version = 2; KnownBackupDrive = $null; FolderSelection = $null }
+        return [ordered]@{ Version = 3; KnownBackupDrive = $null; FolderSelection = $null }
     }
     try {
         $parsed = Get-Content -LiteralPath $settingsFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        return [ordered]@{ Version = 2; KnownBackupDrive = $parsed.KnownBackupDrive; FolderSelection = $parsed.FolderSelection }
+        return [ordered]@{ Version = 3; KnownBackupDrive = $parsed.KnownBackupDrive; FolderSelection = $parsed.FolderSelection }
     } catch {
         # Eine nur voruebergehend nicht lesbare Datei darf nicht ueberschrieben werden.
         $script:settingsWritable = $false
-        return [ordered]@{ Version = 2; KnownBackupDrive = $null; FolderSelection = $null }
+        return [ordered]@{ Version = 3; KnownBackupDrive = $null; FolderSelection = $null }
     }
 }
 
@@ -522,9 +545,16 @@ function Save-AppSettings {
 
 function Get-KnownBackupDrive {
     $known = $script:settings.KnownBackupDrive
-    if (-not $known -or -not $known.SerialNumber) { return $null }
+    if (-not $known) { return $null }
+    $legacySerial = if ($known.PSObject.Properties['VolumeSerialNumber']) { [string]$known.VolumeSerialNumber } else { [string]$known.SerialNumber }
+    if (-not $legacySerial -and -not $known.VolumeGuid -and -not $known.DiskUniqueId) { return $null }
     return [pscustomobject]@{
-        SerialNumber = ([string]$known.SerialNumber).Trim().Replace('-', '').ToUpperInvariant()
+        VolumeGuid = [string]$known.VolumeGuid
+        VolumeSerialNumber = $legacySerial.Trim().Replace('-', '').ToUpperInvariant()
+        DiskUniqueId = [string]$known.DiskUniqueId
+        DiskSerialNumber = [string]$known.DiskSerialNumber
+        SizeBytes = $(if ($known.SizeBytes) { [int64]$known.SizeBytes } else { $null })
+        FileSystem = [string]$known.FileSystem
         VolumeName = [string]$known.VolumeName
         LastDeviceId = [string]$known.LastDeviceId
         SavedAt = [string]$known.SavedAt
@@ -535,21 +565,25 @@ function Get-SavedFolderSelection { return $script:settings.FolderSelection }
 
 function Test-IsKnownBackupDrive {
     param($Disk)
-    $serial = Get-NormalizedVolumeSerial -Disk $Disk
-    return $script:knownDrive -and $serial -and
-        $serial.Equals($script:knownDrive.SerialNumber, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($Disk -and $Disk.PSObject.Properties['M24IsKnownBackupDrive']) { return [bool]$Disk.M24IsKnownBackupDrive }
+    return [bool](Compare-M24DriveFingerprint -Known $script:knownDrive -Candidate $Disk).IsMatch
 }
 
 function Save-KnownBackupDrive {
     param($Disk)
 
     $serial = Get-NormalizedVolumeSerial -Disk $Disk
-    if (-not $serial) {
+    if (-not $serial -and -not $Disk.M24VolumeGuid -and -not $Disk.M24DiskUniqueId) {
         throw (L 'Die Datenträger-ID konnte nicht gelesen werden.' 'The drive identifier could not be read.')
     }
 
     $knownDrive = [pscustomobject]@{
-        SerialNumber = $serial
+        VolumeGuid = [string]$Disk.M24VolumeGuid
+        VolumeSerialNumber = $serial
+        DiskUniqueId = [string]$Disk.M24DiskUniqueId
+        DiskSerialNumber = [string]$Disk.M24DiskSerialNumber
+        SizeBytes = [int64]$Disk.Size
+        FileSystem = [string]$Disk.FileSystem
         VolumeName = [string]$Disk.VolumeName
         LastDeviceId = [string]$Disk.DeviceID
         SavedAt = (Get-Date).ToString('o')
@@ -1709,20 +1743,38 @@ function Get-PhysicalDriveConnectionInfo {
     param($LogicalDisk)
 
     $busType = $null
+    $volumeGuid = ''
+    $diskUniqueId = ''
+    $diskSerialNumber = ''
     try {
         $driveLetter = ([string]$LogicalDisk.DeviceID).TrimEnd(':', '\')
         if ($driveLetter -match '^[A-Za-z]$') {
-            $storageDisk = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop |
-                Get-Disk -ErrorAction Stop |
-                Select-Object -First 1
-            if ($storageDisk) { $busType = [string]$storageDisk.BusType }
+            $partition = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop | Select-Object -First 1
+            $storageDisk = $partition | Get-Disk -ErrorAction Stop | Select-Object -First 1
+            if ($storageDisk) {
+                $busType = [string]$storageDisk.BusType
+                $diskUniqueId = [string]$storageDisk.UniqueId
+                $diskSerialNumber = [string]$storageDisk.SerialNumber
+            }
+            $volumeGuid = @($partition.AccessPaths | Where-Object { $_ -match '^\\\\\?\\Volume\{[0-9A-Fa-f-]+\}\\$' } | Select-Object -First 1)
+            if ($volumeGuid.Count) { $volumeGuid = [string]$volumeGuid[0] } else { $volumeGuid = '' }
         }
     } catch {
         # Die GUI bleibt auch auf Systemen ohne Storage-Cmdlets nutzbar. Ohne
         # physischen Bus-Typ wird ein Fixed Disk bewusst nicht als intern
         # behauptet und deshalb auch keine falsche Warnung angezeigt.
     }
-    return Get-M24DriveConnectionInfo -DriveType ([int]$LogicalDisk.DriveType) -BusType $busType
+    $connection = Get-M24DriveConnectionInfo -DriveType ([int]$LogicalDisk.DriveType) -BusType $busType
+    return [pscustomobject]@{
+        BusType = $connection.BusType
+        ConnectionKind = $connection.ConnectionKind
+        IsExternal = $connection.IsExternal
+        IsInternal = $connection.IsInternal
+        CanEject = $connection.CanEject
+        VolumeGuid = $volumeGuid
+        DiskUniqueId = $diskUniqueId.Trim()
+        DiskSerialNumber = $diskSerialNumber.Trim()
+    }
 }
 
 function Update-DriveList {
@@ -1754,15 +1806,12 @@ function Update-DriveList {
         # wuerde.
         $script:driveRetryAfterUtc = [DateTime]::MinValue
 
-        $knownDriveSnapshot = if ($script:knownDrive) { [string]$script:knownDrive.SerialNumber } else { '' }
-        $currentSnapshot = @($drives | ForEach-Object {
+        $knownDriveSnapshot = if ($script:knownDrive) { $script:knownDrive | ConvertTo-Json -Compress -Depth 3 } else { '' }
+        $logicalSnapshot = @($drives | ForEach-Object {
             "{0}|{1}|{2}|{3}|{4}|{5}" -f $_.DeviceID, $_.DriveType, $_.Size, $_.VolumeSerialNumber, $_.VolumeName, $_.FileSystem
         }) -join "`n"
-        $currentSnapshot = "{0}`n{1}" -f $knownDriveSnapshot, $currentSnapshot
-
-        if (-not $Force -and $script:driveSnapshot -eq $currentSnapshot) {
-            return
-        }
+        $logicalSnapshot = "{0}`n{1}" -f $knownDriveSnapshot, $logicalSnapshot
+        if (-not $Force -and $script:driveLogicalSnapshot -eq $logicalSnapshot) { return }
 
         foreach ($disk in $drives) {
             Set-StartupSplashStatus ((L 'Laufwerk {0} wird geprüft ...' 'Checking drive {0} ...') -f $disk.DeviceID)
@@ -1772,6 +1821,39 @@ function Update-DriveList {
             $disk | Add-Member -NotePropertyName M24IsExternal -NotePropertyValue $connection.IsExternal -Force
             $disk | Add-Member -NotePropertyName M24IsInternal -NotePropertyValue $connection.IsInternal -Force
             $disk | Add-Member -NotePropertyName M24CanEject -NotePropertyValue $connection.CanEject -Force
+            $disk | Add-Member -NotePropertyName M24VolumeGuid -NotePropertyValue $connection.VolumeGuid -Force
+            $disk | Add-Member -NotePropertyName M24DiskUniqueId -NotePropertyValue $connection.DiskUniqueId -Force
+            $disk | Add-Member -NotePropertyName M24DiskSerialNumber -NotePropertyValue $connection.DiskSerialNumber -Force
+        }
+
+        $currentSnapshot = @($drives | ForEach-Object {
+            "{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}" -f $_.DeviceID, $_.DriveType, $_.Size, $_.VolumeSerialNumber, $_.VolumeName, $_.FileSystem, $_.M24VolumeGuid, $_.M24DiskUniqueId
+        }) -join "`n"
+        $currentSnapshot = "{0}`n{1}" -f $knownDriveSnapshot, $currentSnapshot
+
+        $script:driveLogicalSnapshot = $logicalSnapshot
+        if (-not $Force -and $script:driveSnapshot -eq $currentSnapshot) { return }
+
+        $knownCandidates = @()
+        foreach ($disk in $drives) {
+            $candidateFingerprint = [pscustomobject]@{
+                VolumeGuid = [string]$disk.M24VolumeGuid
+                VolumeSerialNumber = Get-NormalizedVolumeSerial -Disk $disk
+                DiskUniqueId = [string]$disk.M24DiskUniqueId
+                DiskSerialNumber = [string]$disk.M24DiskSerialNumber
+                SizeBytes = [int64]$disk.Size
+                FileSystem = [string]$disk.FileSystem
+            }
+            $match = Compare-M24DriveFingerprint -Known $script:knownDrive -Candidate $candidateFingerprint
+            $disk | Add-Member -NotePropertyName M24KnownMatchConfidence -NotePropertyValue $match.Confidence -Force
+            $disk | Add-Member -NotePropertyName M24KnownMatchReason -NotePropertyValue $match.Reason -Force
+            if ($match.IsMatch) { $knownCandidates += $disk }
+        }
+        $knownMatchIsUnique = $knownCandidates.Count -eq 1
+        foreach ($disk in $drives) {
+            $isKnown = $knownMatchIsUnique -and $knownCandidates[0].DeviceID -eq $disk.DeviceID
+            $disk | Add-Member -NotePropertyName M24IsKnownBackupDrive -NotePropertyValue $isKnown -Force
+            $disk | Add-Member -NotePropertyName M24KnownMatchAmbiguous -NotePropertyValue ($knownCandidates.Count -gt 1) -Force
         }
 
         $previousDeviceIds = @($script:driveDeviceIds)
@@ -1804,6 +1886,12 @@ function Update-DriveList {
             if ($isKnownBackupDrive) {
                 $display = "★ {0}" -f $display
                 $preferredIndex = $driveCombo.Items.Count
+                if ($disk.M24KnownMatchConfidence -eq 'Legacy') {
+                    $display = "{0} ({1})" -f $display, (L 'Kennung wird nach erfolgreicher Sicherung aktualisiert' 'identity will be refreshed after a successful backup')
+                }
+            }
+            if ($disk.M24KnownMatchAmbiguous) {
+                $display = "? {0} ({1})" -f $display, (L 'bekanntes Laufwerk nicht eindeutig' 'known-drive match is ambiguous')
             }
             if ($backupIndex -lt 0 -and $hasCurrentProfileBackup) {
                 $backupIndex = $driveCombo.Items.Count
@@ -1848,6 +1936,10 @@ function Update-DriveList {
         # 2,5-Sekunden-Takt erneut pausieren laesst.
         $script:driveRetryAfterUtc = [DateTime]::UtcNow.AddSeconds(30)
         $script:driveSnapshot = $null
+        # Auch den vorgeschalteten Logical-Snapshot entwerten. Andernfalls
+        # würde die erste erfolgreiche Abfrage nach dem Backoff vor dem
+        # Wiederaufbau der zuvor geleerten Liste zurückkehren.
+        $script:driveLogicalSnapshot = ''
         $script:driveDeviceIds = @()
         $driveCombo.Items.Clear()
         $script:driveMap.Clear()
@@ -1916,9 +2008,15 @@ $startButton.Add_Click({
     }
 
     $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+    if ($backupRadio.Checked -and $disk.M24KnownMatchAmbiguous) {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            (L 'Mehrere angeschlossene Laufwerke passen zur gespeicherten Laufwerkskennung. Aus Sicherheitsgründen wurde keines automatisch als bekannt akzeptiert. Haben Sie die Auswahl geprüft und möchten trotzdem fortfahren?' 'Multiple connected drives match the saved drive identity. For safety, none was accepted automatically. Have you verified the selection and still want to continue?'),
+            (L 'Laufwerk nicht eindeutig' 'Ambiguous drive identity'), 'YesNo', 'Warning')
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    }
     $artifactCacheKey = "{0}|{1}" -f $disk.DeviceID, (Get-NormalizedVolumeSerial -Disk $disk)
     [void]$script:artifactCache.Remove($artifactCacheKey)
-    if ($backupRadio.Checked -and $script:knownDrive -and -not (Test-IsKnownBackupDrive -Disk $disk)) {
+    if ($backupRadio.Checked -and $script:knownDrive -and -not $disk.M24KnownMatchAmbiguous -and -not (Test-IsKnownBackupDrive -Disk $disk)) {
         $knownName = if ($script:knownDrive.VolumeName) { $script:knownDrive.VolumeName } else { $script:knownDrive.LastDeviceId }
         $answer = [System.Windows.Forms.MessageBox]::Show(
             ((L "Das ausgewählte Laufwerk ist nicht das bekannte Sicherungslaufwerk '{0}'.`r`n`r`nWenn die Sicherung erfolgreich ist, wird künftig dieses Laufwerk wiedererkannt. Trotzdem fortfahren?" "The selected drive is not the known backup drive '{0}'.`r`n`r`nIf the backup succeeds, this drive will be remembered instead. Continue anyway?") -f $knownName),
@@ -2020,6 +2118,7 @@ $startButton.Add_Click({
             '-File', $coreScript,
             '-Mode', $mode,
             '-ParentProcessId', $PID,
+            '-ParentProcessStartTimeUtcTicks', ([System.Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks),
             '-UsbDrive', $drive,
             '-Silent',
             '-StatusFile', $script:statusFile,
@@ -2029,6 +2128,7 @@ $startButton.Add_Click({
             '-ApprovalFile', $script:approvalFile,
             '-SelectedFoldersFile', $script:selectedFoldersFile
         )
+        if ($mode -eq 'Restore') { $argumentList += @('-RestoreIntegrityPolicy', 'Verify') }
         if ($script:activeDryRun) { $argumentList += '-DryRun' }
         if ($script:activeSuperFast) {
             # Der Worker erzwingt uebersprungene Pruefsummen selbst; ein
@@ -2151,8 +2251,25 @@ $timer.Add_Tick({
                                 }
                                 $answer = [System.Windows.Forms.MessageBox]::Show($message, (L "Wiederherstellung prüfen" "Review restore"), "YesNo", "Warning")
                                 if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
-                                    Set-Content -LiteralPath $script:approvalFile -Value 'continue' -Encoding ASCII
-                                    $statusLabel.Text = L "Wiederherstellung wird gestartet ..." "Starting restore ..."
+                                    $approvalValue = if (-not $manifestExists) {
+                                        $overrideAnswer = [System.Windows.Forms.MessageBox]::Show(
+                                            (L "Ohne Prüfsummenmanifest kann die Integrität des Backups nicht bestätigt werden. Beschädigte oder manipulierte Dateien könnten wiederhergestellt werden.`r`n`r`nTrotzdem ausdrücklich unbestätigt wiederherstellen?" "Without a checksum manifest, backup integrity cannot be confirmed. Corrupted or modified files could be restored.`r`n`r`nExplicitly continue with an unverified restore?"),
+                                            (L 'Unbestätigte Wiederherstellung' 'Unverified restore'),
+                                            'YesNo', 'Error', [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+                                        if ($overrideAnswer -eq [System.Windows.Forms.DialogResult]::Yes) { 'continue-unverified' } else { 'cancel' }
+                                    } elseif ($verifiedAt) {
+                                        'continue-verified'
+                                    } else {
+                                        'verify-then-continue'
+                                    }
+                                    if ($approvalValue -eq 'cancel') {
+                                        $script:backupCancelled = $true
+                                        Set-Content -LiteralPath $script:cancelFile -Value 'cancel' -Encoding ASCII
+                                        $statusLabel.Text = L "Wiederherstellung wird abgebrochen ..." "Cancelling restore ..."
+                                    } else {
+                                        Set-Content -LiteralPath $script:approvalFile -Value $approvalValue -Encoding ASCII
+                                        $statusLabel.Text = if ($approvalValue -eq 'verify-then-continue') { L 'Backup wird vor der Wiederherstellung geprüft ...' 'Verifying backup before restore ...' } else { L "Wiederherstellung wird gestartet ..." "Starting restore ..." }
+                                    }
                                 } else {
                                     $script:backupCancelled = $true
                                     Set-Content -LiteralPath $script:cancelFile -Value 'cancel' -Encoding ASCII
@@ -2204,6 +2321,16 @@ $timer.Add_Tick({
                         $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
                         $statusLabel.Text = if ($script:isGerman) { "Prüfsummen für Ordner $($parts[1]) von $($parts[2]): $displayFolder" } else { "Checksums for folder $($parts[1]) of $($parts[2]): $displayFolder" }
                         $resultBox.Text = L "Neue und geänderte Backup-Dateien werden mit SHA-256 erfasst ..." "New and changed backup files are being recorded with SHA-256 ..."
+                    }
+                    "RESTOREPRUEFUNG" {
+                        Start-BusyProgress
+                        if ($parts.Count -ge 4) {
+                            $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
+                            $statusLabel.Text = if ($script:isGerman) { "Prüfe Backup-Integrität für Ordner $($parts[1]) von $($parts[2]): $displayFolder" } else { "Verifying backup integrity for folder $($parts[1]) of $($parts[2]): $displayFolder" }
+                        } else {
+                            $statusLabel.Text = L 'Backup-Integrität wird geprüft ...' 'Verifying backup integrity ...'
+                        }
+                        $resultBox.Text = L 'Vor dem Wiederherstellen werden alle vorhandenen Prüfsummen kontrolliert.' 'All existing checksums are being validated before restore.'
                     }
                     "KOPIERVORGANG" {
                         Start-BusyProgress
@@ -2321,14 +2448,18 @@ $timer.Add_Tick({
             $verifyButton.Enabled = $destinationButton.Enabled
             $deleteBackupButton.Enabled = $destinationButton.Enabled
 
-            if ($script:backupCancelled) {
+            $resultCancellationReason = if ($result -and $result.PSObject.Properties['CancellationReason']) { [string]$result.CancellationReason } else { $null }
+            $operationWasCancelled = $script:backupCancelled -or ($result -and $result.PSObject.Properties['Cancelled'] -and [bool]$result.Cancelled)
+            if ($operationWasCancelled) {
                 $statusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
                 $statusLabel.Text = L "Vorgang wurde abgebrochen." "Operation was cancelled."
                 $interruptedFolder = if ($result -and $result.PSObject.Properties['InterruptedFolder'] -and $result.InterruptedFolder) { Get-M24FolderDisplayName ([string]$result.InterruptedFolder) $script:isGerman } else { $null }
                 $partialWarning = if ($result -and $result.PSObject.Properties['PartialFilesMayRemain'] -and [bool]$result.PartialFilesMayRemain) {
                     L " Die zuletzt aktive Datei kann unvollständig sein; starten Sie die Sicherung erneut oder prüfen Sie das Backup." " The last active file may be incomplete; run the backup again or verify the backup."
                 } else { "" }
-                $resultBox.Text = if ($interruptedFolder) {
+                $resultBox.Text = if ($resultCancellationReason -eq 'GuiExited') {
+                    L 'Der Vorgang wurde beendet, weil die zugehörige Bedienoberfläche nicht mehr verfügbar war.' 'The operation stopped because its owning user interface was no longer available.'
+                } elseif ($interruptedFolder) {
                     ((L "Vom Benutzer abgebrochen während: {0}." "Cancelled by the user while processing: {0}.") -f $interruptedFolder) + $partialWarning
                 } else {
                     (L "Vom Benutzer abgebrochen." "Cancelled by the user.") + $partialWarning
@@ -2419,7 +2550,7 @@ $timer.Add_Tick({
                 [System.Windows.Forms.MessageBox]::Show($errorText, (L "Fehler" "Error"), "OK", "Error") | Out-Null
             }
 
-            if ($script:backupCancelled) {
+            if ($operationWasCancelled) {
                 Show-CompletionNotification -Title (L 'Vorgang abgebrochen' 'Operation cancelled') -Text $resultBox.Text -Icon Warning
             } elseif ($exitCode -eq 0) {
                 Show-CompletionNotification -Title (L 'Vorgang abgeschlossen' 'Operation completed') -Text $resultBox.Text -Icon Info
@@ -2859,5 +2990,7 @@ Close-StartupSplash
         if ($resource) { try { $resource.Dispose() } catch {} }
     }
     if ($form) { try { $form.Dispose() } catch {} }
+    Exit-M24SingleInstance -Handle $script:guiInstanceHandle
+    $script:guiInstanceHandle = $null
 }
 if ($script:fatalGuiError) { exit 1 }

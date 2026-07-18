@@ -79,6 +79,13 @@ Describe 'Worker parameter invariants' {
         $command.Parameters['SuperFast'].ParameterType | Should -Be ([switch])
     }
 
+    It 'declares exact parent identity and restore integrity policy parameters' {
+        $command = Get-Command $script:workerScript
+        $command.Parameters['ParentProcessStartTimeUtcTicks'].ParameterType | Should -Be ([int64])
+        $command.Parameters['RestoreIntegrityPolicy'].ParameterType | Should -Be ([string])
+        @($command.Parameters['RestoreIntegrityPolicy'].Attributes.ValidValues) | Should -Be @('Verify', 'RequireVerified', 'Warn')
+    }
+
     It 'rejects -SuperFast for restore before resolving any drive' {
         $result = Invoke-WorkerProcess @('-Mode', 'Restore', '-SuperFast', '-Silent')
         $result.ExitCode | Should -Be 10
@@ -109,7 +116,7 @@ Describe 'Worker result contract' {
         $record.Cancelled | Should -Be $false
         $record.SuperFast | Should -Be $true
         $record.DryRun | Should -Be $true
-        foreach ($property in @('PreflightSkipped', 'ChecksumSkipped', 'ScannedFiles', 'PlannedFiles', 'PlannedBytes', 'Message', 'FinishedAt')) {
+        foreach ($property in @('PreflightSkipped', 'ChecksumSkipped', 'ScannedFiles', 'PlannedFiles', 'PlannedBytes', 'CancellationReason', 'IntegrityPolicy', 'IntegrityVerified', 'IntegrityOverride', 'IntegrityVerificationPerformed', 'Message', 'FinishedAt')) {
             $record.PSObject.Properties[$property] | Should -Not -BeNullOrEmpty -Because "result contract requires '$property'"
         }
         # Zahlen sind hier "nicht ermittelt" und muessen null sein, nicht 0.
@@ -129,7 +136,10 @@ Describe 'Worker result contract' {
                 $node.GetCommandName() -eq 'Write-AtomicJsonFile' -and
                 $node.Extent.Text -match '\$ResultFile'
         }, $true))
-        $resultWrites.Count | Should -BeGreaterThan 5
+        # Cancellation exits are intentionally centralized in
+        # Stop-M24CancelledOperation; all remaining writes still use the
+        # common record builder.
+        $resultWrites.Count | Should -BeGreaterOrEqual 4
         foreach ($write in $resultWrites) {
             $pipeline = $write.Parent
             $pipeline | Should -BeOfType [System.Management.Automation.Language.PipelineAst]
