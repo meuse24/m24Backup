@@ -48,8 +48,8 @@ verändern.
 4. Ziellaufwerk auswählen.
 5. Gewünschte Ordner markieren.
 6. Optional weitere Ordner hinzufügen.
-7. Optional Dry-Run, sicheren Auswurf, Prüfsummen oder den Superschnell-Modus
-   anpassen.
+7. Optional Dry-Run, sicheren Auswurf, Prüfsummen, den Superschnell-Modus oder
+   **Erinnern** beim Windows-Start anpassen.
 8. **Sicherung starten** klicken.
 9. Warten, bis der Status den Abschluss meldet.
 

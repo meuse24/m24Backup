@@ -45,7 +45,8 @@ start shows a notice and exits without changing anything.
 4. Select the destination drive.
 5. Select the folders to include.
 6. Optionally add more folders.
-7. Optionally adjust dry-run, safe eject, checksum, or super fast settings.
+7. Optionally adjust dry-run, safe eject, checksum, super fast, or the Windows
+   startup **Reminder** setting.
 8. Click **Start backup**.
 9. Wait for the completion message.
 

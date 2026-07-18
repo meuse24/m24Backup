@@ -6,6 +6,12 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ## [Unreleased]
 
+### Geändert
+
+- Die Kurzanleitung nennt die Windows-Start-Erinnerung nun ausdrücklich bei
+  den Optionen einer Sicherung, damit der vorhandene ausführliche Hilfeabschnitt
+  leichter auffindbar ist.
+
 ## [1.8.0] – 2026-07-18
 
 ### Hinzugefügt
