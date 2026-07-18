@@ -44,7 +44,8 @@ wenn ein sichtbares Konsolenfenster hilfreich ist.
 4. Ziellaufwerk auswählen.
 5. Gewünschte Ordner markieren.
 6. Optional weitere Ordner hinzufügen.
-7. Optional Dry-Run, sicheren Auswurf oder Prüfsummen-Option anpassen.
+7. Optional Dry-Run, sicheren Auswurf, Prüfsummen oder den Superschnell-Modus
+   anpassen.
 8. **Sicherung starten** klicken.
 9. Warten, bis der Status den Abschluss meldet.
 
@@ -106,6 +107,36 @@ aber keine Nutzdaten und aktualisiert keine erfolgreichen Sicherungsmetadaten.
 
 Ein Dry-Run eignet sich, wenn Sie vorab prüfen möchten, welche Dateien
 kopiert oder überschrieben würden.
+
+<a id="super-fast"></a>
+## Superschnell: maximale Geschwindigkeit ohne Prüfungen
+
+Die Option **Superschnell (ohne Prüfungen)** kopiert so schnell wie möglich und
+lässt dafür alle zeitaufwendigen Kontrollen weg:
+
+- keine Datei-Vorprüfung, damit auch keine dateibasierte Speicherplatzschätzung
+  und keine Vorabprüfung auf Dateien ab 4 GB bei FAT32,
+- keine Aktualisierung des SHA-256-Prüfsummenmanifests,
+- keine BitLocker-Statusabfrage,
+- keine Robocopy-Kopierwiederholungen (`/R:0`) und standardmäßig 32 parallele
+  Kopier-Threads.
+
+Robocopy entscheidet dann allein, welche Dateien kopiert werden müssen. Die
+Schutzgrenzen der Sicherung bleiben unverändert: Am Ziel wird weiterhin nichts
+gelöscht, Laufwerks- und Pfadprüfungen, Sperrdatei, Metadaten und Protokoll
+bleiben aktiv.
+
+Der Preis der Geschwindigkeit: Ein volles Ziellaufwerk oder eine zu große Datei
+auf FAT32 fällt erst während des Kopierens auf, und gesperrte Dateien werden
+sofort übersprungen statt erneut versucht. Das Prüfsummenmanifest bleibt auf dem
+vorherigen Stand; **Backup prüfen** kann danach fehlende oder veraltete
+Einträge melden, bis wieder eine Sicherung mit aktivierten Prüfsummen
+abgeschlossen wurde.
+
+Die Option gilt nur für Sicherungen, ist nicht mit **Nur simulieren (Dry-Run)**
+kombinierbar und ist nach jedem Start der App bewusst wieder abgeschaltet. Auf
+sehr langsamen USB-2-Sticks können viele parallele Threads kontraproduktiv
+sein; über die Kommandozeile lässt sich die Anzahl mit `-Threads` anpassen.
 
 <a id="custom-folders"></a>
 ## Eigene Ordner hinzufügen
@@ -282,6 +313,47 @@ Die folgenden Abschnitte dienen der Diagnose und Nachvollziehbarkeit.
 - `M24Backup.Shared.ps1`: gemeinsame Helfer für reservierte Namen und
   Pfadverschachtelung.
 
+<a id="command-line"></a>
+## Direkter Aufruf ohne GUI
+
+Für Skripte, Diagnose und manuell gesteuerte Läufe kann der Worker
+`Bibliothekssicherung.ps1` direkt in Windows PowerShell 5.1 gestartet werden.
+Ohne `-Silent` zeigt er Konsolenausgaben und stellt erforderliche Rückfragen.
+
+Beispiele:
+
+- Normale Sicherung auf `G:`: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Bibliothekssicherung.ps1" -Mode Backup -UsbDrive G:`
+- Superschnelle Sicherung: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast`
+- Superschnell mit 16 Threads: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast -Threads 16`
+- Nur simulieren: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -DryRun`
+- Ohne Manifestaktualisierung: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SkipChecksums`
+- Bestimmte Ordner: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SelectedFolders "Desktop|Dokumente|Bilder"`
+- Wiederherstellung: `.\Bibliothekssicherung.ps1 -Mode Restore -UsbDrive G:`
+
+### Öffentliche Worker-Parameter
+
+| Parameter | Bedeutung |
+| --- | --- |
+| `-Mode <Backup oder Restore>` | Vorgang auswählen; Standard ist `Backup`. |
+| `-UsbDrive G:` | Ziel für die Sicherung beziehungsweise Quelle für die Wiederherstellung. Akzeptiert zum Beispiel `G`, `G:` oder `G:\`. Ohne Angabe bietet der interaktive Worker geeignete Laufwerke zur Auswahl an. |
+| `-Silent` | Laufwerksauswahl und normale Rückfragen unterdrücken. Bei Scanwarnungen benötigt ein stilles Backup die GUI-Freigabedateien; ein stiller Restore benötigt immer einen Freigabekanal. Für direkte manuelle Restores daher nicht verwenden. |
+| `-SelectedFolders <Liste>` | Nur die mit einem Pipe-Zeichen getrennten kanonischen Ordnernamen verarbeiten. Standardnamen sind `Desktop`, `Dokumente`, `Downloads`, `Bilder`, `Musik`, `Videos`, `Favoriten`, `Gespeicherte Spiele` und `Kontakte`. |
+| `-SelectedFoldersFile <Datei>` | JSON-Auswahldatei verwenden; unterstützt auch die von der GUI übergebenen benutzerdefinierten Ordner. Dieses Format ist hauptsächlich für Automatisierung und die GUI vorgesehen. |
+| `-DryRun` | Backup mit Robocopy `/L` simulieren, ohne Nutzdaten oder erfolgreiche Backup-Metadaten zu schreiben. Nur mit `-Mode Backup`; nicht mit `-SuperFast`. |
+| `-SkipChecksums` | Nach einem erfolgreichen Backup `_Pruefsummen.tsv` nicht aktualisieren. Das vorhandene Manifest kann dadurch veralten. |
+| `-SuperFast` | Preflight, dateibasierte Speicherplatz-/4-GB-Prüfung, Prüfsummenaktualisierung und BitLocker-Abfrage auslassen; Robocopy ohne Wiederholung und standardmäßig mit 32 Threads starten. Nur für Backups und nicht mit `-DryRun`. |
+| `-Threads 1..128` | Anzahl paralleler Robocopy-Threads. Standard: 8; bei `-SuperFast` ohne explizite Angabe: 32. Ein expliziter Wert hat immer Vorrang. |
+
+`-ParentProcessId`, `-StatusFile`, `-ResultFile`, `-CancelFile`, `-PreviewFile`
+und `-ApprovalFile` bilden den internen Kommunikationskanal zwischen GUI und
+Worker. Für normale direkte Aufrufe sind sie nicht erforderlich. Bei eigener
+Automatisierung kann `-ResultFile` eine strukturierte JSON-Zusammenfassung
+liefern; die Status-, Abbruch- und Freigabedateien müssen als zusammengehöriges
+Protokoll implementiert werden und sollten nicht einzeln improvisiert werden.
+
+Unzulässige Kombinationen und Fehler liefern einen von null verschiedenen
+Exitcode. Die vollständige Tabelle steht im Abschnitt **Exit-Codes**.
+
 ## Tech-Stack
 
 - Windows PowerShell 5.1
@@ -363,5 +435,19 @@ Fehler auftrat.
 Die App sendet keine Daten an externe Dienste. Einstellungen werden lokal im
 Benutzerprofil gespeichert. Die Sicherungsdaten liegen unverschlüsselt auf
 dem gewählten Laufwerk; schützen Sie das Laufwerk entsprechend.
+
+## Autor und Credits
+
+- **Autor, Entwicklung und Pflege:** Günther Meusburger (meuse24), `github.com/meuse24`
+- **Quellcode und Beiträge:** `github.com/meuse24/m24Backup`
+- **Technische Grundlagen:** Windows PowerShell 5.1, Microsoft .NET Windows
+  Forms und Robocopy
+- **KI-CLI-Werkzeuge:** Claude Code, OpenAI Codex und Google Gemini CLI zur
+  Unterstützung bei Entwicklung, Review, Tests und Dokumentation
+- **Lizenz:** MIT-Lizenz, Copyright © 2026 Günther Meusburger (meuse24)
+
+Windows, PowerShell, .NET und Robocopy sind Produkte beziehungsweise
+Technologien von Microsoft. Ihre Nennung bedeutet keine Unterstützung oder
+Zertifizierung des Projekts durch Microsoft.
 
 

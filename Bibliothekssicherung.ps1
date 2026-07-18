@@ -6,6 +6,7 @@ Beispiele:
   .\Bibliothekssicherung.ps1
   .\Bibliothekssicherung.ps1 -UsbDrive E:
   .\Bibliothekssicherung.ps1 -UsbDrive E: -Silent
+  .\Bibliothekssicherung.ps1 -UsbDrive E: -Silent -SuperFast
 #>
 param(
     [ValidateSet('Backup', 'Restore')]
@@ -34,6 +35,10 @@ param(
     [switch]$DryRun,
     # Ueberspringt die automatische Aktualisierung des SHA-256-Pruefsummenmanifests.
     [switch]$SkipChecksums,
+    # Superschnelle Sicherung: keine Vorpruefung, keine Pruefsummen, keine
+    # BitLocker-Abfrage, keine Kopierwiederholungen; Thread-Standard 32.
+    # Nur fuer -Mode Backup und nicht zusammen mit -DryRun zulaessig.
+    [switch]$SuperFast,
     # Anzahl der parallelen Robocopy-Threads.
     [int]$Threads = 8
 )
@@ -66,6 +71,36 @@ function Write-AtomicJsonFile {
         $json = $Value | ConvertTo-Json -Depth $Depth
         Write-M24AtomicTextFile -Path $Path -Content ($json + [Environment]::NewLine)
     }
+}
+
+function New-BackupResultRecord {
+    # Einheitlicher Ergebnisvertrag: Jeder Exitpfad erhaelt dieselben
+    # Basisfelder; pfadspezifische Werte ergaenzen oder ueberschreiben sie.
+    # Die Funktion muss auch in der Trap funktionieren, wenn Policy oder
+    # Vorpruefung noch gar nicht existieren.
+    param([hashtable]$Values)
+
+    $policy = Get-Variable -Name runPolicy -ValueOnly -ErrorAction SilentlyContinue
+    $performed = [bool](Get-Variable -Name preflightPerformed -ValueOnly -ErrorAction SilentlyContinue)
+    $scan = Get-Variable -Name preflight -ValueOnly -ErrorAction SilentlyContinue
+    $record = [ordered]@{
+        Success = $false
+        Cancelled = $false
+        Mode = $Mode
+        DryRun = $DryRun.IsPresent
+        SuperFast = $SuperFast.IsPresent
+        PreflightSkipped = [bool]($policy -and $policy.SkipPreflight)
+        ChecksumSkipped = [bool]($Mode -eq 'Backup' -and -not $DryRun -and $policy -and $policy.SkipChecksums)
+        # $null bedeutet "nicht ermittelt" (z. B. Superschnell-Modus oder
+        # Abbruch vor der Vorpruefung); 0 wuerde faelschlich einen ermittelten
+        # leeren Kopierumfang behaupten.
+        ScannedFiles = $(if ($performed -and $scan) { $scan.FileCount } else { $null })
+        PlannedFiles = $(if ($performed -and $scan) { $scan.RequiredFileCount } else { $null })
+        PlannedBytes = $(if ($performed -and $scan) { $scan.RequiredBytes } else { $null })
+        FinishedAt = (Get-Date).ToString('o')
+    }
+    foreach ($key in $Values.Keys) { $record[$key] = $Values[$key] }
+    return [pscustomobject]$record
 }
 
 function Exit-OperationLock {
@@ -107,7 +142,7 @@ trap {
     }
     if ($ResultFile) {
         try {
-            [pscustomobject]@{ Success = $false; Cancelled = $false; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $_.Exception.Message; LogFile = $trapLogFile; FinishedAt = (Get-Date).ToString('o') } |
+            New-BackupResultRecord -Values @{ Message = $_.Exception.Message; LogFile = $trapLogFile } |
                 Write-AtomicJsonFile -Path $ResultFile
         } catch {}
     }
@@ -135,9 +170,12 @@ if (-not $Silent) {
     Clear-Host
 }
 
-if ($Threads -lt 1 -or $Threads -gt 128) {
-    throw (M "Der Parameter -Threads muss zwischen 1 und 128 liegen." "The -Threads parameter must be between 1 and 128.")
-}
+# Zentrale Lauf-Policy: lehnt unzulaessige Superfast-Kombinationen vor jeder
+# Laufwerksaufloesung ab und liefert die effektiven Kopierparameter
+# (Threads, Wiederholungen) sowie die zu ueberspringenden Pruefschritte.
+$runPolicy = Get-M24BackupRunPolicy -Mode $Mode -SuperFast:$SuperFast -DryRun:$DryRun -SkipChecksums:$SkipChecksums `
+    -ExplicitThreads $(if ($PSBoundParameters.ContainsKey('Threads')) { [int]$Threads } else { $null })
+$Threads = $runPolicy.Threads
 
 function Set-BackupResultMetadata {
     param(
@@ -255,7 +293,7 @@ function Wait-GuiApproval {
     while (-not (Test-Path -LiteralPath $ApprovalFile)) {
         if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
             if ($ResultFile) {
-                [pscustomobject]@{ Success = $false; Cancelled = $true; Mode = $Mode; Message = $CancelMessage } |
+                New-BackupResultRecord -Values @{ Cancelled = $true; Message = $CancelMessage } |
                     Write-AtomicJsonFile -Path $ResultFile
             }
             Write-BackupStatus -Type 'ABGEBROCHEN' -Text $CancelMessage
@@ -264,7 +302,7 @@ function Wait-GuiApproval {
         if ($ParentProcessId -gt 0) {
             if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) {
                 if ($ResultFile) {
-                    [pscustomobject]@{ Success = $false; Cancelled = $true; Mode = $Mode; Message = $ClosedMessage } |
+                    New-BackupResultRecord -Values @{ Cancelled = $true; Message = $ClosedMessage } |
                         Write-AtomicJsonFile -Path $ResultFile
                 }
                 Write-BackupStatus -Type 'ABGEBROCHEN' -Text $ClosedMessage
@@ -799,8 +837,15 @@ $fat32Warning = $fileSystem -eq "FAT32"
 # Unwichtige Windows-Metadaten und typische temporaere Dateien auslassen.
 $excludedFiles = @(Get-M24DefaultExcludedFiles)
 
-$preflight = Get-BackupPreflight -Folders $backupFolders -ExcludedFiles $excludedFiles -OperationMode $Mode
-if ($preflight.ScanWarnings.Count -gt 0) {
+# Im Superschnell-Modus entfaellt die dateibasierte Vorpruefung vollstaendig;
+# Robocopy bleibt dann die alleinige Instanz fuer den Kopierumfang. Restore
+# und normale Sicherungen laufen unveraendert mit Vorpruefung.
+$preflightPerformed = -not $runPolicy.SkipPreflight
+$preflight = $null
+if ($preflightPerformed) {
+    $preflight = Get-BackupPreflight -Folders $backupFolders -ExcludedFiles $excludedFiles -OperationMode $Mode
+}
+if ($preflightPerformed -and $preflight.ScanWarnings.Count -gt 0) {
     # Bei einer Wiederherstellung deuten Lesefehler auf dem Sicherungsmedium
     # auf einen Defekt hin; hier bleibt der Abbruch bestehen. Bei einer
     # Sicherung (z. B. gesperrte Datei) entscheidet der Benutzer.
@@ -832,7 +877,7 @@ if ($preflight.ScanWarnings.Count -gt 0) {
         }
     }
 }
-if (-not $DryRun) {
+if (-not $DryRun -and $preflightPerformed) {
     foreach ($targetRoot in $preflight.AdditionalByRoot.Keys) {
         # Die Zielwurzeln sind oben bereits als Laufwerksbuchstaben validiert.
         # Verglichen wird der Netto-Mehrbedarf: Zu ueberschreibende Zieldateien
@@ -847,7 +892,7 @@ if (-not $DryRun) {
         }
     }
 }
-if ($Mode -eq 'Backup' -and $fat32Warning -and $preflight.LargeFiles.Count -gt 0) {
+if ($Mode -eq 'Backup' -and $fat32Warning -and $preflightPerformed -and $preflight.LargeFiles.Count -gt 0) {
     $examples = @($preflight.LargeFiles | Select-Object -First 3) -join '; '
     throw ((M "FAT32 kann {0} ausgewaehlte Datei(en) ab 4 GB nicht speichern. Verwenden Sie exFAT oder NTFS. Beispiele: {1}" "FAT32 cannot store {0} selected file(s) of 4 GB or larger. Use exFAT or NTFS. Examples: {1}") -f $preflight.LargeFiles.Count, $examples)
 }
@@ -876,7 +921,11 @@ if ($Mode -eq 'Restore') {
     }
 }
 
-$bitLockerStatus = Get-BitLockerStatusText -Drive $drive
+$bitLockerStatus = if ($runPolicy.SkipBitLockerStatus) {
+    M 'BitLocker-Status: uebersprungen (Superschnell-Modus).' 'BitLocker status: skipped (super fast mode).'
+} else {
+    Get-BitLockerStatusText -Drive $drive
+}
 
 Write-Host ""
 Write-Host $(if ($Mode -eq 'Restore') { M 'Wiederhergestellt werden diese Benutzerordner:' 'These user folders will be restored:' } else { M 'Gesichert werden nur diese Benutzerordner:' 'Only these user folders will be backed up:' })
@@ -886,7 +935,11 @@ foreach ($folder in $backupFolders) {
 Write-Host ""
 Write-Host $(if ($Mode -eq 'Restore') { (M "Sicherungsquelle: {0}" "Backup source: {0}") -f $destination } else { (M "Ziel:   {0}" "Destination: {0}") -f $destination })
 Write-Host ((M "USB-Laufwerk: {0:N1} GB frei (Dateisystem: {1})" "USB drive: {0:N1} GB free (file system: {1})") -f $freeSpaceGb, $fileSystem)
-Write-Host ((M "Voraussichtlich zu kopieren: {0} Dateien, {1:N2} GB" "Expected copy volume: {0} files, {1:N2} GB") -f $preflight.RequiredFileCount, ($preflight.RequiredBytes / 1GB))
+if ($preflightPerformed) {
+    Write-Host ((M "Voraussichtlich zu kopieren: {0} Dateien, {1:N2} GB" "Expected copy volume: {0} files, {1:N2} GB") -f $preflight.RequiredFileCount, ($preflight.RequiredBytes / 1GB))
+} else {
+    Write-Host (M "Superschnell-Modus: Vorpruefung uebersprungen; das Kopiervolumen wird nicht vorab ermittelt." "Super fast mode: preflight skipped; the copy volume is not estimated in advance.")
+}
 Write-Host $bitLockerStatus
 Write-Host ""
 if ($Mode -eq 'Backup' -and $fat32Warning) {
@@ -978,6 +1031,8 @@ $cancelMessage = if ($Mode -eq 'Restore') { M 'Wiederherstellung wurde auf Wunsc
     $bitLockerStatus,
     "Hinweis: Geoeffnete/gesperrte Dateien werden ohne VSS ggf. uebersprungen.",
     "Threads: $Threads",
+    ("Robocopy-Wiederholungen: /R:{0} /W:{1}" -f $runPolicy.RetryCount, $runPolicy.RetryWaitSeconds),
+    ("Superschnell-Modus: {0}" -f $(if ($runPolicy.SuperFast) { 'Ja - Vorpruefung, Pruefsummen und BitLocker-Abfrage uebersprungen.' } else { 'Nein' })),
     ("Dry-Run: {0}" -f $(if ($DryRun) { 'Ja - es werden keine Nutzdaten kopiert.' } else { 'Nein' })),
     ""
 ) | Add-Content -LiteralPath $logFile -Encoding Unicode
@@ -987,10 +1042,10 @@ foreach ($folder in $backupFolders) {
         Write-BackupStatus -Type 'ABGEBROCHEN' -Text (M 'Vorgang wurde auf Wunsch beendet.' 'Operation was cancelled by request.')
         if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen' }
         if ($ResultFile) {
-            [pscustomobject]@{
-                Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $cancelMessage
+            New-BackupResultRecord -Values @{
+                Cancelled = $true; Message = $cancelMessage
                 Destination = $destination; LogFile = $logFile
-                StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o')
+                StartedAt = $backupStartedAt.ToString('o')
                 SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
                 RobocopyWarnings = @($robocopyWarnings)
             } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
@@ -1016,8 +1071,8 @@ foreach ($folder in $backupFolders) {
         "/XJ",
         "/FFT",
         "/MT:$Threads",
-        "/R:1",
-        "/W:3",
+        "/R:$($runPolicy.RetryCount)",
+        "/W:$($runPolicy.RetryWaitSeconds)",
         "/COPY:DAT",
         "/DCOPY:DAT",
         "/NP",
@@ -1041,10 +1096,10 @@ foreach ($folder in $backupFolders) {
         Write-BackupStatus -Type 'ABGEBROCHEN' -Text (M 'Vorgang wurde auf Wunsch beendet.' 'Operation was cancelled by request.')
         if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen' }
         if ($ResultFile) {
-            [pscustomobject]@{
-                Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $cancelMessage
+            New-BackupResultRecord -Values @{
+                Cancelled = $true; Message = $cancelMessage
                 Destination = $destination; LogFile = $logFile
-                StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o')
+                StartedAt = $backupStartedAt.ToString('o')
                 SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
                 RobocopyWarnings = @($robocopyWarnings)
                 InterruptedFolder = $folder.Name
@@ -1090,10 +1145,10 @@ if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) {
     Write-BackupStatus -Type 'ABGEBROCHEN' -Text (M 'Vorgang wurde auf Wunsch beendet.' 'Operation was cancelled by request.')
     if ($Mode -eq 'Backup' -and -not $DryRun) { Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen' }
     if ($ResultFile) {
-        [pscustomobject]@{
-            Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $DryRun.IsPresent; Message = $cancelMessage
+        New-BackupResultRecord -Values @{
+            Cancelled = $true; Message = $cancelMessage
             Destination = $destination; LogFile = $logFile
-            StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o')
+            StartedAt = $backupStartedAt.ToString('o')
             SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @($failedFolders)
             RobocopyWarnings = @($robocopyWarnings)
         } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
@@ -1106,8 +1161,13 @@ Write-Host ""
 if ($maxCode -le 7) {
     $checksumResult = $null
     if ($Mode -eq 'Backup' -and -not $DryRun) {
-        if ($SkipChecksums) {
-            Add-Content -LiteralPath $logFile -Encoding Unicode -Value (M "Pruefsummen: uebersprungen." "Checksums: skipped.")
+        if ($runPolicy.SkipChecksums) {
+            $checksumSkipNote = if ($runPolicy.SuperFast) {
+                M "Pruefsummen: wegen Superschnell-Modus uebersprungen." "Checksums: skipped because of super fast mode."
+            } else {
+                M "Pruefsummen: uebersprungen." "Checksums: skipped."
+            }
+            Add-Content -LiteralPath $logFile -Encoding Unicode -Value $checksumSkipNote
         } else {
             # Das Manifest beschreibt den gesamten additiven Zielbestand, nicht nur
             # die in diesem Lauf ausgewaehlten Ordner.
@@ -1124,7 +1184,7 @@ if ($maxCode -le 7) {
                 Set-BackupResultMetadata -Path $metadataFile -Result 'Vom Benutzer abgebrochen'
                 Write-BackupStatus -Type 'ABGEBROCHEN' -Text $cancelMessage
                 if ($ResultFile) {
-                    [pscustomobject]@{ Success = $false; Cancelled = $true; Mode = $Mode; DryRun = $false; Message = $cancelMessage; Destination = $destination; LogFile = $logFile; StartedAt = $backupStartedAt.ToString('o'); FinishedAt = (Get-Date).ToString('o'); SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @() } |
+                    New-BackupResultRecord -Values @{ Cancelled = $true; Message = $cancelMessage; Destination = $destination; LogFile = $logFile; StartedAt = $backupStartedAt.ToString('o'); SuccessfulFolders = @($successfulFolders); HintFolders = @($foldersWithHints); FailedFolders = @() } |
                         Write-AtomicJsonFile -Path $ResultFile -Depth 4
                 }
                 Exit-OperationLock
@@ -1173,11 +1233,8 @@ if ($maxCode -le 7) {
     Write-Host $(if ($Mode -eq 'Restore') { (M "Sicherungsquelle: {0}" "Backup source: {0}") -f $destination } else { (M "Ziel: {0}" "Destination: {0}") -f $destination })
     Write-Host "Log:  $logFile"
     if ($ResultFile) {
-        [pscustomobject]@{
+        New-BackupResultRecord -Values @{
             Success = $true
-            Cancelled = $false
-            Mode = $Mode
-            DryRun = $DryRun.IsPresent
             Message = $successMessage
             Destination = $destination
             LogFile = $logFile
@@ -1189,15 +1246,13 @@ if ($maxCode -le 7) {
             HintFolders = @($foldersWithHints)
             FailedFolders = @()
             RobocopyWarnings = @($robocopyWarnings)
-            ScannedFiles = $preflight.FileCount
-            PlannedFiles = $preflight.RequiredFileCount
-            PlannedBytes = $preflight.RequiredBytes
-            RemainingBytes = if ($remainingDisk) { [int64]$remainingDisk.FreeSpace } else { $null }
-            ScanWarnings = @($preflight.ScanWarnings)
-            ChecksumSkipped = ($Mode -eq 'Backup' -and -not $DryRun -and $SkipChecksums.IsPresent)
-            ChecksumFiles = if ($checksumResult) { $checksumResult.Files } else { 0 }
-            HashedFiles = if ($checksumResult) { $checksumResult.HashedFiles } else { 0 }
-            ReusedChecksums = if ($checksumResult) { $checksumResult.ReusedFiles } else { 0 }
+            RemainingBytes = $(if ($remainingDisk) { [int64]$remainingDisk.FreeSpace } else { $null })
+            # Array-Subexpression statt $(...): Letztere wuerde ein leeres
+            # Array zu AutomationNull entrollen und im JSON "{}" erzeugen.
+            ScanWarnings = @(if ($preflightPerformed) { $preflight.ScanWarnings })
+            ChecksumFiles = $(if ($checksumResult) { $checksumResult.Files } else { 0 })
+            HashedFiles = $(if ($checksumResult) { $checksumResult.HashedFiles } else { 0 })
+            ReusedChecksums = $(if ($checksumResult) { $checksumResult.ReusedFiles } else { 0 })
         } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
     }
     Exit-OperationLock
@@ -1219,24 +1274,16 @@ if ($ResultFile) {
     } else {
         M 'Vorgang mit Kopierfehlern beendet.' 'Operation finished with copy errors.'
     }
-    [pscustomobject]@{
-        Success = $false
-        Cancelled = $false
-        Mode = $Mode
-        DryRun = $DryRun.IsPresent
+    New-BackupResultRecord -Values @{
         Message = $failureResultMessage
         Destination = $destination
         LogFile = $logFile
         StartedAt = $backupStartedAt.ToString('o')
-        FinishedAt = (Get-Date).ToString('o')
         SuccessfulFolders = @($successfulFolders)
         HintFolders = @($foldersWithHints)
         FailedFolders = @($failedFolders)
         RobocopyWarnings = @($robocopyWarnings)
         PartialCopy = $partialCopy
-        ScannedFiles = $preflight.FileCount
-        PlannedFiles = $preflight.RequiredFileCount
-        PlannedBytes = $preflight.RequiredBytes
     } | Write-AtomicJsonFile -Path $ResultFile -Depth 4
 }
 Exit-OperationLock

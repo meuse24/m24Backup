@@ -19,6 +19,8 @@ Windows systems and in English on all other systems.
   starting.
 - Can simulate a backup with a dry run and show the planned changes in the log
   without copying user data.
+- Offers a super fast mode that skips preflight, checksum updates, and copy
+  retries when maximum speed matters more than advance checks.
 - Can include additional user-selected folders and restore them later through
   stored folder metadata.
 - Can safely eject a successfully used USB backup drive after completion.
@@ -77,7 +79,8 @@ directly on a backup drive.
 2. Select **Backup** mode and choose the destination drive.
 3. Select the folders to include, optionally use **Add folder...**, or enable
    **Simulate only (dry run)**.
-4. Optionally enable **Safely eject drive after success**.
+4. Optionally enable **Safely eject drive after success** or
+   **Super fast (skip checks)** for maximum speed without advance checks.
 5. Click **Start backup**, check the final status, and open the log if
    necessary.
 

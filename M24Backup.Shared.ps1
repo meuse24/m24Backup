@@ -19,6 +19,81 @@ function Get-M24DefaultExcludedFiles {
     return @('thumbs.db', 'desktop.ini', '*.tmp', '*.temp', '~$*')
 }
 
+function Get-M24DriveConnectionInfo {
+    # Win32_LogicalDisk.DriveType unterscheidet nur "removable" von "fixed".
+    # Externe USB-HDDs und -SSDs werden deshalb meist als DriveType 3 gemeldet.
+    # Erst der physische Bus-Typ erlaubt eine belastbare Einordnung.
+    param(
+        [int]$DriveType,
+        [AllowNull()]
+        [string]$BusType
+    )
+
+    $normalizedBusType = if ([string]::IsNullOrWhiteSpace($BusType)) { '' } else { $BusType.Trim() }
+    $externalBusTypes = @('USB', 'SD', 'MMC', '1394')
+    $internalBusTypes = @('ATA', 'SATA', 'SAS', 'NVMe', 'RAID', 'Storage Spaces')
+    $isExternalBus = $externalBusTypes -contains $normalizedBusType
+    $isRemovable = $DriveType -eq 2
+    $isInternal = $DriveType -eq 3 -and $internalBusTypes -contains $normalizedBusType
+    $connectionKind = if ($normalizedBusType -eq 'USB') {
+        'Usb'
+    } elseif ($isExternalBus) {
+        'External'
+    } elseif ($isRemovable) {
+        'Removable'
+    } elseif ($isInternal) {
+        'Internal'
+    } else {
+        # Ohne physischen Bus-Typ darf ein Fixed Disk nicht als intern
+        # behauptet werden. Das vermeidet Fehlwarnungen bei USB-Bridges.
+        'Unknown'
+    }
+
+    return [pscustomobject]@{
+        BusType = $normalizedBusType
+        ConnectionKind = $connectionKind
+        IsExternal = [bool]($isExternalBus -or $isRemovable)
+        IsInternal = [bool]$isInternal
+        CanEject = [bool]($isExternalBus -or $isRemovable)
+    }
+}
+
+function Get-M24BackupRunPolicy {
+    # Zentrale Lauf-Policy fuer den Sicherungs-Worker: validiert die
+    # Superfast-Kombinationen und liefert die effektiven Kopierparameter.
+    # ExplicitThreads ist $null, wenn -Threads nicht explizit angegeben wurde;
+    # nur dann darf der Superfast-Standard von 32 Threads greifen.
+    param(
+        [ValidateSet('Backup', 'Restore')]
+        [string]$Mode = 'Backup',
+        [switch]$SuperFast,
+        [switch]$DryRun,
+        [switch]$SkipChecksums,
+        [Nullable[int]]$ExplicitThreads = $null
+    )
+
+    $german = Test-M24GermanUiCulture
+    if ($SuperFast -and $Mode -ne 'Backup') {
+        throw $(if ($german) { 'Der Superschnell-Modus ist nur fuer Sicherungen verfuegbar.' } else { 'Super fast mode is only available for backups.' })
+    }
+    if ($SuperFast -and $DryRun) {
+        throw $(if ($german) { 'Der Superschnell-Modus kann nicht mit Dry-Run kombiniert werden.' } else { 'Super fast mode cannot be combined with dry run.' })
+    }
+    $threads = if ($null -ne $ExplicitThreads) { [int]$ExplicitThreads } elseif ($SuperFast) { 32 } else { 8 }
+    if ($threads -lt 1 -or $threads -gt 128) {
+        throw $(if ($german) { 'Der Parameter -Threads muss zwischen 1 und 128 liegen.' } else { 'The -Threads parameter must be between 1 and 128.' })
+    }
+    return [pscustomobject]@{
+        SuperFast = [bool]$SuperFast
+        Threads = $threads
+        RetryCount = $(if ($SuperFast) { 0 } else { 1 })
+        RetryWaitSeconds = $(if ($SuperFast) { 1 } else { 3 })
+        SkipPreflight = [bool]$SuperFast
+        SkipChecksums = [bool]($SkipChecksums -or $SuperFast)
+        SkipBitLockerStatus = [bool]$SuperFast
+    }
+}
+
 function Test-M24ReservedDeviceFileName {
     # Erkennt Dateinamen, die reservierten Windows-Geraetenamen entsprechen
     # (z. B. "nul", "con.txt"). Solche Dateien sind fast immer versehentlich

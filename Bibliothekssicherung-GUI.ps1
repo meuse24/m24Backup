@@ -64,6 +64,86 @@ $helpBuildFile = Join-Path $PSScriptRoot $(if ($script:isGerman) { 'build\stagin
 $helpFallbackFile = Join-Path $PSScriptRoot $(if ($script:isGerman) { 'docs\help.de.md' } else { 'docs\help.en.md' })
 $versionFile = Join-Path $PSScriptRoot 'version.txt'
 $appVersion = if (Test-Path -LiteralPath $versionFile -PathType Leaf) { (Get-Content -LiteralPath $versionFile -Raw).Trim() } else { '' }
+$logoFile = Join-Path $PSScriptRoot 'logo.jpg'
+$script:splashForm = $null
+$script:splashLogoImage = $null
+$script:splashStatusLabel = $null
+$script:mainWindowShown = $false
+$script:fatalGuiError = $false
+
+function Set-StartupSplashStatus {
+    param([string]$Text)
+    if (-not $script:splashForm -or $script:splashForm.IsDisposed) { return }
+    $script:splashStatusLabel.Text = $Text
+    $script:splashForm.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+}
+
+function Close-StartupSplash {
+    if ($script:splashForm) {
+        try { $script:splashForm.Close() } catch {}
+        try { $script:splashForm.Dispose() } catch {}
+        $script:splashForm = $null
+    }
+    if ($script:splashLogoImage) {
+        try { $script:splashLogoImage.Dispose() } catch {}
+        $script:splashLogoImage = $null
+    }
+    $script:splashStatusLabel = $null
+}
+
+# Das Hauptfenster erscheint erst nach Laufwerks- und Metadatenabfragen. Der
+# Splashscreen gibt waehrend dieser Startphase sofort sichtbares Feedback.
+try {
+    $script:splashForm = New-Object System.Windows.Forms.Form
+    $script:splashForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+    $script:splashForm.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $script:splashForm.ClientSize = New-Object System.Drawing.Size(390, 285)
+    $script:splashForm.BackColor = [System.Drawing.Color]::White
+    $script:splashForm.ShowInTaskbar = $false
+    $script:splashForm.TopMost = $true
+
+    $splashLogoBox = New-Object System.Windows.Forms.PictureBox
+    $splashLogoBox.Location = New-Object System.Drawing.Point(45, 18)
+    $splashLogoBox.Size = New-Object System.Drawing.Size(300, 205)
+    $splashLogoBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+    $splashLogoBox.BackColor = [System.Drawing.Color]::White
+    if (Test-Path -LiteralPath $logoFile -PathType Leaf) {
+        $splashLogoStream = [System.IO.File]::Open($logoFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $splashLogoSource = [System.Drawing.Image]::FromStream($splashLogoStream)
+            try { $script:splashLogoImage = New-Object System.Drawing.Bitmap($splashLogoSource) } finally { $splashLogoSource.Dispose() }
+        } finally { $splashLogoStream.Dispose() }
+        $splashLogoBox.Image = $script:splashLogoImage
+    }
+    $script:splashForm.Controls.Add($splashLogoBox)
+
+    $script:splashStatusLabel = New-Object System.Windows.Forms.Label
+    $script:splashStatusLabel.Text = L 'Bibliothekssicherung wird gestartet ...' 'Library Backup is starting ...'
+    $script:splashStatusLabel.Location = New-Object System.Drawing.Point(30, 229)
+    $script:splashStatusLabel.Size = New-Object System.Drawing.Size(330, 24)
+    $script:splashStatusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $script:splashStatusLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
+    $script:splashStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(31, 55, 74)
+    $script:splashForm.Controls.Add($script:splashStatusLabel)
+
+    $splashProgress = New-Object System.Windows.Forms.ProgressBar
+    $splashProgress.Location = New-Object System.Drawing.Point(45, 262)
+    $splashProgress.Size = New-Object System.Drawing.Size(300, 8)
+    $splashProgress.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+    $splashProgress.MarqueeAnimationSpeed = 24
+    $script:splashForm.Controls.Add($splashProgress)
+
+    $script:splashForm.Show()
+    $script:splashForm.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+} catch {
+    # Ein optionaler Splashscreen darf den eigentlichen Programmstart nie
+    # verhindern, etwa wenn das Logo auf einem langsamen Medium nicht lesbar ist.
+    Close-StartupSplash
+}
+
+try {
 $appIcon = $null
 $script:backupProcess = $null
 $script:statusFile = $null
@@ -85,6 +165,13 @@ $script:driveDeviceIds = @()
 $script:activeDrive = $null
 $script:activeMode = $null
 $script:activeDryRun = $false
+$script:activeSuperFast = $false
+# Verhindert Ereignis-Rekursion, wenn Update-BackupOptionState selbst
+# Checkbox-Zustaende setzt und dadurch CheckedChanged ausloest.
+$script:optionStateUpdating = $false
+# Merkt sich den Pruefsummen-Haken vor dem Aktivieren des Superschnell-Modus,
+# damit das blosse Ausprobieren der Option keine dauerhafte Aenderung bewirkt.
+$script:checksumBeforeSuperFast = $null
 $script:autoEjectRequested = $false
 $script:pendingEjectDrive = $null
 $script:ejectAttemptsRemaining = 0
@@ -618,7 +705,6 @@ function Get-BackupHealth {
     }
 }
 
-try {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = L "Bibliothekssicherung" "Library Backup"
 if ($appVersion) { $form.Text = "{0} {1}" -f $form.Text, $appVersion }
@@ -976,7 +1062,6 @@ $logoBox.Size = New-Object System.Drawing.Size(187, 164)
 $logoBox.SizeMode = 'Zoom'
 $logoBox.BackColor = $surfaceColor
 $logoBox.Anchor = 'Top, Right'
-$logoFile = Join-Path $PSScriptRoot 'logo.jpg'
 if (Test-Path -LiteralPath $logoFile -PathType Leaf) {
     # Ueber einen Stream laden und in ein unabhaengiges Bitmap kopieren,
     # damit die Datei nicht fuer die Prozesslaufzeit gesperrt bleibt.
@@ -992,19 +1077,21 @@ if (Test-Path -LiteralPath $logoFile -PathType Leaf) {
 }
 $form.Controls.Add($logoBox)
 
+# Kurze Bezeichnungen halten alle vier Optionen in einer Zeile; ausfuehrliche
+# Erklaerungen stehen bei den nicht selbsterklaerenden Modi im Tooltip.
 $optionsSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 418)) -Size (New-Object System.Drawing.Size(692, 34))
 
 $dryRunCheckBox = New-Object System.Windows.Forms.CheckBox
-$dryRunCheckBox.Text = L "Nur simulieren (Dry-Run)" "Simulate only (dry run)"
+$dryRunCheckBox.Text = L "Simulation" "Dry run"
 $dryRunCheckBox.AutoSize = $true
 $dryRunCheckBox.Location = New-Object System.Drawing.Point(30, 426)
 $dryRunCheckBox.BackColor = $surfaceColor
 $dryRunCheckBox.TabIndex = 12
 $form.Controls.Add($dryRunCheckBox)
 $ejectCheckBox = New-Object System.Windows.Forms.CheckBox
-$ejectCheckBox.Text = L "Laufwerk nach Erfolg sicher auswerfen" "Safely eject drive after success"
+$ejectCheckBox.Text = L "Nach Erfolg auswerfen" "Eject after success"
 $ejectCheckBox.AutoSize = $true
-$ejectCheckBox.Location = New-Object System.Drawing.Point(285, 426)
+$ejectCheckBox.Location = New-Object System.Drawing.Point(155, 426)
 $ejectCheckBox.BackColor = $surfaceColor
 $ejectCheckBox.TabIndex = 13
 $form.Controls.Add($ejectCheckBox)
@@ -1012,12 +1099,25 @@ $form.Controls.Add($ejectCheckBox)
 $checksumCheckBox = New-Object System.Windows.Forms.CheckBox
 $checksumCheckBox.Text = L "Prüfsummen" "Checksums"
 $checksumCheckBox.AutoSize = $true
-$checksumCheckBox.Location = New-Object System.Drawing.Point(570, 426)
+$checksumCheckBox.Location = New-Object System.Drawing.Point(385, 426)
 $checksumCheckBox.BackColor = $surfaceColor
 $checksumCheckBox.Checked = $true
 $checksumCheckBox.TabIndex = 14
 $checksumCheckBox.Anchor = "Top, Right"
 $form.Controls.Add($checksumCheckBox)
+
+$superFastCheckBox = New-Object System.Windows.Forms.CheckBox
+$superFastCheckBox.Text = L "Superschnell" "Super fast"
+$superFastCheckBox.AutoSize = $true
+$superFastCheckBox.Location = New-Object System.Drawing.Point(535, 426)
+$superFastCheckBox.BackColor = $surfaceColor
+$superFastCheckBox.TabIndex = 15
+$form.Controls.Add($superFastCheckBox)
+$optionsToolTip = New-Object System.Windows.Forms.ToolTip
+$optionsToolTip.AutoPopDelay = 20000
+$optionsToolTip.SetToolTip($superFastCheckBox, (L `
+    "Maximale Geschwindigkeit: keine Datei-Vorprüfung, keine Speicherplatz- und 4-GB-Dateiprüfung, keine Prüfsummenaktualisierung, keine BitLocker-Abfrage, keine Kopierwiederholungen. Fehler (z. B. volles Ziel) fallen ggf. erst beim Kopieren auf." `
+    "Maximum speed: no file preflight, no disk-space or 4 GB file check, no checksum update, no BitLocker query, no copy retries. Errors (e.g. a full destination) may only surface while copying."))
 $activitySurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 460)) -Size (New-Object System.Drawing.Size(692, 148))
 
 $statusCaption = New-Object System.Windows.Forms.Label
@@ -1109,7 +1209,7 @@ $startButton.FlatAppearance.BorderSize = 0
 $startButton.FlatAppearance.MouseOverBackColor = $accentHoverColor
 $startButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $startButton.Anchor = "Top, Left"
-$startButton.TabIndex = 15
+$startButton.TabIndex = 16
 $form.Controls.Add($startButton)
 $form.AcceptButton = $startButton
 
@@ -1125,7 +1225,7 @@ $logButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(
 $logButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $logButton.Enabled = $false
 $logButton.Anchor = "Top, Left"
-$logButton.TabIndex = 16
+$logButton.TabIndex = 17
 $form.Controls.Add($logButton)
 
 $closeButton = New-Object System.Windows.Forms.Button
@@ -1141,7 +1241,7 @@ $destinationButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::F
 $destinationButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 $destinationButton.Enabled = $false
 $destinationButton.Anchor = "Top, Left"
-$destinationButton.TabIndex = 17
+$destinationButton.TabIndex = 18
 $form.Controls.Add($destinationButton)
 
 $closeButton.Text = L "Schließen" "Close"
@@ -1153,7 +1253,7 @@ $closeButton.FlatAppearance.BorderSize = 1
 $closeButton.FlatAppearance.BorderColor = $buttonBorderColor
 $closeButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
 $closeButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
-$closeButton.TabIndex = 18
+$closeButton.TabIndex = 19
 $closeButton.Anchor = "Top, Right"
 $form.Controls.Add($closeButton)
 
@@ -1171,7 +1271,7 @@ $cancelButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
 # Der Abbrechen-Button ersetzt den Start-Button an derselben Position und
 # muss deshalb auch gleich verankert sein.
 $cancelButton.Anchor = "Top, Left"
-$cancelButton.TabIndex = 15
+$cancelButton.TabIndex = 16
 $cancelButton.Visible = $false
 $form.Controls.Add($cancelButton)
 
@@ -1311,6 +1411,7 @@ function Set-VerificationControlsEnabled {
         $dryRunCheckBox.Enabled = $false
         $ejectCheckBox.Enabled = $false
         $checksumCheckBox.Enabled = $false
+        $superFastCheckBox.Enabled = $false
         $verifyButton.Enabled = $false
         $deleteBackupButton.Enabled = $false
     }
@@ -1444,24 +1545,51 @@ function Update-BackupSelectionSnapshot {
 }
 
 function Update-BackupOptionState {
-    $isBackup = $backupRadio.Checked
-    $isInternalDrive = $false
-    if ($driveCombo.SelectedItem) {
-        $selectedDisk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
-        $isInternalDrive = $selectedDisk -and $selectedDisk.DriveType -eq 3
+    # Der Guard verhindert Ereignis-Rekursion: Diese Funktion setzt selbst
+    # Checkbox-Zustaende und wuerde sich sonst ueber CheckedChanged erneut rufen.
+    if ($script:optionStateUpdating) { return }
+    $script:optionStateUpdating = $true
+    try {
+        $isBackup = $backupRadio.Checked
+        $isInternalDrive = $false
+        if ($driveCombo.SelectedItem) {
+            $selectedDisk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+            $isInternalDrive = $selectedDisk -and $selectedDisk.M24IsInternal
+        }
+        $isIdle = -not $script:backupProcess -and -not $script:pendingEjectDrive -and
+            -not $script:verificationAsyncResult -and -not $script:deletionAsyncResult
+
+        if (-not $isBackup) {
+            $dryRunCheckBox.Checked = $false
+            $superFastCheckBox.Checked = $false
+        }
+
+        # Dry-Run und Superschnell schliessen sich gegenseitig aus: Solange die
+        # eine Option angehakt ist, bleibt die andere deaktiviert.
+        $dryRunCheckBox.Enabled = $isBackup -and $isIdle -and -not $superFastCheckBox.Checked
+        $superFastCheckBox.Enabled = $isBackup -and $isIdle -and -not $dryRunCheckBox.Checked
+
+        $ejectCheckBox.Enabled = $isBackup -and -not $dryRunCheckBox.Checked -and -not $isInternalDrive -and $isIdle
+        if (-not $isBackup -or $dryRunCheckBox.Checked -or $isInternalDrive) { $ejectCheckBox.Checked = $false }
+
+        # Superschnell erzwingt abgewaehlte Pruefsummen; der vorige Haken wird
+        # beim Abschalten wiederhergestellt, damit das Ausprobieren der Option
+        # keine stille dauerhafte Aenderung hinterlaesst.
+        if ($superFastCheckBox.Checked) {
+            if ($null -eq $script:checksumBeforeSuperFast) { $script:checksumBeforeSuperFast = $checksumCheckBox.Checked }
+            $checksumCheckBox.Checked = $false
+        } elseif ($null -ne $script:checksumBeforeSuperFast) {
+            $checksumCheckBox.Checked = [bool]$script:checksumBeforeSuperFast
+            $script:checksumBeforeSuperFast = $null
+        }
+        $checksumCheckBox.Enabled = $isBackup -and -not $dryRunCheckBox.Checked -and -not $superFastCheckBox.Checked -and $isIdle
+
+        $addFolderButton.Enabled = $isBackup -and $isIdle
+        $removeFolderButton.Visible = $isBackup
+        $addFolderButton.Visible = $isBackup
+    } finally {
+        $script:optionStateUpdating = $false
     }
-
-    $dryRunCheckBox.Enabled = $isBackup -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
-    if (-not $isBackup) { $dryRunCheckBox.Checked = $false }
-
-    $ejectCheckBox.Enabled = $isBackup -and -not $dryRunCheckBox.Checked -and -not $isInternalDrive -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
-    if (-not $isBackup -or $dryRunCheckBox.Checked -or $isInternalDrive) { $ejectCheckBox.Checked = $false }
-
-    $checksumCheckBox.Enabled = $isBackup -and -not $dryRunCheckBox.Checked -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
-
-    $addFolderButton.Enabled = $isBackup -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
-    $removeFolderButton.Visible = $isBackup
-    $addFolderButton.Visible = $isBackup
     Update-SelectionState
 }
 
@@ -1568,6 +1696,26 @@ $libraryList.Add_ItemCheck({
 
 $libraryList.Add_SelectedIndexChanged({ Update-SelectionState })
 
+function Get-PhysicalDriveConnectionInfo {
+    param($LogicalDisk)
+
+    $busType = $null
+    try {
+        $driveLetter = ([string]$LogicalDisk.DeviceID).TrimEnd(':', '\')
+        if ($driveLetter -match '^[A-Za-z]$') {
+            $storageDisk = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop |
+                Get-Disk -ErrorAction Stop |
+                Select-Object -First 1
+            if ($storageDisk) { $busType = [string]$storageDisk.BusType }
+        }
+    } catch {
+        # Die GUI bleibt auch auf Systemen ohne Storage-Cmdlets nutzbar. Ohne
+        # physischen Bus-Typ wird ein Fixed Disk bewusst nicht als intern
+        # behauptet und deshalb auch keine falsche Warnung angezeigt.
+    }
+    return Get-M24DriveConnectionInfo -DriveType ([int]$LogicalDisk.DriveType) -BusType $busType
+}
+
 function Update-DriveList {
     param([switch]$Force)
 
@@ -1593,6 +1741,16 @@ function Update-DriveList {
             return
         }
 
+        foreach ($disk in $drives) {
+            Set-StartupSplashStatus ((L 'Laufwerk {0} wird geprüft ...' 'Checking drive {0} ...') -f $disk.DeviceID)
+            $connection = Get-PhysicalDriveConnectionInfo -LogicalDisk $disk
+            $disk | Add-Member -NotePropertyName M24BusType -NotePropertyValue $connection.BusType -Force
+            $disk | Add-Member -NotePropertyName M24ConnectionKind -NotePropertyValue $connection.ConnectionKind -Force
+            $disk | Add-Member -NotePropertyName M24IsExternal -NotePropertyValue $connection.IsExternal -Force
+            $disk | Add-Member -NotePropertyName M24IsInternal -NotePropertyValue $connection.IsInternal -Force
+            $disk | Add-Member -NotePropertyName M24CanEject -NotePropertyValue $connection.CanEject -Force
+        }
+
         $previousDeviceIds = @($script:driveDeviceIds)
         $currentDeviceIds = @($drives | ForEach-Object { [string]$_.DeviceID })
 
@@ -1607,8 +1765,15 @@ function Update-DriveList {
         $selectedIndex = -1
         $selectedHasBackup = $false
         foreach ($disk in $drives) {
+            Set-StartupSplashStatus ((L 'Sicherungsstatus auf {0} wird geladen ...' 'Loading backup status on {0} ...') -f $disk.DeviceID)
             $label = if ($disk.VolumeName) { $disk.VolumeName } else { L "ohne Namen" "unnamed" }
-            $type = if ($disk.DriveType -eq 2) { L "Wechseldatenträger" "Removable drive" } else { L "Lokaler Datenträger" "Local drive" }
+            $type = switch ($disk.M24ConnectionKind) {
+                'Usb' { L "Externes USB-Laufwerk" "External USB drive" }
+                'External' { L "Externes Laufwerk" "External drive" }
+                'Removable' { L "Wechseldatenträger" "Removable drive" }
+                'Internal' { L "Internes Laufwerk" "Internal drive" }
+                default { L "Lokaler Datenträger (Verbindung unbekannt)" "Local drive (connection unknown)" }
+            }
             $freeGb = [math]::Round($disk.FreeSpace / 1GB, 1)
             $display = "{0}  -  {1}  ({2:N1} GB frei, {3})" -f $disk.DeviceID, $label, $freeGb, $type
             $isKnownBackupDrive = Test-IsKnownBackupDrive -Disk $disk
@@ -1702,6 +1867,7 @@ $restoreRadio.Add_CheckedChanged({
     if ($restoreRadio.Checked) { Update-BackupSelectionSnapshot -CaptureCurrentList; Update-LibraryList; Update-BackupOptionState; Update-BackupHealth }
 })
 $dryRunCheckBox.Add_CheckedChanged({ Update-BackupOptionState })
+$superFastCheckBox.Add_CheckedChanged({ Update-BackupOptionState })
 
 $startButton.Add_Click({
     if ($script:verificationAsyncResult) { return }
@@ -1735,7 +1901,7 @@ $startButton.Add_Click({
         )
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     }
-    if ($backupRadio.Checked -and $disk.DriveType -eq 3) {
+    if ($backupRadio.Checked -and $disk.M24IsInternal) {
         $answer = [System.Windows.Forms.MessageBox]::Show(
             (L "Das ausgewählte Ziel ist ein internes Laufwerk. Eine Sicherung auf einem externen USB-Laufwerk schützt besser vor Defekten und Schadsoftware.`r`n`r`nTrotzdem fortfahren?" "The selected destination is an internal drive. An external USB drive offers better protection against hardware failure and malware.`r`n`r`nContinue anyway?"),
             (L "Internes Sicherungsziel" "Internal backup destination"),
@@ -1767,7 +1933,8 @@ $startButton.Add_Click({
     $script:preCancelResultText = $null
     $script:activeDrive = $disk
     $script:activeDryRun = $backupRadio.Checked -and $dryRunCheckBox.Checked
-    $script:autoEjectRequested = $backupRadio.Checked -and $ejectCheckBox.Checked -and $disk.DriveType -eq 2
+    $script:activeSuperFast = $backupRadio.Checked -and $superFastCheckBox.Checked
+    $script:autoEjectRequested = $backupRadio.Checked -and $ejectCheckBox.Checked -and $disk.M24CanEject
     $script:restorePreviewShown = $false
     $script:scanWarningShown = $false
     Update-ElapsedDuration
@@ -1777,12 +1944,18 @@ $startButton.Add_Click({
     $historyButton.Enabled = $false
     $verifyButton.Enabled = $false
     $deleteBackupButton.Enabled = $false
-    $resultBox.Text = L "Vorprüfung wird gestartet ..." "Starting preflight checks ..."
+    $resultBox.Text = if ($script:activeSuperFast) {
+        L "Superschnelle Sicherung ohne Vorprüfung wird gestartet ..." "Starting super fast backup without preflight checks ..."
+    } else {
+        L "Vorprüfung wird gestartet ..." "Starting preflight checks ..."
+    }
     $statusLabel.ForeColor = [System.Drawing.SystemColors]::ControlText
     $statusLabel.Text = if ($restoreRadio.Checked) {
         L "Wiederherstellung wird geprüft ..." "Checking restore ..."
     } elseif ($script:activeDryRun) {
         L "Simulation wird gestartet ..." "Starting simulation ..."
+    } elseif ($script:activeSuperFast) {
+        L "Superschnelle Sicherung wird gestartet ..." "Starting super fast backup ..."
     } else {
         L "Sicherung wird gestartet ..." "Starting backup ..."
     }
@@ -1801,6 +1974,7 @@ $startButton.Add_Click({
     $dryRunCheckBox.Enabled = $false
     $ejectCheckBox.Enabled = $false
     $checksumCheckBox.Enabled = $false
+    $superFastCheckBox.Enabled = $false
     $closeButton.Visible = $false
     $startButton.Visible = $false
     $cancelButton.Enabled = $true
@@ -1829,7 +2003,11 @@ $startButton.Add_Click({
             '-SelectedFoldersFile', $script:selectedFoldersFile
         )
         if ($script:activeDryRun) { $argumentList += '-DryRun' }
-        if ($backupRadio.Checked -and -not $script:activeDryRun -and -not $checksumCheckBox.Checked) {
+        if ($script:activeSuperFast) {
+            # Der Worker erzwingt uebersprungene Pruefsummen selbst; ein
+            # zusaetzliches -SkipChecksums ist hier bewusst nicht noetig.
+            $argumentList += '-SuperFast'
+        } elseif ($backupRadio.Checked -and -not $script:activeDryRun -and -not $checksumCheckBox.Checked) {
             $argumentList += '-SkipChecksums'
         }
         $arguments = ($argumentList | ForEach-Object { ConvertTo-M24ProcessArgument ([string]$_) }) -join ' '
@@ -1878,6 +2056,7 @@ $startButton.Add_Click({
         $script:activeDrive = $null
         $script:activeMode = $null
         $script:activeDryRun = $false
+        $script:activeSuperFast = $false
         $script:autoEjectRequested = $false
         $script:backupStartedAt = $null
         Update-ElapsedDuration
@@ -2120,16 +2299,24 @@ $timer.Add_Tick({
                 }
                 $progressBar.Value = $progressBar.Maximum
                 if ($result) {
-                    $plannedGb = [math]::Round(([double]$result.PlannedBytes / 1GB), 2)
                     $displayHints = @($result.HintFolders | ForEach-Object { Get-M24FolderDisplayName $_ $script:isGerman })
                     $hints = if ($displayHints.Count) { (L " Hinweise: {0}." " Notes: {0}.") -f ($displayHints -join ', ') } else { "" }
                     $robocopyWarnings = if ($result.PSObject.Properties['RobocopyWarnings']) { @($result.RobocopyWarnings | Where-Object { $_ }) } else { @() }
                     $robocopyWarningText = Format-RobocopyWarningSummary -Warnings $robocopyWarnings
                     $checksumNote = if ($result.PSObject.Properties['ChecksumSkipped'] -and [bool]$result.ChecksumSkipped) { L " Prüfsummen übersprungen." " Checksums skipped." } else { "" }
-                    $resultBox.Text = if ($script:isGerman) {
-                        "$(if ($isRestore) { 'Wiederhergestellt' } elseif ($isDryRun) { 'Simuliert' } else { 'Gesichert' }): $(@($result.SuccessfulFolders).Count) Ordner. Geplant: $($result.PlannedFiles) Dateien / $plannedGb GB. Dauer: $duration.$hints$robocopyWarningText$checksumNote"
+                    # Ohne Vorpruefung (Superschnell-Modus) gibt es keine Planzahlen;
+                    # "0 Dateien / 0 GB" waere eine falsche Aussage.
+                    $preflightSkipped = $result.PSObject.Properties['PreflightSkipped'] -and [bool]$result.PreflightSkipped
+                    $plannedText = if ($preflightSkipped) {
+                        L "Ohne Vorprüfung; Kopiervolumen nicht vorab ermittelt." "No preflight; copy volume was not estimated in advance."
                     } else {
-                        "$(if ($isRestore) { 'Restored' } elseif ($isDryRun) { 'Simulated' } else { 'Backed up' }): $(@($result.SuccessfulFolders).Count) folders. Planned: $($result.PlannedFiles) files / $plannedGb GB. Duration: $duration.$hints$robocopyWarningText$checksumNote"
+                        $plannedGb = [math]::Round(([double]$result.PlannedBytes / 1GB), 2)
+                        if ($script:isGerman) { "Geplant: $($result.PlannedFiles) Dateien / $plannedGb GB." } else { "Planned: $($result.PlannedFiles) files / $plannedGb GB." }
+                    }
+                    $resultBox.Text = if ($script:isGerman) {
+                        "$(if ($isRestore) { 'Wiederhergestellt' } elseif ($isDryRun) { 'Simuliert' } else { 'Gesichert' }): $(@($result.SuccessfulFolders).Count) Ordner. $plannedText Dauer: $duration.$hints$robocopyWarningText$checksumNote"
+                    } else {
+                        "$(if ($isRestore) { 'Restored' } elseif ($isDryRun) { 'Simulated' } else { 'Backed up' }): $(@($result.SuccessfulFolders).Count) folders. $plannedText Duration: $duration.$hints$robocopyWarningText$checksumNote"
                     }
                 } else {
                     $resultBox.Text = L "Vorgang erfolgreich abgeschlossen." "Operation completed successfully."
@@ -2147,7 +2334,7 @@ $timer.Add_Tick({
                         ) | Out-Null
                     }
                 }
-                if ($script:autoEjectRequested -and $script:activeDrive -and $script:activeDrive.DriveType -eq 2 -and -not $isDryRun -and -not $isRestore) {
+                if ($script:autoEjectRequested -and $script:activeDrive -and $script:activeDrive.M24CanEject -and -not $isDryRun -and -not $isRestore) {
                     Request-DelayedAutoEject -Drive $script:activeDrive.DeviceID
                 }
             } else {
@@ -2200,6 +2387,7 @@ $timer.Add_Tick({
             $script:activeDrive = $null
             $script:activeMode = $null
             $script:activeDryRun = $false
+            $script:activeSuperFast = $false
             $script:autoEjectRequested = $false
             Update-BackupOptionState
             Update-ResultOverview
@@ -2529,6 +2717,7 @@ $form.Add_FormClosed({
 # Beim Start liegt der Fokus auf "Sicherung starten", damit die Sicherung
 # direkt mit Enter beginnen kann.
 $form.Add_Shown({
+    $script:mainWindowShown = $true
     $driveWatchTimer.Start()
     if ($startButton.Enabled) { $startButton.Select() }
 })
@@ -2540,6 +2729,7 @@ foreach ($surface in @($targetSurface, $folderSurface, $optionsSurface, $activit
     $surface.SendToBack()
 }
 
+Set-StartupSplashStatus (L 'Einstellungen werden geladen ...' 'Loading settings ...')
 $script:settings = Get-AppSettings
 $script:knownDrive = Get-KnownBackupDrive
 $savedSelection = Get-SavedFolderSelection
@@ -2558,6 +2748,7 @@ if ($savedSelection) {
 }
 $libraryList.Items.Clear()
 Update-LibraryList
+Set-StartupSplashStatus (L 'Sicherungslaufwerke werden geprüft ...' 'Checking backup drives ...')
 Update-DriveList -Force
 Update-BackupOptionState
 Update-SelectionState
@@ -2569,12 +2760,40 @@ if ($form.Height -gt $workingArea.Height) {
     $form.Height = $workingArea.Height
 }
 
+# Der Splash muss vor ShowDialog vollstaendig geschlossen sein. Andernfalls
+# kann WinForms das modale Hauptfenster implizit dem noch aktiven Splash als
+# Owner zuordnen; dessen Schliessen wuerde dann auch die Haupt-GUI schliessen.
+Close-StartupSplash
 [void]$form.ShowDialog()
+} catch {
+    $script:fatalGuiError = $true
+    $fatalMessage = $_.Exception.Message
+    # Der VBS-Starter startet PowerShell ohne sichtbare Konsole. Deshalb muss
+    # ein unbehandelter Fehler als Dialog erscheinen, bevor der Prozess endet.
+    Close-StartupSplash
+    try {
+        $fatalTitle = if ($script:mainWindowShown) {
+            L 'Unerwarteter Fehler' 'Unexpected error'
+        } else {
+            L 'Start fehlgeschlagen' 'Startup failed'
+        }
+        $fatalText = if ($script:mainWindowShown) {
+            (L "Die Anwendung musste wegen eines unerwarteten Fehlers beendet werden:`r`n`r`n{0}" "The application had to close because of an unexpected error:`r`n`r`n{0}") -f $fatalMessage
+        } else {
+            (L "Die Bibliothekssicherung konnte nicht gestartet werden:`r`n`r`n{0}" "Library Backup could not be started:`r`n`r`n{0}") -f $fatalMessage
+        }
+        [System.Windows.Forms.MessageBox]::Show($fatalText, $fatalTitle, 'OK', 'Error') | Out-Null
+    } catch {
+        # Selbst ein Fehler beim optionalen Dialog darf die abschliessende
+        # Ressourcenfreigabe nicht verhindern.
+    }
 } finally {
+    Close-StartupSplash
     if ($logoBox -and $logoBox.Image) { try { $logoBox.Image.Dispose() } catch {} }
     if ($notifyIcon) { try { $notifyIcon.Visible = $false; $notifyIcon.Dispose() } catch {} }
-    foreach ($resource in @($appIcon, $healthToolTip, $driveToolTip, $resultContextMenu, $timer, $driveWatchTimer, $ejectTimer, $notificationTimer, $verificationTimer, $deletionTimer)) {
+    foreach ($resource in @($appIcon, $healthToolTip, $driveToolTip, $optionsToolTip, $resultContextMenu, $timer, $driveWatchTimer, $ejectTimer, $notificationTimer, $verificationTimer, $deletionTimer)) {
         if ($resource) { try { $resource.Dispose() } catch {} }
     }
     if ($form) { try { $form.Dispose() } catch {} }
 }
+if ($script:fatalGuiError) { exit 1 }

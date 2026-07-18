@@ -4,6 +4,41 @@ Alle wesentlichen Änderungen dieses Projekts werden in dieser Datei
 dokumentiert. Die Versionierung orientiert sich an
 [Semantic Versioning](https://semver.org/lang/de/).
 
+## [1.6.0] – 2026-07-18
+
+### Hinzugefügt
+
+- Neuer Superschnell-Modus (`-SuperFast` bzw. Checkbox **Superschnell (ohne
+  Prüfungen)**): Er überspringt die Datei-Vorprüfung samt
+  Speicherplatz-/4-GB-Prüfung, die Aktualisierung des Prüfsummenmanifests und
+  die BitLocker-Abfrage und kopiert mit `/R:0 /W:1` sowie standardmäßig 32
+  Robocopy-Threads. Ein explizit gesetzter `-Threads`-Wert hat Vorrang. Der
+  Modus gilt nur für Sicherungen, ist nicht mit Dry-Run kombinierbar, ist nach
+  jedem App-Start wieder abgeschaltet und ändert keine Schutzgrenzen: Am Ziel
+  wird weiterhin nichts gelöscht; Sperrdatei, Metadaten und Protokoll bleiben
+  aktiv.
+- Die Ergebnisdatei des Workers enthält jetzt `SuperFast` und
+  `PreflightSkipped`; ohne Vorprüfung werden `ScannedFiles`, `PlannedFiles` und
+  `PlannedBytes` als `null` („nicht ermittelt“) statt fälschlich als `0`
+  gemeldet. GUI und Protokoll weisen den Modus und die tatsächlich verwendeten
+  Robocopy-Parameter aus.
+- Ein Splashscreen mit dem M24-Backup-Logo zeigt den Programmstart sowie das
+  Laden der Einstellungen und die Laufwerksprüfung an, bis das Hauptfenster
+  vollständig dargestellt ist.
+- Die integrierte Hilfe dokumentiert den direkten Worker-Aufruf samt öffentlichen
+  Kommandozeilenparametern, Kombinationsregeln und Beispielen und enthält einen
+  zweisprachigen Autor- und Credits-Abschnitt.
+
+### Behoben
+
+- Externe USB-HDDs und -SSDs, die Windows als festen lokalen Datenträger
+  meldet, werden anhand ihres physischen USB-Bus-Typs erkannt. Dadurch erscheint
+  keine falsche Warnung vor einem internen Sicherungsziel mehr und der sichere
+  Auswurf bleibt auch für externe USB-Laufwerke mit `DriveType 3` verfügbar.
+- Unbehandelte Fehler beim Programmstart werden auch beim unsichtbaren
+  VBS-/PowerShell-Start in einem sichtbaren, lokalisierten Fehlerdialog erklärt,
+  statt Splashscreen und Prozess kommentarlos zu beenden.
+
 ## [1.5.1] – 2026-07-17
 
 ### Behoben

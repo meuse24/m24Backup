@@ -42,7 +42,7 @@ window is useful.
 4. Select the destination drive.
 5. Select the folders to include.
 6. Optionally add more folders.
-7. Optionally adjust dry-run, safe eject, or checksum settings.
+7. Optionally adjust dry-run, safe eject, checksum, or super fast settings.
 8. Click **Start backup**.
 9. Wait for the completion message.
 
@@ -99,6 +99,33 @@ not update successful-backup metadata.
 
 Use dry-run mode when you want to review what would be copied or overwritten
 before taking any risk.
+
+<a id="super-fast"></a>
+## Super fast: maximum speed without checks
+
+The **Super fast (skip checks)** option copies as fast as possible by skipping
+every time-consuming check:
+
+- no file preflight, and therefore no file-based disk-space estimate and no
+  advance check for files of 4 GB or larger on FAT32,
+- no update of the SHA-256 checksum manifest,
+- no BitLocker status query,
+- no Robocopy copy retries (`/R:0`) and 32 parallel copy threads by default.
+
+Robocopy alone decides which files need to be copied. The protective limits of
+the backup remain unchanged: nothing is deleted from the destination, and the
+drive and path validation, lock file, metadata, and log stay active.
+
+The price of speed: a full destination drive or an oversized file on FAT32 only
+surfaces while copying, and locked files are skipped immediately instead of
+being retried. The checksum manifest remains at its previous state; **Verify
+backup** may then report missing or outdated entries until another backup
+finishes with checksums enabled.
+
+The option applies to backups only, cannot be combined with **Simulate only
+(dry run)**, and is deliberately turned off again every time the app starts. On
+very slow USB 2 flash drives, many parallel threads can be counterproductive;
+the count can be adjusted with `-Threads` on the command line.
 
 <a id="custom-folders"></a>
 ## Add custom folders
@@ -264,6 +291,48 @@ The following sections support troubleshooting and review.
   preflight checks, and Robocopy execution.
 - `M24Backup.Shared.ps1`: shared helpers for reserved names and nested paths.
 
+<a id="command-line"></a>
+## Running directly without the GUI
+
+For scripting, diagnostics, and manually controlled runs, start the
+`Bibliothekssicherung.ps1` worker directly in Windows PowerShell 5.1. Without
+`-Silent`, it writes status information to the console and asks for required
+confirmations.
+
+Examples:
+
+- Normal backup to `G:`: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Bibliothekssicherung.ps1" -Mode Backup -UsbDrive G:`
+- Super fast backup: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast`
+- Super fast with 16 threads: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast -Threads 16`
+- Simulation only: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -DryRun`
+- Without updating the manifest: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SkipChecksums`
+- Selected folders only: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SelectedFolders "Desktop|Dokumente|Bilder"`
+- Restore: `.\Bibliothekssicherung.ps1 -Mode Restore -UsbDrive G:`
+
+### Public worker parameters
+
+| Parameter | Meaning |
+| --- | --- |
+| `-Mode <Backup or Restore>` | Select the operation; the default is `Backup`. |
+| `-UsbDrive G:` | Backup destination or restore source. Values such as `G`, `G:`, and `G:\` are accepted. When omitted, the interactive worker offers suitable drives for selection. |
+| `-Silent` | Suppress drive selection and normal prompts. A silent backup requires the GUI approval files if scan warnings occur; a silent restore always requires an approval channel. Do not use it for a normal direct restore. |
+| `-SelectedFolders <list>` | Process only canonical folder names separated by a pipe character. Standard names are `Desktop`, `Dokumente`, `Downloads`, `Bilder`, `Musik`, `Videos`, `Favoriten`, `Gespeicherte Spiele`, and `Kontakte`. Stored canonical names remain language-independent even though the GUI translates their display labels. |
+| `-SelectedFoldersFile <file>` | Use a JSON selection file, including custom folders passed by the GUI. This format is primarily intended for automation and the GUI. |
+| `-DryRun` | Simulate a backup with Robocopy `/L` without writing user data or successful-backup metadata. Backup only; cannot be combined with `-SuperFast`. |
+| `-SkipChecksums` | Do not update `_Pruefsummen.tsv` after a successful backup. The existing manifest may become outdated. |
+| `-SuperFast` | Skip preflight, file-based disk-space/4 GB checks, checksum updates, and the BitLocker query; run Robocopy without retries and with 32 threads by default. Backup only; cannot be combined with `-DryRun`. |
+| `-Threads 1..128` | Number of parallel Robocopy threads. Default: 8; when `-SuperFast` is used without an explicit value: 32. An explicit value always wins. |
+
+`-ParentProcessId`, `-StatusFile`, `-ResultFile`, `-CancelFile`, `-PreviewFile`,
+and `-ApprovalFile` form the internal communication channel between the GUI and
+worker. They are not required for normal direct runs. Custom automation may use
+`-ResultFile` for a structured JSON summary; the status, cancellation, and
+approval files form a coordinated protocol and should not be improvised
+individually.
+
+Invalid combinations and failures produce a non-zero exit code. See **Exit
+codes** for the complete table.
+
 ## Tech stack
 
 - Windows PowerShell 5.1
@@ -341,3 +410,17 @@ from Robocopy. The result file and log show which phase produced the error.
 The app does not send data to external services. Settings are stored locally in
 the user profile. Backup data is not encrypted by the app; protect the drive
 accordingly.
+
+## Author and credits
+
+- **Author, development, and maintenance:** Günther Meusburger (meuse24), `github.com/meuse24`
+- **Source code and contributions:** `github.com/meuse24/m24Backup`
+- **Technical foundations:** Windows PowerShell 5.1, Microsoft .NET Windows
+  Forms, and Robocopy
+- **AI CLI tools:** Claude Code, OpenAI Codex, and Google Gemini CLI for support
+  with development, review, testing, and documentation
+- **License:** MIT License, Copyright © 2026 Günther Meusburger (meuse24)
+
+Windows, PowerShell, .NET, and Robocopy are Microsoft products or technologies.
+Their mention does not imply Microsoft endorsement or certification of this
+project.

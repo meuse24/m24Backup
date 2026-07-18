@@ -24,6 +24,41 @@ Describe 'ConvertTo-M24ProcessArgument' {
     }
 }
 
+Describe 'Drive connection classification' {
+    It 'recognizes a fixed disk on the USB bus as external and ejectable' {
+        $info = Get-M24DriveConnectionInfo -DriveType 3 -BusType USB
+        $info.ConnectionKind | Should -Be 'Usb'
+        $info.IsExternal | Should -Be $true
+        $info.IsInternal | Should -Be $false
+        $info.CanEject | Should -Be $true
+    }
+
+    It 'recognizes fixed SATA and NVMe disks as internal' {
+        foreach ($busType in @('SATA', 'NVMe')) {
+            $info = Get-M24DriveConnectionInfo -DriveType 3 -BusType $busType
+            $info.ConnectionKind | Should -Be 'Internal'
+            $info.IsInternal | Should -Be $true
+            $info.IsExternal | Should -Be $false
+            $info.CanEject | Should -Be $false
+        }
+    }
+
+    It 'does not claim that a fixed disk is internal when its bus is unknown' {
+        $info = Get-M24DriveConnectionInfo -DriveType 3 -BusType $null
+        $info.ConnectionKind | Should -Be 'Unknown'
+        $info.IsInternal | Should -Be $false
+        $info.IsExternal | Should -Be $false
+        $info.CanEject | Should -Be $false
+    }
+
+    It 'keeps removable logical drives ejectable without physical bus data' {
+        $info = Get-M24DriveConnectionInfo -DriveType 2 -BusType $null
+        $info.ConnectionKind | Should -Be 'Removable'
+        $info.IsExternal | Should -Be $true
+        $info.CanEject | Should -Be $true
+    }
+}
+
 Describe 'Shared folder metadata' {
     It 'translates canonical folder names without changing stored names' {
         Get-M24FolderDisplayName 'Dokumente' $false | Should -Be 'Documents'
