@@ -1,248 +1,306 @@
-# Plan: Superfast-Modus („Superschnell“)
+# Implementation Plan: Edge-Case Hardening
 
-## Ziel und feste Grenzen
+## Objective
 
-Ein optionaler Modus beschleunigt ausschließlich Sicherungen, indem er die teuren
-Vor- und Nachprüfungen auslässt und Robocopy aggressiver konfiguriert. Der Modus
-ist standardmäßig aus und wird in der GUI durch genau eine nicht persistierte
-Checkbox **„Superschnell (ohne Prüfungen)“** / **“Super fast (skip checks)”**
-aktiviert.
+Harden three uncommon but credible failure paths without changing normal backup behavior or the existing GUI architecture:
 
-Der Modus darf weder Daten am Ziel löschen noch bestehende Schutzgrenzen
-aufweichen. Unverändert bleiben insbesondere:
+1. Remove stale application-owned temporary files even when they are marked read-only.
+2. Prevent an externally started backup worker from surviving an exception in the final GUI launch sequence.
+3. Bound the synchronous CIM drive query and avoid rapid repeated retries after drive-discovery failures.
 
-- Laufwerks-, Profil- und Ordnerauswahlvalidierung,
-- Schutz gegen ein Sicherungsziel innerhalb einer Quelle,
-- Ausschluss von Junctions sowie temporären und Systemdateien,
-- `_backup.lock`, Metadaten, Status-/Ergebnisdatei und Robocopy-Log,
-- die additive Robocopy-Strategie ohne `/MIR` oder `/PURGE`,
-- Restore, Backup-Prüfung und Backup-Löschung.
+The changes must remain compatible with Windows PowerShell 5.1 and PowerShell 7.
 
-`-SuperFast` ist nur mit `-Mode Backup` und nie zusammen mit `-DryRun`
-zulässig. Eine explizite CLI-Angabe `-Threads` hat Vorrang vor dem
-Superfast-Standardwert.
+## Scope and Priority
 
-## Tatsächliche Zeitersparnis
+Implementation priority:
 
-Im Superfast-Modus entfallen:
+1. Worker-process cleanup after a partial GUI launch failure — correctness and process-lifecycle protection.
+2. CIM operation timeout and retry backoff — bounded GUI blocking during drive discovery.
+3. Read-only stale-temp cleanup — maintenance hardening.
 
-1. der vollständige Aufruf von `Get-BackupPreflight` für das Backup und damit
-   rekursiver Quellscan, Datei-für-Datei-Zielvergleich und Scanwarnungsfreigabe;
-2. die darauf basierende Netto-Speicherplatzberechnung und die Prüfung auf
-   ausgewählte Dateien ab 4 GB bei FAT32;
-3. die Aktualisierung von `_Pruefsummen.tsv`;
-4. der Aufruf von `Get-BitLockerStatusText`;
-5. Robocopy-Retries durch `/R:0` statt `/R:1`; `/W:1` kann aus Konsistenzgründen
-   gesetzt bleiben, ist bei null Wiederholungen praktisch wirkungslos;
-6. der konservative Thread-Standardwert 8: Ohne explizites `-Threads` wird
-   `/MT:32` verwendet.
+This work will not:
 
-Die bereits vorhandene schnelle `Win32_LogicalDisk`-Abfrage bleibt bestehen. Sie
-liefert Laufwerksvalidierung, freien Platz und Dateisystem für Anzeige und Log;
-sie ist nicht die ausgelassene dateibasierte Speicherplatzschätzung. Die
-allgemeine FAT32-Warnung darf daher weiterhin erscheinen, nur die Aussage
-„konkret ausgewählte Dateien >= 4 GB gefunden“ entfällt.
+- Move all drive discovery into a background runspace.
+- Add a general process-tree manager.
+- Change the worker communication protocol.
+- Change the seven-day stale-file threshold or filename authorization rules.
+- Remove read-only attributes from fresh, malformed, unrelated, or reparse-point files.
+- Suppress user-visible drive-discovery errors that are currently shown in the GUI.
 
-Robocopy bleibt die Wahrheitsquelle für den Kopiererfolg. Im bestehenden Worker
-sind Rückgabecodes 0 bis 7 Erfolg bzw. Erfolg mit Hinweisen; erst Codes ab 8
-sind Kopierfehler. Der Plan darf daher nicht behaupten, gesperrte Dateien würden
-stets als Code >= 2 oder immer als Fehler erscheinen. Maßgeblich bleiben die
-vorhandene Codeauswertung, Warnungen und das Robocopy-Log.
+## 1. Remove Read-Only Stale Temporary Artifacts
 
-## Umsetzung
+### Current behavior
 
-### 1. Worker: `Bibliothekssicherung.ps1`
+`Remove-M24StaleTempArtifacts` authorizes deletion only after exact filename validation, metadata refresh, reparse-point rejection, and the seven-day age check. It then calls `[System.IO.File]::Delete()` directly.
 
-#### Parameter und frühe Invarianten
+On Windows, deletion can fail when an otherwise eligible file has the `ReadOnly` attribute. The per-file catch safely contains the error, but the artifact remains and is retried on every future GUI startup.
 
-- `[switch]$SuperFast` neben `DryRun`/`SkipChecksums` ergänzen.
-- Nach dem Laden der Shared-Funktionen und der Definition von `M`, aber vor jeder
-  Laufwerksauflösung oder sonstigen Arbeit, folgende Kombinationen lokalisiert
-  ablehnen:
-  - `SuperFast` mit einem Modus ungleich `Backup`;
-  - `SuperFast` zusammen mit `DryRun`.
-- Vor der bestehenden Bereichsprüfung von `Threads`:
-  `if ($SuperFast -and -not $PSBoundParameters.ContainsKey('Threads')) {
-  $Threads = 32 }`. Anschließend weiterhin 1 bis 128 validieren.
-- Den Trap-Ergebnisdatensatz um `SuperFast = $SuperFast.IsPresent` ergänzen, damit
-  auch frühe Fehler einen konsistenten Moduskontext liefern.
+### Implementation
 
-#### Preflight sauber überspringen
+Inside `Remove-M24StaleTempArtifacts`, retain the current order of safety checks:
 
-- `Get-BackupPreflight` für Restore und normale Backups unverändert ausführen.
-  Nur beim Superfast-Backup wird der Aufruf vollständig übersprungen.
-- Einen expliziten Zustand verwenden, z. B. `$preflightPerformed = -not
-  $SuperFast`. Keinen echten Scan durch ein scheinbar erfolgreiches
-  Null-Ergebnis vortäuschen.
-- Scanwarnungsfreigabe, dateibasierte Speicherplatzprüfung und 4-GB-Dateiprüfung
-  nur ausführen, wenn `$preflightPerformed` wahr ist. Restore muss dadurch
-  bytegleich in seinem bisherigen Ablauf bleiben.
-- Alle späteren Ausgaben und Ergebniszugriffe absichern. Im Superfast-Fall:
-  - Konsole: „Superfast: Vorprüfung übersprungen.“;
-  - strukturierte Ergebnisse: `PreflightSkipped = $true` und
-    `ScannedFiles`, `PlannedFiles`, `PlannedBytes` jeweils `$null`, nicht `0`.
-    Null bedeutet „nicht ermittelt“; 0 würde fälschlich „ermittelt, keine Datei“
-    behaupten.
-- Für normale Backups und Restore `PreflightSkipped = $false` sowie die bisherigen
-  Zahlen unverändert ausgeben.
+1. Exact anchored filename validation.
+2. `FileInfo.Refresh()`.
+3. Existence check.
+4. Reparse-point rejection using the refreshed attributes.
+5. Seven-day age eligibility.
 
-#### BitLocker, Robocopy und Prüfsummen
+Only after all five checks pass:
 
-- `Get-BitLockerStatusText` nur ohne Superfast aufrufen. Andernfalls einen
-  lokalisierten Anzeige-/Logtext wie „BitLocker-Status: übersprungen
-  (Superfast)“ setzen.
-- Robocopy-Argumente über klar benannte effektive Werte aufbauen:
-  `retryCount = 0/1`, `retryWait = 1/3`, `Threads = 32/8 bzw. explizit`.
-  Restore und normale Backups behalten `/R:1 /W:3 /MT:8` beziehungsweise den
-  expliziten Threadwert.
-- Die Prüfsummenbedingung auf `($SkipChecksums -or $SuperFast)` erweitern und im
-  Log zwischen „vom Benutzer übersprungen“ und „wegen Superfast übersprungen“
-  unterscheiden.
-- Das vorhandene Metadaten-Neuschreiben zu Beginn eines echten Backups muss
-  bleiben: Es entfernt den früheren Vermerk `Pruefsummen-Pruefung` und markiert
-  damit auch nach einem Superfast-Lauf eine frühere Vollprüfung nicht mehr als
-  aktuell. Ein vorhandenes Manifest bleibt bewusst auf altem Stand; „Backup
-  prüfen“ kann anschließend fehlende oder veraltete Einträge melden.
-- Logkopf um `Superfast: Ja/Nein` ergänzen und die tatsächlich effektiven Werte
-  für Threads, Retry und Wartezeit protokollieren.
+1. Read the current attributes into a local value.
+2. If `ReadOnly` is present, clear only that bit.
+3. Preserve all other attribute bits.
+4. Delete the file with `[System.IO.File]::Delete()`.
+5. Keep attribute and deletion failures inside the existing per-file catch.
 
-#### Einheitlicher Ergebnisvertrag
+Recommended form:
 
-Jeder Ergebnisdatensatz, nicht nur der Erfolgsfall, erhält soweit anwendbar:
+```powershell
+if ($candidate.LastWriteTimeUtc -le $cutoffUtc) {
+    $attributes = $candidate.Attributes
+    if (($attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+        [System.IO.File]::SetAttributes(
+            $candidate.FullName,
+            ($attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly))
+        )
+    }
+    [System.IO.File]::Delete($candidate.FullName)
+}
+```
 
-- `SuperFast` (Boolean),
-- `PreflightSkipped` (Boolean),
-- `ChecksumSkipped` (bei echtem Superfast-Backup `true`),
-- die Preflight-Zahlen oder `$null`, wenn nicht ermittelt.
+Do not clear `Hidden`, `System`, or any other attribute. Do not reuse `Remove-M24FileEntry` directly because stale-temp cleanup has its own ownership, age, and reparse-point authorization boundary and should keep the final mutation visibly inside that boundary.
 
-Das betrifft Trap, Abbruch vor einem Ordner, Abbruch während Robocopy, Abbruch
-nach der Schleife, Prüfsummenabbruch, Erfolg und Kopierfehler. Dadurch muss die
-GUI nicht aus Prozesszustand oder fehlenden Feldern raten. Bestehende Felder und
-Exitcodes bleiben kompatibel.
+### Tests
 
-### 2. GUI: `Bibliothekssicherung-GUI.ps1`
+Add Pester coverage proving that:
 
-#### Layout und Erklärung
+1. An old, valid, read-only communication file is deleted.
+2. An old, valid, read-only atomic remnant is deleted.
+3. A fresh, valid, read-only file is preserved and remains read-only.
+4. An old read-only file with a malformed or unrelated name is preserved and remains read-only.
+5. Existing reparse-point protection remains before any attribute mutation.
 
-- Die Optionsfläche ist aktuell nur 34 Pixel hoch und mit drei Optionen belegt.
-  Für die vierte Checkbox die Fläche und die darunterliegenden Controls bewusst
-  neu anordnen bzw. eine zweite Optionszeile schaffen; nicht lediglich eine
-  weitere absolute X-Position in die bestehende Zeile quetschen. Fenstergröße,
-  Scrollbarkeit, Tab-Reihenfolge sowie deutsche und englische Textbreiten prüfen.
-- Tooltip mit den konkreten Folgen: kein Datei-Preflight, keine
-  Speicherplatz-/4-GB-Dateiprüfung, keine Manifestaktualisierung, keine
-  BitLocker-Abfrage, keine Kopierwiederholung. Zusätzlich klarstellen: Fehler
-  fallen gegebenenfalls erst beim Kopieren auf.
-- Checkbox standardmäßig aus und nicht in gespeicherten Einstellungen ablegen.
+All files must be created below `$TestDrive`. Tests must restore attributes in `finally` blocks when necessary so Pester can clean up reliably after a failed assertion.
 
-#### Deterministische Optionslogik
+## 2. Prevent a Worker Leak After Partial Launch Failure
 
-- `$script:activeSuperFast = $false` analog zu `activeDryRun` einführen, beim
-  Start aus der UI erfassen und in allen Abschluss-/Fehlerpfaden zurücksetzen.
-- `Update-BackupOptionState` und `Set-VerificationControlsEnabled` um die neue
-  Checkbox ergänzen. Sie ist nur im Backup-Modus und nur im Leerlauf aktiv;
-  laufendes Backup, Auswurf, Prüfung und Löschung dürfen keine Änderung zulassen.
-- Dry-Run und Superfast gegenseitig ausschließen. Event-Rekursion mit einem
-  kleinen Update-Guard verhindern. Die zuletzt bewusst aktivierte Option gewinnt
-  und deaktiviert/entfernt die andere.
-- Bei Superfast die Prüfsummencheckbox deaktivieren und sichtbar abwählen. Den
-  vorherigen Prüfsummenwert zwischenspeichern und beim Abschalten von Superfast
-  wiederherstellen, damit das bloße Ausprobieren der Option keine stille
-  dauerhafte Optionsänderung bewirkt.
-- Der sichere Auswurf bleibt zulässig; er findet erst nach erfolgreichem Lauf
-  statt und ist kein Prüffeature des Kopiermodus.
+### Current behavior
 
-#### Prozessstart und Statusanzeige
+The GUI creates a `System.Diagnostics.Process`, calls `Start()`, and then starts the WinForms polling timer. If process creation succeeds but `$timer.Start()` throws, the catch disposes the .NET `Process` object without terminating the external `powershell.exe` worker.
 
-- Beim Start `activeSuperFast` festhalten und `-SuperFast` an die Workerargumente
-  anhängen. Nicht zusätzlich `-SkipChecksums` anhängen; der Worker erzwingt das
-  Verhalten selbst.
-- Initialer Ergebnis- und Statustext muss im Superfast-Fall „Superschnelle
-  Sicherung wird gestartet …“ statt „Vorprüfung wird gestartet …“ anzeigen.
-  Normale Backups, Dry-Run und Restore bleiben unverändert.
-- Erfolgsausgabe anhand von `result.SuperFast`/`result.PreflightSkipped`
-  verzweigen: „Ohne Vorprüfung; Kopiervolumen nicht vorab ermittelt“ statt
-  „Geplant: 0 Dateien / 0 GB“. Den vorhandenen Hinweis „Prüfsummen übersprungen“
-  beibehalten.
-- Fehler- und Abbruchanzeigen müssen mit älteren Worker-Ergebnisdateien ohne die
-  neuen Properties kompatibel bleiben (`PSObject.Properties` prüfen).
+`Dispose()` releases local handles only. It does not terminate the process. Because the GUI remains alive after recovering from the catch, the worker's parent-process check does not resolve this failure.
 
-### 3. Tests
+The current exposure window is small: after `Process.Start()` succeeds, the only remaining statement in the launch try block is `$timer.Start()`. The impact is nevertheless significant because an unmanaged backup or restore worker could continue without GUI monitoring.
 
-#### Pester-Vertragstests
+### Implementation
 
-Eine neue Datei `tests/Bibliothekssicherung.Worker.Tests.ps1` anlegen; die
-Shared-Tests nicht mit Worker-Vertragstests vermischen.
+Use two complementary protections.
 
-- Worker in einem separaten Windows-PowerShell-Prozess starten, weil das Skript
-  selbst `exit` verwendet. Prüfen:
-  - `-Mode Restore -SuperFast` endet vor Laufwerksauflösung mit Exitcode 10 und
-    passender Fehlermeldung;
-  - `-Mode Backup -SuperFast -DryRun` ebenso;
-  - ein explizit ungültiger Threadwert wird weiterhin abgelehnt.
-- Per PowerShell-AST bzw. durch eine kleine testbare Policy-Hilfsfunktion prüfen:
-  - Parameter `SuperFast` existiert;
-  - impliziter Superfast-Wert ergibt 32 Threads, explizites `-Threads 5` bleibt 5;
-  - Superfast ergibt `/R:0 /W:1`, normal und Restore weiterhin `/R:1 /W:3`;
-  - Superfast impliziert übersprungene Prüfsummen.
-- Falls die Policy nicht ohne Ausführung des gesamten Workers testbar ist, die
-  reine Parameter-/Robocopy-Policy in eine kleine Funktion in
-  `M24Backup.Shared.ps1` auslagern und dort direkt testen. Statische
-  Textsuchen allein sind kein ausreichender Verhaltensnachweis.
-- Bestehende Pester-Suite und PSScriptAnalyzer mit Severity `Error` müssen
-  weiterhin bestehen.
+#### 2.1 Start the polling timer before launching the external process
 
-#### Manueller Smoke-Test auf Windows
+Start the WinForms timer immediately before `Process.Start()`.
 
-1. Normaler Backup-Lauf: Preflight, Standardparameter und Manifest unverändert.
-2. Superfast-Lauf auf kleinem Testbestand: kein Preflight-/Prüfsummenstatus,
-   Log enthält `/MT:32`, `/R:0` und übersprungene Prüfungen, Ergebnis enthält
-   Null-Planwerte.
-3. Superfast mit explizitem `-Threads 5`: Log/Robocopy verwenden 5.
-4. Gesperrte Testdatei und zu kleines Testziel: kein Retry; tatsächlicher
-   Robocopy-Code und Ergebnisstatus werden dokumentiert, ohne einen bestimmten
-   Code vorwegzunehmen.
-5. FAT32 oder geeignetes Testabbild mit >4-GB-Datei: keine Vorabblockade,
-   Kopierfehler wird regulär als Fehlschlag behandelt.
-6. Danach Restore-Vorschau und „Backup prüfen“: Restore-Ablauf unverändert;
-   Prüfsummenstatus ist nicht fälschlich aktuell.
-7. GUI-Wechsel zwischen Dry-Run, Superfast, Restore und Prüfsummen sowie Start,
-   Abbruch, Prüfung und Löschung; Checkboxzustände und Layout in DE/EN prüfen.
+This is safe because a WinForms timer tick cannot run until the click handler returns control to the message loop. By that time either:
 
-### 4. Dokumentation und Release
+- the worker has started successfully; or
+- the catch has stopped the timer and cleared the failed launch state.
 
-- Worker-Kopfkommentar um ein `-SuperFast`-Beispiel ergänzen.
-- `README.md`, `README.de.md`, `docs/help.de.md` und `docs/help.en.md` um Modus,
-  Ausschlüsse, Risiken und den nicht aktualisierten Manifeststand ergänzen.
-- `CHANGELOG.md` erhält einen Abschnitt für 1.6.0. Keine Versionskonstante in
-  `build.ps1` oder im Installer ändern: Das Projekt leitet die Version aus dem
-  Tag bzw. dem Release-Parameter ab.
-- Nach vollständiger Prüfung ist der vorgesehene Releaseweg
-  `release.ps1 -Bump Minor` (zunächst sinnvoll mit `-WhatIf` oder `-LocalOnly`).
-  Build-Ausgaben in `build/staging`, `build/portable` und `dist` nicht manuell
-  editieren.
+Required sequence:
 
-## Akzeptanzkriterien
+```text
+create Process object
+assign StartInfo
+start polling timer
+start external worker process
+return from click handler
+```
 
-- Ohne `-SuperFast` ändern sich Workerargumente, Preflight, Restore und Ergebnisse
-  nicht semantisch.
-- Mit `-SuperFast` wird kein `Get-BackupPreflight`,
-  `Get-BitLockerStatusText` oder `Update-M24ChecksumManifest` aufgerufen.
-- Superfast verwendet ohne Thread-Override `/MT:32 /R:0 /W:1`; ein expliziter
-  Threadwert bleibt erhalten.
-- Kein Modus verwendet `/MIR` oder `/PURGE`; am Ziel wird nichts gelöscht.
-- Robocopy-Code >= 8 führt weiterhin zu „Mit Fehlern beendet“ und einem
-  nicht erfolgreichen strukturierten Ergebnis.
-- GUI und JSON stellen „nicht vorab ermittelt“ niemals als null Dateien/null GB
-  dar.
-- Superfast ist nach jedem GUI-Neustart wieder aus, mit Dry-Run unvereinbar und
-  für Restore nicht auswählbar.
-- Pester, PSScriptAnalyzer und die manuellen Smoke-Tests sind erfolgreich.
+If `Process.Start()` fails or returns false, the catch must stop the timer before restoring the GUI state.
 
-## Empfohlene Reihenfolge
+This ordering removes the ordinary post-start exception window.
 
-1. Testbare Worker-Policy und Parameterinvarianten.
-2. Preflight-/BitLocker-/Manifest-Guards und vollständiger Ergebnisvertrag.
-3. GUI-Layout, Optionszustände, Workerargumente und Ergebnisanzeige.
-4. Automatisierte Tests und Smoke-Tests.
-5. Dokumentation, Changelog und Releaseprüfung.
+#### 2.2 Terminate defensively in the catch
+
+Retain a best-effort termination block in the catch for ambiguous or future failure paths where the process may already have started.
+
+Required behavior:
+
+1. Preserve and log the original `ErrorRecord` first.
+2. Stop the polling timer as the first cleanup step, before any modal
+   dialog: the final MessageBox pumps window messages, and a still-running
+   timer could otherwise tick in the middle of the cleanup.
+3. If a process object exists, determine best-effort whether it is running.
+4. If it is running, request cancellation by creating the existing cancel marker when possible.
+5. Wait briefly, for example up to 1,000 milliseconds, for graceful termination.
+6. If it remains active, call `Kill()`.
+7. Call `WaitForExit()` with a bounded timeout after `Kill()`.
+8. Dispose the process object only after the stop attempt.
+9. Continue with the existing temporary-file cleanup and GUI-state restoration.
+
+All stop, wait, kill, and dispose operations must be individually protected so they cannot replace the original launch error.
+
+Suggested maximum waits:
+
+- Graceful cancellation: 1,000 ms.
+- Post-kill confirmation: 2,000 ms.
+
+Do not wait indefinitely on the GUI thread.
+
+If the process object was created but never associated with an operating-system process, properties such as `HasExited` may throw. Treat that as a normal failed-launch condition and proceed to disposal.
+
+### Process-tree limitation
+
+Windows PowerShell 5.1 uses .NET Framework, whose `Process.Kill()` does not provide the modern `entireProcessTree` overload. The immediate launch window makes it unlikely that Robocopy has already been spawned, but this change must not claim guaranteed process-tree termination.
+
+Do not introduce `taskkill`, WMI process-tree traversal, or cross-process job objects in this hardening task. Those would require a separate lifecycle design.
+
+### Tests and verification
+
+Add focused verification for:
+
+1. The GUI contains exactly one worker polling timer start in the launch path.
+2. The timer is started before the external process start.
+3. The launch catch stops the timer.
+4. The launch catch contains bounded graceful-wait, kill, post-kill wait, and dispose steps.
+5. Existing temporary-file cleanup still runs after process cleanup.
+
+Prefer a PowerShell AST-based contract test over raw line-number or unrestricted text matching. The test should locate the `GUI.WorkerStart` catch structurally and verify the relevant command/member invocations.
+
+A reusable process-stop helper (`Stop-M24WorkerProcess`) is introduced in `M24Backup.Shared.ps1` so the graceful-wait/kill/dispose behavior is testable outside the GUI. Add a behavioral test using a harmless child PowerShell process that sleeps for a bounded duration. The test must use a `finally` block that force-terminates the child if the assertion or helper fails, ensuring the test suite cannot leave a process behind.
+
+Do not add a production-only failure injection switch merely to test this edge case.
+
+## 3. Bound CIM Drive Discovery
+
+### Current behavior
+
+`Update-DriveList` calls `Get-CimInstance Win32_LogicalDisk` synchronously on the GUI thread. A severely delayed CIM/WMI operation can therefore block the interface.
+
+The existing catch restores a safe empty-drive state and displays the drive-discovery error in the GUI. It does not crash the application, but it cannot run until the synchronous CIM call returns or fails.
+
+### Implementation
+
+Add an explicit operation timeout and terminating error behavior:
+
+```powershell
+Get-CimInstance Win32_LogicalDisk -OperationTimeoutSec 8 -ErrorAction Stop
+```
+
+Use a value between five and ten seconds; eight seconds is the recommended default. This keeps normal local enumeration unaffected while bounding most CIM operation delays.
+
+`-OperationTimeoutSec` is available in both Windows PowerShell 5.1 and PowerShell 7.
+
+### Retry backoff
+
+The drive-watch timer currently calls `Update-DriveList` every 2.5 seconds. After a timeout or other discovery failure, immediate repeated retries could cause recurring GUI pauses.
+
+Add script state such as:
+
+```powershell
+$script:driveRetryAfterUtc = [DateTime]::MinValue
+```
+
+At the start of `Update-DriveList`:
+
+- If the call is not forced and `UtcNow` is earlier than `driveRetryAfterUtc`, return without querying CIM.
+- A manual or explicitly forced refresh may bypass the backoff.
+
+On successful drive discovery:
+
+- Reset `driveRetryAfterUtc` to `DateTime.MinValue` immediately after the
+  CIM query succeeds — before the unchanged-snapshot early return, which
+  would otherwise skip the reset.
+
+In the existing catch:
+
+- Set `driveRetryAfterUtc` to `UtcNow.AddSeconds(30)`.
+- Preserve the current UI error message and safe-state cleanup.
+
+Do not make the failure silent. The existing drive-status error is useful feedback.
+
+### Limitations
+
+The CIM timeout does not protect every synchronous operation in `Update-DriveList`. Per-drive calls to `Get-Partition`, `Get-Disk`, and filesystem/metadata inspection can still be delayed.
+
+Moving the complete discovery pipeline to a background runspace is explicitly deferred. The timeout and backoff are bounded, low-risk defense-in-depth measures rather than a complete asynchronous redesign.
+
+### Tests
+
+Add tests or AST-based contract checks proving that:
+
+1. The `Win32_LogicalDisk` GUI query specifies `-OperationTimeoutSec 8`.
+2. It specifies `-ErrorAction Stop`.
+3. A non-forced call returns during an active retry-backoff window.
+4. A forced call bypasses the retry backoff.
+5. A successful query clears the backoff state.
+6. The catch sets a 30-second backoff.
+7. The catch retains the existing user-visible drive error state.
+
+Where GUI-bound behavior cannot be executed safely in Pester without constructing the complete WinForms application, use precise AST assertions scoped to the `Update-DriveList` function rather than broad source-string searches.
+
+## 4. Verification Sequence
+
+After implementation:
+
+1. Parse `M24Backup.Shared.ps1`, `Bibliothekssicherung.ps1`, `Bibliothekssicherung-GUI.ps1`, and the changed test files; require zero parse errors.
+2. Run the complete Pester suite under PowerShell 7.
+3. Run the complete Pester suite under Windows PowerShell 5.1.
+4. Confirm no test left a child PowerShell process running.
+5. Confirm no test accessed or modified the real user Temp directory.
+6. Confirm the stale-file cleanup still runs once during GUI startup.
+7. Confirm normal backup, restore, cancellation, checksum verification, and deletion behavior remains unchanged.
+
+## 5. Manual Acceptance
+
+### Read-only cleanup
+
+1. In a dedicated test directory, create an exact application-owned artifact older than seven days.
+2. Mark it read-only.
+3. Run `Remove-M24StaleTempArtifacts` against that directory and confirm deletion.
+4. Repeat with a fresh read-only artifact and confirm preservation.
+
+### Partial worker launch
+
+1. Confirm a normal backup starts and the polling timer updates the GUI.
+2. Confirm a normal start failure restores controls and leaves no worker process.
+3. During a controlled development test, force a failure immediately around the timer/process launch boundary without adding a permanent production test hook.
+4. Confirm the timer is stopped, the worker exits, temporary communication files are cleaned up, and the original launch error remains visible and logged.
+
+### CIM timeout and backoff
+
+1. Confirm normal drive enumeration remains unchanged.
+2. Confirm manual refresh bypasses an active automatic-retry backoff.
+3. Simulate or mock a drive-discovery failure during development and confirm the error remains visible.
+4. Confirm automatic polling does not immediately repeat the failed query for 30 seconds.
+
+## Acceptance Criteria
+
+- Old, exact, non-reparse application artifacts are deleted even when read-only.
+- Fresh, malformed, unrelated, and reparse-point files are never modified by stale cleanup.
+- Clearing read-only preserves every other file attribute.
+- No successful external worker remains unmanaged after the GUI launch catch completes, within the documented limitation regarding already-spawned child processes.
+- The polling timer is stopped on every launch failure.
+- Process waits are bounded; the GUI never waits indefinitely during cleanup.
+- The GUI CIM query uses an eight-second operation timeout.
+- Automatic drive retries pause for 30 seconds after failure.
+- Forced refresh bypasses the retry pause.
+- Existing user-visible drive errors remain intact.
+- All production scripts and tests parse without errors.
+- The complete Pester suite passes under PowerShell 7 and Windows PowerShell 5.1.
+
+## Deferred Work
+
+- Full process-tree containment through Windows job objects or another lifecycle mechanism.
+- Moving the complete drive-discovery pipeline into a background runspace.
+- Timeouts for `Get-Partition`, `Get-Disk`, and filesystem metadata access.
+- Any change to the worker communication-file protocol.
+
+## Expected Change Size
+
+The expected implementation consists of:
+
+- A small read-only extension to `Remove-M24StaleTempArtifacts`.
+- A reordered and hardened worker launch/catch sequence.
+- One CIM timeout plus a small retry-backoff state.
+- Focused Pester coverage and AST contract tests.
+- No user-visible feature or layout changes.

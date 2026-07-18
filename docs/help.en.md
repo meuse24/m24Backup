@@ -260,6 +260,21 @@ Restore logs use `restore_YYYYMMDD_HHMMSS.log`.
 Robocopy exit codes 0 to 7 mean success or success with notes. Codes 8 and
 above indicate copy errors.
 
+### Local GUI diagnostic log
+
+Failures of the graphical interface itself (for example a worker process
+that could not be started) are additionally recorded locally at:
+
+`%LOCALAPPDATA%\M24Backup\Logs\gui.log`
+
+This diagnostic log is separate from the backup and restore logs in the
+`_logs\` folder on the backup drive and remains available even when no
+drive is connected. It rotates automatically (`gui.1.log` through
+`gui.4.log`) and uses about 10 MB in total; individual unusually large
+entries may slightly exceed this approximate target. Entries may contain
+local file paths and technical error details; they exist solely for
+troubleshooting in support cases.
+
 ## Common issues
 
 | Problem | Recommendation |

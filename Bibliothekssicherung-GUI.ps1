@@ -162,6 +162,11 @@ $script:backupCancelled = $false
 $script:driveMap = @{}
 $script:driveSnapshot = ''
 $script:driveDeviceIds = @()
+# Nach einem Fehlschlag der Laufwerkserkennung pausiert das automatische
+# Polling bis zu diesem UTC-Zeitpunkt, damit eine haengende CIM-Abfrage die
+# GUI nicht alle 2,5 Sekunden erneut blockiert. Manuelles Aktualisieren
+# (-Force) umgeht die Pause.
+$script:driveRetryAfterUtc = [DateTime]::MinValue
 $script:activeDrive = $null
 $script:activeMode = $null
 $script:activeDryRun = $false
@@ -1321,8 +1326,10 @@ $verificationTimer.Add_Tick({
             [System.Windows.Forms.MessageBox]::Show(($verification.Errors -join [Environment]::NewLine), $form.Text, 'OK', 'Warning') | Out-Null
         }
     } catch {
+        $verificationError = $_
+        Write-M24DiagnosticLog -EventId 'GUI.Verification' -Message 'Checksum verification failed in the GUI completion handler.' -Exception $verificationError
         $statusLabel.Text = L 'Backup-Prüfung fehlgeschlagen.' 'Backup verification failed.'
-        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, $form.Text, 'OK', 'Error') | Out-Null
+        [System.Windows.Forms.MessageBox]::Show($verificationError.Exception.Message, $form.Text, 'OK', 'Error') | Out-Null
     } finally {
         if ($script:verificationPowerShell) { $script:verificationPowerShell.Dispose() }
         $script:verificationPowerShell = $null
@@ -1379,9 +1386,11 @@ $deletionTimer.Add_Tick({
         Update-LibraryList
         [System.Windows.Forms.MessageBox]::Show($script:resultSummary, $form.Text, 'OK', 'Information') | Out-Null
     } catch {
+        $deletionError = $_
+        Write-M24DiagnosticLog -EventId 'GUI.Deletion' -Message 'Backup deletion failed in the GUI completion handler.' -Exception $deletionError
         $statusLabel.Text = L 'Backup konnte nicht gelöscht werden.' 'Backup could not be deleted.'
         [System.Windows.Forms.MessageBox]::Show(
-            ((L "Das Backup wurde nicht vollständig gelöscht:`r`n{0}" "The backup was not completely deleted:`r`n{0}") -f $_.Exception.Message),
+            ((L "Das Backup wurde nicht vollständig gelöscht:`r`n{0}" "The backup was not completely deleted:`r`n{0}") -f $deletionError.Exception.Message),
             $form.Text, 'OK', 'Error') | Out-Null
     } finally {
         if ($script:deletionPowerShell) { $script:deletionPowerShell.Dispose() }
@@ -1719,6 +1728,13 @@ function Get-PhysicalDriveConnectionInfo {
 function Update-DriveList {
     param([switch]$Force)
 
+    # Waehrend eines aktiven Retry-Backoffs nach einem Erkennungsfehler wird
+    # nur automatisch uebersprungen; eine ausdrueckliche Aktualisierung
+    # (-Force) fragt immer sofort ab.
+    if (-not $Force -and [DateTime]::UtcNow -lt $script:driveRetryAfterUtc) {
+        return
+    }
+
     $systemDrive = $env:SystemDrive
     $selectedDeviceId = $null
     if ($driveCombo.SelectedItem) {
@@ -1727,9 +1743,16 @@ function Update-DriveList {
     }
 
     try {
-        $drives = @(Get-CimInstance Win32_LogicalDisk |
+        # OperationTimeoutSec begrenzt eine haengende WMI/CIM-Abfrage, damit
+        # der GUI-Thread nicht unbegrenzt blockiert.
+        $drives = @(Get-CimInstance Win32_LogicalDisk -OperationTimeoutSec 8 -ErrorAction Stop |
             Where-Object { $_.DriveType -in 2, 3 -and $_.DeviceID -ne $systemDrive -and $_.Size -gt 0 } |
             Sort-Object DriveType, DeviceID)
+
+        # Reset direkt nach der erfolgreichen CIM-Abfrage - noch vor dem
+        # Early-Return bei unveraendertem Snapshot, der ihn sonst ueberspringen
+        # wuerde.
+        $script:driveRetryAfterUtc = [DateTime]::MinValue
 
         $knownDriveSnapshot = if ($script:knownDrive) { [string]$script:knownDrive.SerialNumber } else { '' }
         $currentSnapshot = @($drives | ForEach-Object {
@@ -1820,6 +1843,10 @@ function Update-DriveList {
             $startButton.Enabled = $false
         }
     } catch {
+        # 30 Sekunden Backoff fuer das automatische Polling, damit eine
+        # wiederholt haengende oder fehlschlagende Abfrage die GUI nicht im
+        # 2,5-Sekunden-Takt erneut pausieren laesst.
+        $script:driveRetryAfterUtc = [DateTime]::UtcNow.AddSeconds(30)
         $script:driveSnapshot = $null
         $script:driveDeviceIds = @()
         $driveCombo.Items.Clear()
@@ -2019,13 +2046,31 @@ $startButton.Add_Click({
 
         $script:backupProcess = New-Object System.Diagnostics.Process
         $script:backupProcess.StartInfo = $startInfo
+        # Der Timer startet VOR dem externen Prozess: Ein WinForms-Tick kann
+        # erst laufen, wenn dieser Click-Handler zur Nachrichtenschleife
+        # zurueckkehrt - bis dahin ist der Start entweder gelungen oder der
+        # catch hat den Timer wieder gestoppt. So kann eine Ausnahme nach
+        # erfolgreichem Process.Start() keinen unueberwachten Worker
+        # zuruecklassen.
+        $timer.Start()
         if (-not $script:backupProcess.Start()) {
             throw (L "Der Sicherungsprozess konnte nicht gestartet werden." "The worker process could not be started.")
         }
-        $timer.Start()
     } catch {
+        $workerStartError = $_
+        Write-M24DiagnosticLog -EventId 'GUI.WorkerStart' -Message 'Failed while preparing or starting the backup or restore worker process.' -Exception $workerStartError -Context ('Mode={0}' -f $script:activeMode)
+        # Timer als erster Aufraeumschritt stoppen: Die MessageBox am Ende
+        # pumpt Nachrichten, ein laufender Timer koennte sonst mitten im
+        # Aufraeumen ticken.
+        try { $timer.Stop() } catch {}
+        $workerExitConfirmed = $true
         if ($script:backupProcess) {
-            try { $script:backupProcess.Dispose() } catch {}
+            # Ein eventuell doch schon gestarteter Worker wird kooperativ
+            # (Cancel-Datei), sonst per Kill() beendet - mit begrenzten
+            # Wartezeiten, damit der GUI-Thread nie haengen bleibt. Die
+            # Funktion gibt das Process-Objekt abschliessend frei und meldet,
+            # ob das Prozessende bestaetigt wurde.
+            $workerExitConfirmed = Stop-M24WorkerProcess -Process $script:backupProcess -CancelFile $script:cancelFile
             $script:backupProcess = $null
         }
         Reset-ProgressIndicator -Maximum $selectedFolders.Count
@@ -2044,8 +2089,16 @@ $startButton.Add_Click({
         $form.AcceptButton = $startButton
         $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
         $statusLabel.Text = L "Start fehlgeschlagen." "Failed to start."
-        foreach ($temporaryFile in @($script:statusFile, $script:resultFile, $script:cancelFile, $script:previewFile, $script:approvalFile, $script:selectedFoldersFile)) {
-            if ($temporaryFile) { Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue }
+        if ($workerExitConfirmed) {
+            foreach ($temporaryFile in @($script:statusFile, $script:resultFile, $script:cancelFile, $script:previewFile, $script:approvalFile, $script:selectedFoldersFile)) {
+                if ($temporaryFile) { Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue }
+            }
+        } else {
+            # Unbestaetigtes Prozessende: Die Kommunikationsdateien bleiben
+            # erhalten, damit die Cancel-Datei fuer den moeglicherweise
+            # weiterlaufenden Worker wirksam bleibt. Die Sieben-Tage-
+            # Bereinigung entfernt die Reste spaeter zuverlaessig.
+            Write-M24DiagnosticLog -EventId 'GUI.WorkerStart' -Severity 'Warning' -Message 'Worker exit could not be confirmed; communication files were kept so the cancellation request stays effective.' -Context ('CancelFile={0}' -f $script:cancelFile)
         }
         $script:statusFile = $null
         $script:resultFile = $null
@@ -2061,7 +2114,7 @@ $startButton.Add_Click({
         $script:backupStartedAt = $null
         Update-ElapsedDuration
         Update-BackupOptionState
-        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, (L "Fehler" "Error"), "OK", "Error") | Out-Null
+        [System.Windows.Forms.MessageBox]::Show($workerStartError.Exception.Message, (L "Fehler" "Error"), "OK", "Error") | Out-Null
     }
 })
 
@@ -2543,9 +2596,11 @@ $deleteBackupButton.Add_Click({
         $script:deletionAsyncResult = $script:deletionPowerShell.BeginInvoke()
         $deletionTimer.Start()
     } catch {
+        $deletionStartError = $_
+        Write-M24DiagnosticLog -EventId 'GUI.DeletionStart' -Message 'Failed while preparing or starting the backup deletion.' -Exception $deletionStartError
         $statusLabel.Text = L 'Backup konnte nicht gelöscht werden.' 'Backup could not be deleted.'
         [System.Windows.Forms.MessageBox]::Show(
-            ((L "Das Backup wurde nicht vollständig gelöscht:`r`n{0}" "The backup was not completely deleted:`r`n{0}") -f $_.Exception.Message),
+            ((L "Das Backup wurde nicht vollständig gelöscht:`r`n{0}" "The backup was not completely deleted:`r`n{0}") -f $deletionStartError.Exception.Message),
             $form.Text, 'OK', 'Error') | Out-Null
         if ($script:deletionPowerShell) { $script:deletionPowerShell.Dispose() }
         $script:deletionPowerShell = $null
@@ -2729,6 +2784,13 @@ foreach ($surface in @($targetSurface, $folderSurface, $optionsSurface, $activit
     $surface.SendToBack()
 }
 
+# Verwaiste Kommunikationsdateien frueherer Sitzungen (aelter als sieben
+# Tage) still entfernen, bevor diese Instanz eigene Dateien anlegt. Frische
+# Dateien koennen einer zweiten GUI-Instanz oder einem noch laufenden Worker
+# gehoeren und bleiben deshalb unangetastet. Die Funktion faengt alle Fehler
+# selbst ab und darf den Start nicht beeinflussen.
+Remove-M24StaleTempArtifacts
+
 Set-StartupSplashStatus (L 'Einstellungen werden geladen ...' 'Loading settings ...')
 $script:settings = Get-AppSettings
 $script:knownDrive = Get-KnownBackupDrive
@@ -2767,7 +2829,9 @@ Close-StartupSplash
 [void]$form.ShowDialog()
 } catch {
     $script:fatalGuiError = $true
-    $fatalMessage = $_.Exception.Message
+    $fatalError = $_
+    $fatalMessage = $fatalError.Exception.Message
+    Write-M24DiagnosticLog -EventId 'GUI.Fatal' -Message $(if ($script:mainWindowShown) { 'Unexpected top-level GUI failure.' } else { 'The GUI failed during startup.' }) -Exception $fatalError -Context ('MainWindowShown={0}' -f $script:mainWindowShown)
     # Der VBS-Starter startet PowerShell ohne sichtbare Konsole. Deshalb muss
     # ein unbehandelter Fehler als Dialog erscheinen, bevor der Prozess endet.
     Close-StartupSplash

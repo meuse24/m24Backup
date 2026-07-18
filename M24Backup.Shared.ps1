@@ -183,6 +183,261 @@ function Write-M24AtomicTextFile {
     }
 }
 
+function Write-M24DiagnosticLog {
+    # Lokales GUI-Diagnoseprotokoll unter %LOCALAPPDATA%\M24Backup\Logs.
+    # Es dokumentiert ausschliesslich GUI-Fehler und ist unabhaengig vom
+    # Betriebsprotokoll auf dem Sicherungsziel; es funktioniert deshalb auch
+    # ohne angeschlossenes Sicherungslaufwerk. Die Funktion ist bewusst
+    # ausfallsicher: Ein Fehler beim Schreiben oder Rotieren darf niemals den
+    # urspruenglichen Fehler des Aufrufers ueberdecken. Sie wirft daher nie
+    # und liefert keinerlei Pipeline-Ausgabe.
+    param(
+        [string]$EventId,
+        [string]$Message,
+        # ErrorRecord (typisch: $_ im catch-Block) oder Exception. Nur aus
+        # einem ErrorRecord laesst sich der PowerShell-Skript-Stack gewinnen.
+        $Exception,
+        [ValidateSet('Info', 'Warning', 'Error')]
+        [string]$Severity = 'Error',
+        [string]$Context,
+        [string]$LogDirectory,
+        [int64]$MaxBytes = 2MB,
+        [int]$FileCount = 5
+    )
+
+    try {
+        # Der Standardpfad wird erst hier innerhalb des try aufgeloest. Ein
+        # Default-Ausdruck im param-Block wuerde bei fehlendem Profilpfad
+        # schon waehrend der Parameterbindung werfen und damit die
+        # Ausfallsicherheits-Zusage der Funktion brechen.
+        if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+            $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
+            if ([string]::IsNullOrWhiteSpace($localAppData)) { return }
+            $LogDirectory = Join-Path $localAppData 'M24Backup\Logs'
+        }
+        if (-not [System.IO.Directory]::Exists($LogDirectory)) {
+            [void][System.IO.Directory]::CreateDirectory($LogDirectory)
+        }
+        $activeLog = Join-Path $LogDirectory 'gui.log'
+
+        # Rotation vor dem naechsten Schreibvorgang: gui.log -> gui.1.log,
+        # bestehende Archive ruecken um eine Position auf, das aelteste
+        # Archiv (gui.<FileCount-1>.log) entfaellt.
+        if ($FileCount -ge 2 -and [System.IO.File]::Exists($activeLog) -and
+            (New-Object System.IO.FileInfo($activeLog)).Length -ge $MaxBytes) {
+            $oldestArchive = Join-Path $LogDirectory ("gui.{0}.log" -f ($FileCount - 1))
+            if ([System.IO.File]::Exists($oldestArchive)) { [System.IO.File]::Delete($oldestArchive) }
+            for ($index = $FileCount - 2; $index -ge 1; $index--) {
+                $source = Join-Path $LogDirectory ("gui.{0}.log" -f $index)
+                if ([System.IO.File]::Exists($source)) {
+                    [System.IO.File]::Move($source, (Join-Path $LogDirectory ("gui.{0}.log" -f ($index + 1))))
+                }
+            }
+            [System.IO.File]::Move($activeLog, (Join-Path $LogDirectory 'gui.1.log'))
+        }
+
+        $errorRecord = $null
+        $exceptionObject = $null
+        if ($Exception -is [System.Management.Automation.ErrorRecord]) {
+            $errorRecord = $Exception
+            $exceptionObject = $Exception.Exception
+        } elseif ($Exception -is [System.Exception]) {
+            $exceptionObject = $Exception
+        }
+
+        $timestamp = [System.DateTimeOffset]::Now.ToString('yyyy-MM-ddTHH:mm:ss.fffzzz', [System.Globalization.CultureInfo]::InvariantCulture)
+        $builder = New-Object System.Text.StringBuilder
+        [void]$builder.AppendLine(('{0} [{1}] [{2}]' -f $timestamp, $Severity.ToUpperInvariant(), $EventId))
+        [void]$builder.AppendLine(('PID: {0}' -f $PID))
+        if (-not [string]::IsNullOrWhiteSpace($Message)) {
+            [void]$builder.AppendLine(('Message: {0}' -f $Message))
+        }
+        if ($exceptionObject) {
+            [void]$builder.AppendLine(('Exception: {0}' -f $exceptionObject.GetType().FullName))
+            if (-not [string]::IsNullOrWhiteSpace($exceptionObject.Message) -and $exceptionObject.Message -cne $Message) {
+                [void]$builder.AppendLine(('ExceptionMessage: {0}' -f $exceptionObject.Message))
+            }
+        }
+        $stackText = if ($errorRecord -and -not [string]::IsNullOrWhiteSpace($errorRecord.ScriptStackTrace)) {
+            $errorRecord.ScriptStackTrace
+        } elseif ($exceptionObject -and -not [string]::IsNullOrWhiteSpace($exceptionObject.StackTrace)) {
+            $exceptionObject.StackTrace
+        } else {
+            $null
+        }
+        if ($stackText) { [void]$builder.AppendLine(('Stack: {0}' -f $stackText)) }
+        if (-not [string]::IsNullOrWhiteSpace($Context)) { [void]$builder.AppendLine(('Context: {0}' -f $Context)) }
+        [void]$builder.AppendLine()
+
+        [System.IO.File]::AppendAllText($activeLog, $builder.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        # Diagnose-Logging ist reine Zusatzinformation. Jeder interne Fehler
+        # wird verschluckt, damit der Aufrufer seinen Originalfehler behaelt.
+    }
+}
+
+function Remove-M24StaleTempArtifacts {
+    # Best-effort-Bereinigung verwaister Kommunikationsdateien dieser
+    # Anwendung im Temp-Verzeichnis. Ein passender Dateiname allein beweist
+    # keine Verwaisung: Eine zweite GUI-Instanz oder ein nach GUI-Ende
+    # weiterlaufender Worker kann frische Dateien besitzen. Geloescht wird
+    # deshalb nur, was exakt einem bekannten Namensformat entspricht UND
+    # mindestens MinimumAge (Standard: sieben Tage) alt ist. Die Funktion
+    # wirft nie und liefert keine Pipeline-Ausgabe; ein Bereinigungsproblem
+    # darf den GUI-Start weder blockieren noch sichtbar werden.
+    param(
+        [string]$TempDirectory,
+        [TimeSpan]$MinimumAge = [TimeSpan]::FromDays(7)
+    )
+
+    try {
+        # Null oder negativ wuerde frische, moeglicherweise aktiv genutzte
+        # Kommunikationsdateien zur Loeschung freigeben.
+        if ($MinimumAge -le [TimeSpan]::Zero) { return }
+
+        # Der Standardpfad wird erst hier im try aufgeloest, damit auch ein
+        # Fehler der Pfadaufloesung von der Ausfallsicherheit gedeckt ist.
+        if ([string]::IsNullOrWhiteSpace($TempDirectory)) {
+            $TempDirectory = [System.IO.Path]::GetTempPath()
+        }
+        if ([string]::IsNullOrWhiteSpace($TempDirectory)) { return }
+        if (-not [System.IO.Directory]::Exists($TempDirectory)) { return }
+
+        $cutoffUtc = [DateTime]::UtcNow.Subtract($MinimumAge)
+
+        # Nur diese exakten, verankerten Muster autorisieren eine Loeschung.
+        # <GUID> ist das N-Format von [guid]: exakt 32 Hexadezimalzeichen.
+        # Das erste Muster deckt die normalen GUI/Worker-Dateien sowie die
+        # .tmp/.bak-Reste von Write-M24AtomicTextFile ab, das zweite die
+        # Abbruchmarker der Pruefsummen-Verifikation (PID + GUID).
+        $ownedNamePatterns = @(
+            '^Bibliothekssicherung_[0-9a-f]{32}\.(?:status|result\.json|cancel|preview\.json|approve|folders\.json)(?:\.[0-9a-f]{32}\.(?:tmp|bak))?$',
+            '^M24Backup\.verify-cancel\.\d+\.[0-9a-f]{32}\.tmp$'
+        )
+
+        # Die Wildcard-Vorfilter sind nur eine Enumerationsoptimierung, damit
+        # nicht das gesamte Temp-Verzeichnis durch die Pipeline laeuft. Sie
+        # sind ausdruecklich keine Loeschautorisierung. Es wird nur die
+        # oberste Ebene betrachtet, keine Unterverzeichnisse.
+        $candidates = @()
+        foreach ($prefilter in @('Bibliothekssicherung_*', 'M24Backup.verify-cancel.*.tmp')) {
+            $candidates += @(Get-ChildItem -LiteralPath $TempDirectory -Filter $prefilter -File -Force -ErrorAction SilentlyContinue)
+        }
+
+        foreach ($candidate in $candidates) {
+            try {
+                $isOwnedName = $false
+                foreach ($pattern in $ownedNamePatterns) {
+                    if ($candidate.Name -match $pattern) { $isOwnedName = $true; break }
+                }
+                if (-not $isOwnedName) { continue }
+
+                # Metadaten unmittelbar vor der Entscheidung auffrischen,
+                # damit weder die Reparse-Point- noch die Alterspruefung auf
+                # veralteten Enumerationsdaten basiert.
+                $candidate.Refresh()
+                if (-not $candidate.Exists) { continue }
+
+                # Reparse-Points (Symlinks u. ae.) werden nie geloescht, auch
+                # wenn der Name passt.
+                if (($candidate.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                if ($candidate.LastWriteTimeUtc -le $cutoffUtc) {
+                    # Erst nach allen Autorisierungspruefungen: Ein gesetztes
+                    # ReadOnly-Bit wuerde File.Delete scheitern lassen und den
+                    # Kandidaten bei jedem Start erneut anfallen lassen. Nur
+                    # dieses eine Bit wird entfernt; alle uebrigen Attribute
+                    # bleiben unveraendert.
+                    $attributes = $candidate.Attributes
+                    if (($attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+                        [System.IO.File]::SetAttributes(
+                            $candidate.FullName,
+                            ($attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)))
+                    }
+                    [System.IO.File]::Delete($candidate.FullName)
+                }
+            } catch {
+                # Eine unzugreifbare Datei darf die Bereinigung der uebrigen
+                # Kandidaten nicht stoppen.
+            }
+        }
+    } catch {
+        # Best effort: Aufloesungs- und Enumerationsfehler werden bewusst
+        # verschluckt.
+    }
+}
+
+function Stop-M24WorkerProcess {
+    # Best-effort-Beendigung eines gestarteten Worker-Prozesses nach einem
+    # teilweise fehlgeschlagenen GUI-Start. Ablauf: kooperativen Abbruch per
+    # Cancel-Datei anfordern, begrenzt auf ein freiwilliges Ende warten,
+    # andernfalls Kill() mit begrenzter Bestaetigungswartezeit. Beide
+    # Wartezeiten werden im Funktionskoerper hart auf 0 bis 10 Sekunden
+    # begrenzt, damit der GUI-Thread unabhaengig von Aufruferwerten nie
+    # unbegrenzt blockiert. Die Funktion wirft nie und darf den
+    # urspruenglichen Startfehler des Aufrufers nicht ueberdecken. Das
+    # Process-Objekt wird abschliessend immer freigegeben.
+    #
+    # Rueckgabe: $true, wenn das Prozessende bestaetigt ist (nie gestartet,
+    # bereits beendet oder Ende nach Cancel/Kill beobachtet), sonst $false.
+    # Bei $false soll der Aufrufer die Cancel-Datei NICHT loeschen, damit
+    # das Abbruchsignal fuer den weiterlaufenden Worker wirksam bleibt.
+    #
+    # Grenze: Unter .NET Framework (Windows PowerShell 5.1) gibt es keine
+    # Kill(entireProcessTree)-Ueberladung; bereits gestartete Kindprozesse
+    # des Workers werden nicht garantiert mitbeendet.
+    param(
+        $Process,
+        [string]$CancelFile,
+        [int]$GracefulWaitMilliseconds = 1000,
+        [int]$KillWaitMilliseconds = 2000
+    )
+
+    $exitConfirmed = $false
+    try {
+        # Obergrenze bewusst im Koerper statt per ValidateRange, damit
+        # ungewoehnliche Aufruferwerte nicht schon bei der Parameterbindung
+        # werfen. 10 Sekunden je Phase lassen auch langsamen Kaltstarts von
+        # Kindprozessen genug Spielraum.
+        $gracefulWait = [Math]::Min(10000, [Math]::Max(0, $GracefulWaitMilliseconds))
+        $killWait = [Math]::Min(10000, [Math]::Max(0, $KillWaitMilliseconds))
+
+        if (-not $Process) {
+            # Kein Prozessobjekt: Es gibt nichts, das weiterlaufen koennte.
+            $exitConfirmed = $true
+        } else {
+            # Bewusst WaitForExit(0) statt HasExited: Ein Methodenaufruf
+            # wirft bei einem nie verknuepften Prozessobjekt (Start() kam
+            # nicht zustande) immer eine abfangbare Ausnahme - unabhaengig
+            # von der ErrorActionPreference des Aufrufers. Der Getter
+            # HasExited liefert bei 'Continue' stattdessen $null und wuerde
+            # den Fehlstart faelschlich als laufenden Prozess einstufen.
+            $isRunning = $false
+            try { $isRunning = -not $Process.WaitForExit(0) } catch { $isRunning = $false }
+
+            if ($isRunning -and -not [string]::IsNullOrWhiteSpace($CancelFile)) {
+                try { [System.IO.File]::WriteAllText($CancelFile, 'cancel') } catch {}
+            }
+            if ($isRunning) {
+                try { if ($Process.WaitForExit($gracefulWait)) { $isRunning = $false } } catch {}
+            }
+            if ($isRunning) {
+                try { $Process.Kill() } catch {}
+                try { if ($Process.WaitForExit($killWait)) { $isRunning = $false } } catch {}
+            }
+            $exitConfirmed = -not $isRunning
+        }
+    } catch {
+        # Best effort: Kein Fehler dieser Aufraeumfunktion darf den
+        # ausloesenden Startfehler ersetzen. Ohne Bestaetigung bleibt die
+        # Rueckgabe $false.
+    } finally {
+        if ($Process) {
+            try { $Process.Dispose() } catch {}
+        }
+    }
+    return $exitConfirmed
+}
+
 function Test-M24ExcludedFileName {
     param([string]$Name, [string[]]$Patterns)
     foreach ($pattern in $Patterns) {

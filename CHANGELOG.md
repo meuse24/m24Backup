@@ -4,6 +4,46 @@ Alle wesentlichen Änderungen dieses Projekts werden in dieser Datei
 dokumentiert. Die Versionierung orientiert sich an
 [Semantic Versioning](https://semver.org/lang/de/).
 
+## [1.7.0] – 2026-07-18
+
+### Hinzugefügt
+
+- Lokales GUI-Diagnoseprotokoll unter `%LOCALAPPDATA%\M24Backup\Logs\gui.log`:
+  Fehler der Oberfläche selbst (z. B. ein fehlgeschlagener Start des
+  Worker-Prozesses) werden mit Zeitstempel, Ereignis-ID, Exception und
+  Skript-Stack lokal festgehalten – unabhängig vom Sicherungslaufwerk und
+  damit auch ohne angeschlossenes Ziel verfügbar. Das Protokoll rotiert
+  automatisch (`gui.1.log` bis `gui.4.log`, insgesamt etwa 10 MB) und darf
+  den ursprünglichen Fehler nie überdecken.
+- Verwaiste temporäre Kommunikationsdateien früherer Sitzungen (Status-,
+  Ergebnis-, Abbruch-, Vorschau-, Freigabe- und Ordnerlisten-Dateien samt
+  atomarer `.tmp`-/`.bak`-Reste sowie Verify-Abbruchmarker) werden beim
+  GUI-Start still aus dem Temp-Verzeichnis entfernt. Gelöscht wird bewusst
+  konservativ: nur exakt erkannte, anwendungseigene Dateinamen, die älter
+  als sieben Tage sind – auch wenn sie schreibgeschützt sind. Frische
+  Dateien – etwa einer zweiten GUI-Instanz oder eines noch laufenden
+  Workers – sowie Verzeichnisse, Symlinks und ähnlich benannte
+  Fremddateien bleiben unangetastet; Fehler bei der Bereinigung
+  beeinflussen den Programmstart nicht.
+
+### Geändert
+
+- Die Laufwerkserkennung begrenzt die Windows-Systemabfrage (WMI/CIM) auf
+  acht Sekunden und pausiert nach einem Fehlschlag 30 Sekunden, bevor sie
+  automatisch erneut abfragt; manuelles Aktualisieren fragt weiterhin sofort
+  ab. Die Oberfläche bleibt dadurch auch bei einer hängenden Systemabfrage
+  bedienbar, und die bestehende Fehlermeldung bleibt sichtbar.
+
+### Behoben
+
+- Schlägt der Start einer Sicherung oder Wiederherstellung unmittelbar nach
+  dem Anlegen des Worker-Prozesses fehl, wird dieser jetzt kontrolliert
+  beendet (kooperative Abbruchanforderung, danach erzwungenes Ende mit hart
+  begrenzten Wartezeiten) statt unbeobachtet weiterzulaufen. Die temporären
+  Kommunikationsdateien werden nur nach bestätigtem Prozessende sofort
+  entfernt; andernfalls bleibt die Abbruchdatei für den Worker wirksam und
+  die Reste übernimmt später die Temp-Bereinigung.
+
 ## [1.6.0] – 2026-07-18
 
 ### Hinzugefügt

@@ -1,4 +1,4 @@
-# Pester 5+: Top-Level-Code laeuft nur in der Discovery-Phase. Das
+﻿# Pester 5+: Top-Level-Code laeuft nur in der Discovery-Phase. Das
 # Dot-Sourcing muss deshalb in BeforeAll stehen, damit die Funktionen
 # waehrend der Testausfuehrung verfuegbar sind.
 BeforeAll {
@@ -486,5 +486,576 @@ Ergebnis: Erfolgreich abgeschlossen am 2026-07-16 08:00:00.
         } | Should -Throw '*simulated file lock*'
         Test-Path -LiteralPath (Join-Path $script:deletionRoot '_backup.lock') | Should -Be $false
         Test-Path -LiteralPath (Join-Path $script:deletionRoot '_Sicherungsinfo.txt') | Should -Be $true
+    }
+}
+
+Describe 'Write-M24DiagnosticLog' {
+    BeforeEach {
+        # Eigenes Unterverzeichnis pro Test, damit Rotationstests nicht von
+        # Rueckstaenden anderer Tests abhaengen. Alles bleibt unter $TestDrive.
+        $script:diagnosticDirectory = Join-Path $TestDrive ("DiagLogs_{0}" -f [guid]::NewGuid().ToString('N'))
+        $script:diagnosticLog = Join-Path $script:diagnosticDirectory 'gui.log'
+    }
+
+    It 'creates a missing log directory and the active log file' {
+        Test-Path -LiteralPath $script:diagnosticDirectory | Should -Be $false
+        Write-M24DiagnosticLog -EventId 'GUI.Test' -Message 'directory creation' -LogDirectory $script:diagnosticDirectory
+        Test-Path -LiteralPath $script:diagnosticLog -PathType Leaf | Should -Be $true
+    }
+
+    It 'writes timestamp, severity, event id, process id, and message' {
+        Write-M24DiagnosticLog -EventId 'GUI.Test' -Message 'Something failed.' -LogDirectory $script:diagnosticDirectory
+        $content = Get-Content -LiteralPath $script:diagnosticLog -Raw -Encoding UTF8
+        $content | Should -Match '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2} \[ERROR\] \[GUI\.Test\]'
+        $content | Should -Match ('PID: {0}' -f $PID)
+        $content | Should -Match ([regex]::Escape('Message: Something failed.'))
+    }
+
+    It 'records the exception type and the script stack trace from an error record' {
+        $errorRecord = try { throw 'diagnostic sample failure' } catch { $_ }
+        Write-M24DiagnosticLog -EventId 'GUI.Test' -Message 'wrapper message' -Exception $errorRecord -LogDirectory $script:diagnosticDirectory
+        $content = Get-Content -LiteralPath $script:diagnosticLog -Raw -Encoding UTF8
+        $content | Should -Match ([regex]::Escape('Exception: System.Management.Automation.RuntimeException'))
+        $content | Should -Match ([regex]::Escape('ExceptionMessage: diagnostic sample failure'))
+        $content | Should -Match 'Stack: '
+    }
+
+    It 'appends entries without overwriting earlier ones' {
+        Write-M24DiagnosticLog -EventId 'GUI.First' -Message 'first entry' -LogDirectory $script:diagnosticDirectory
+        Write-M24DiagnosticLog -EventId 'GUI.Second' -Message 'second entry' -LogDirectory $script:diagnosticDirectory
+        $content = Get-Content -LiteralPath $script:diagnosticLog -Raw -Encoding UTF8
+        $content | Should -Match '\[GUI\.First\]'
+        $content | Should -Match '\[GUI\.Second\]'
+    }
+
+    It 'rotates the active log when it reaches the size limit' {
+        Write-M24DiagnosticLog -EventId 'GUI.First' -Message ('x' * 512) -LogDirectory $script:diagnosticDirectory -MaxBytes 200 -FileCount 3
+        Write-M24DiagnosticLog -EventId 'GUI.Second' -Message 'after rotation' -LogDirectory $script:diagnosticDirectory -MaxBytes 200 -FileCount 3
+        $activeContent = Get-Content -LiteralPath $script:diagnosticLog -Raw -Encoding UTF8
+        $archiveContent = Get-Content -LiteralPath (Join-Path $script:diagnosticDirectory 'gui.1.log') -Raw -Encoding UTF8
+        $activeContent | Should -Match '\[GUI\.Second\]'
+        $activeContent | Should -Not -Match '\[GUI\.First\]'
+        $archiveContent | Should -Match '\[GUI\.First\]'
+    }
+
+    It 'retains no more than the configured number of files' {
+        for ($writeIndex = 1; $writeIndex -le 6; $writeIndex++) {
+            Write-M24DiagnosticLog -EventId ('GUI.Write{0}' -f $writeIndex) -Message ('x' * 64) -LogDirectory $script:diagnosticDirectory -MaxBytes 1 -FileCount 3
+        }
+        $logFiles = @(Get-ChildItem -LiteralPath $script:diagnosticDirectory -File | ForEach-Object Name | Sort-Object)
+        $logFiles.Count | Should -Be 3
+        $logFiles | Should -Be @('gui.1.log', 'gui.2.log', 'gui.log')
+    }
+
+    It 'keeps archives ordered from newest to oldest across repeated rotations' {
+        # MaxBytes 1 erzwingt eine Rotation vor jedem weiteren Eintrag.
+        foreach ($eventId in @('GUI.A', 'GUI.B', 'GUI.C')) {
+            Write-M24DiagnosticLog -EventId $eventId -Message 'ordering' -LogDirectory $script:diagnosticDirectory -MaxBytes 1 -FileCount 3
+        }
+        (Get-Content -LiteralPath $script:diagnosticLog -Raw -Encoding UTF8) | Should -Match '\[GUI\.C\]'
+        (Get-Content -LiteralPath (Join-Path $script:diagnosticDirectory 'gui.1.log') -Raw -Encoding UTF8) | Should -Match '\[GUI\.B\]'
+        (Get-Content -LiteralPath (Join-Path $script:diagnosticDirectory 'gui.2.log') -Raw -Encoding UTF8) | Should -Match '\[GUI\.A\]'
+    }
+
+    It 'suppresses errors for an unusable log location' {
+        $blockingFile = Join-Path $TestDrive ("blocker_{0}.txt" -f [guid]::NewGuid().ToString('N'))
+        Set-Content -LiteralPath $blockingFile -Value 'occupied'
+        { Write-M24DiagnosticLog -EventId 'GUI.Test' -Message 'blocked' -LogDirectory $blockingFile } | Should -Not -Throw
+        { Write-M24DiagnosticLog -EventId 'GUI.Test' -Message 'invalid' -LogDirectory 'Q:\<invalid>|path' } | Should -Not -Throw
+    }
+
+    It 'returns no pipeline output' {
+        $output = Write-M24DiagnosticLog -EventId 'GUI.Test' -Message 'no output expected' -LogDirectory $script:diagnosticDirectory
+        $output | Should -BeNullOrEmpty
+    }
+
+    It 'stores special characters and multiline exception messages intact' {
+        $errorRecord = try { throw "Zeile eins`r`nZeile zwei mit ä ö ü ß €" } catch { $_ }
+        Write-M24DiagnosticLog -EventId 'GUI.Test' -Message 'Umlaute: äöüß €' -Exception $errorRecord -LogDirectory $script:diagnosticDirectory
+        $content = Get-Content -LiteralPath $script:diagnosticLog -Raw -Encoding UTF8
+        $content | Should -Match ([regex]::Escape('Umlaute: äöüß €'))
+        $content | Should -Match ([regex]::Escape('Zeile zwei mit ä ö ü ß €'))
+    }
+}
+
+Describe 'Remove-M24StaleTempArtifacts' {
+    BeforeAll {
+        # Legt eine Kandidatendatei mit definiertem Alter an. Alle Pfade
+        # liegen unter $TestDrive; das echte %TEMP% wird nie beruehrt.
+        function New-M24CleanupTestFile {
+            param([string]$Directory, [string]$Name, [double]$AgeDays)
+            $path = Join-Path $Directory $Name
+            Set-Content -LiteralPath $path -Value 'x' -NoNewline
+            (Get-Item -LiteralPath $path -Force).LastWriteTimeUtc = [DateTime]::UtcNow.AddDays(-$AgeDays)
+            return $path
+        }
+        $script:validGuid = '0123456789abcdef0123456789abcdef'
+    }
+
+    BeforeEach {
+        # Eigenes Verzeichnis pro Test, damit sich Kandidaten verschiedener
+        # Tests nicht gegenseitig beeinflussen.
+        $script:cleanupDirectory = Join-Path $TestDrive ("StaleTemp_{0}" -f [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:cleanupDirectory | Out-Null
+    }
+
+    It 'deletes an old <Extension> communication file' -TestCases @(
+        @{ Extension = 'status' }
+        @{ Extension = 'result.json' }
+        @{ Extension = 'cancel' }
+        @{ Extension = 'preview.json' }
+        @{ Extension = 'approve' }
+        @{ Extension = 'folders.json' }
+    ) {
+        param($Extension)
+        $path = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.{1}" -f $script:validGuid, $Extension) -AgeDays 10
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        Test-Path -LiteralPath $path | Should -Be $false
+    }
+
+    It 'deletes old atomic-write .tmp and .bak remnants' {
+        $tmpRemnant = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.result.json.{0}.tmp" -f $script:validGuid) -AgeDays 10
+        $bakRemnant = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.status.{0}.bak" -f $script:validGuid) -AgeDays 10
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        Test-Path -LiteralPath $tmpRemnant | Should -Be $false
+        Test-Path -LiteralPath $bakRemnant | Should -Be $false
+    }
+
+    It 'deletes an old checksum-verification cancellation marker' {
+        $marker = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("M24Backup.verify-cancel.4242.{0}.tmp" -f $script:validGuid) -AgeDays 10
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        Test-Path -LiteralPath $marker | Should -Be $false
+    }
+
+    It 'preserves fresh matching files including an active cancellation request' {
+        $status = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.status" -f $script:validGuid) -AgeDays 0
+        $cancel = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.cancel" -f $script:validGuid) -AgeDays 0
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        Test-Path -LiteralPath $status | Should -Be $true
+        Test-Path -LiteralPath $cancel | Should -Be $true
+    }
+
+    It 'preserves a fresh verification-cancel marker' {
+        $marker = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("M24Backup.verify-cancel.4242.{0}.tmp" -f $script:validGuid) -AgeDays 0
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        Test-Path -LiteralPath $marker | Should -Be $true
+    }
+
+    It 'preserves a file just newer than the cutoff' {
+        # Grosszuegiger Abstand von einem Tag zur Sieben-Tage-Grenze, damit
+        # der Test nicht von Zeitpraezision abhaengt.
+        $path = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.status" -f $script:validGuid) -AgeDays 6
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        Test-Path -LiteralPath $path | Should -Be $true
+    }
+
+    It 'deletes a file just older than the cutoff' {
+        # Knapp jenseits der Grenze (rund 15 Minuten), aber weit genug fuer
+        # normale Dateisystem-Zeitstempelpraezision.
+        $path = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.status" -f $script:validGuid) -AgeDays 7.01
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        Test-Path -LiteralPath $path | Should -Be $false
+    }
+
+    It 'preserves the similar but invalid name <Name>' -TestCases @(
+        @{ Name = 'Bibliothekssicherung_0123456789abcdef0123456789abcde.status' }
+        @{ Name = 'Bibliothekssicherung_0123456789abcdef0123456789abcdeg.status' }
+        @{ Name = 'Bibliothekssicherung_0123456789abcdef0123456789abcdef.status.txt' }
+        @{ Name = 'Bibliothekssicherung_0123456789abcdef0123456789abcdef.log' }
+        @{ Name = 'Bibliothekssicherung_0123456789abcdef0123456789abcdef.status.0123456789abcdef0123456789abcdef.tmp2' }
+        @{ Name = 'Bibliothekssicherung_0123456789abcdef0123456789abcdef.status.0123456789abcdef0123456789abcde.tmp' }
+        @{ Name = 'XBibliothekssicherung_0123456789abcdef0123456789abcdef.status' }
+        @{ Name = 'M24Backup.verify-cancel.notapid.0123456789abcdef0123456789abcdef.tmp' }
+        @{ Name = 'M24Backup.verify-cancel.4242.0123456789abcdef0123456789abcdef.tmp.old' }
+    ) {
+        param($Name)
+        $path = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name $Name -AgeDays 10
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        Test-Path -LiteralPath $path | Should -Be $true
+    }
+
+    It 'preserves a file symbolic link with a matching name' {
+        # Symlink-Erstellung braucht unter Windows Adminrechte oder Developer
+        # Mode. Ist beides nicht verfuegbar, wird der Test uebersprungen
+        # statt falsch fehlzuschlagen.
+        $linkTarget = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name 'symlink-target.txt' -AgeDays 10
+        $linkPath = Join-Path $script:cleanupDirectory ("Bibliothekssicherung_{0}.status" -f $script:validGuid)
+        try {
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target $linkTarget -ErrorAction Stop | Out-Null
+        } catch {
+            Set-ItResult -Skipped -Because 'symbolic links cannot be created in this environment'
+            return
+        }
+        (Get-Item -LiteralPath $linkPath -Force).LastWriteTimeUtc = [DateTime]::UtcNow.AddDays(-10)
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        Test-Path -LiteralPath $linkPath | Should -Be $true
+        Test-Path -LiteralPath $linkTarget | Should -Be $true
+    }
+
+    It 'preserves a directory with a matching name' {
+        $directoryPath = Join-Path $script:cleanupDirectory ("Bibliothekssicherung_{0}.status" -f $script:validGuid)
+        New-Item -ItemType Directory -Path $directoryPath | Out-Null
+        (Get-Item -LiteralPath $directoryPath -Force).LastWriteTimeUtc = [DateTime]::UtcNow.AddDays(-10)
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        Test-Path -LiteralPath $directoryPath -PathType Container | Should -Be $true
+    }
+
+    It 'does not inspect files in subdirectories' {
+        $subdirectory = Join-Path $script:cleanupDirectory 'Unterordner'
+        New-Item -ItemType Directory -Path $subdirectory | Out-Null
+        $nested = New-M24CleanupTestFile -Directory $subdirectory -Name ("Bibliothekssicherung_{0}.status" -f $script:validGuid) -AgeDays 10
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        Test-Path -LiteralPath $nested | Should -Be $true
+    }
+
+    It 'does not throw for a missing directory' {
+        { Remove-M24StaleTempArtifacts -TempDirectory (Join-Path $script:cleanupDirectory 'DoesNotExist') } | Should -Not -Throw
+    }
+
+    It 'does not throw for an unusable directory path' {
+        $blockingFile = Join-Path $script:cleanupDirectory 'blocker.txt'
+        Set-Content -LiteralPath $blockingFile -Value 'occupied'
+        { Remove-M24StaleTempArtifacts -TempDirectory $blockingFile } | Should -Not -Throw
+        { Remove-M24StaleTempArtifacts -TempDirectory 'Q:\<invalid>|path' } | Should -Not -Throw
+    }
+
+    It 'deletes nothing for a zero or negative MinimumAge' {
+        $path = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.status" -f $script:validGuid) -AgeDays 10
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory -MinimumAge ([TimeSpan]::Zero)
+        Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory -MinimumAge ([TimeSpan]::FromDays(-1))
+        Test-Path -LiteralPath $path | Should -Be $true
+    }
+
+    It 'returns no pipeline output' {
+        New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.status" -f $script:validGuid) -AgeDays 10 | Out-Null
+        $output = Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+        $output | Should -BeNullOrEmpty
+    }
+
+    It 'deletes an old read-only communication file' {
+        $path = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.status" -f $script:validGuid) -AgeDays 10
+        Set-ItemProperty -LiteralPath $path -Name IsReadOnly -Value $true
+        try {
+            Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+            Test-Path -LiteralPath $path | Should -Be $false
+        } finally {
+            # Attribut zuruecksetzen, falls die Loeschung fehlschlug, damit
+            # Pester $TestDrive zuverlaessig aufraeumen kann.
+            if (Test-Path -LiteralPath $path) { Set-ItemProperty -LiteralPath $path -Name IsReadOnly -Value $false }
+        }
+    }
+
+    It 'deletes an old read-only atomic remnant' {
+        $path = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.result.json.{0}.tmp" -f $script:validGuid) -AgeDays 10
+        Set-ItemProperty -LiteralPath $path -Name IsReadOnly -Value $true
+        try {
+            Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+            Test-Path -LiteralPath $path | Should -Be $false
+        } finally {
+            if (Test-Path -LiteralPath $path) { Set-ItemProperty -LiteralPath $path -Name IsReadOnly -Value $false }
+        }
+    }
+
+    It 'deletes an old hidden read-only communication file' {
+        $path = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.status" -f $script:validGuid) -AgeDays 10
+        [System.IO.File]::SetAttributes($path, ([System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::ReadOnly))
+        try {
+            Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+            Test-Path -LiteralPath $path | Should -Be $false
+        } finally {
+            if (Test-Path -LiteralPath $path) { [System.IO.File]::SetAttributes($path, [System.IO.FileAttributes]::Normal) }
+        }
+    }
+
+    It 'preserves a fresh read-only file and keeps it read-only' {
+        $path = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ("Bibliothekssicherung_{0}.status" -f $script:validGuid) -AgeDays 0
+        Set-ItemProperty -LiteralPath $path -Name IsReadOnly -Value $true
+        try {
+            Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+            Test-Path -LiteralPath $path | Should -Be $true
+            (Get-Item -LiteralPath $path -Force).IsReadOnly | Should -Be $true
+        } finally {
+            if (Test-Path -LiteralPath $path) { Set-ItemProperty -LiteralPath $path -Name IsReadOnly -Value $false }
+        }
+    }
+
+    It 'preserves an old read-only file with an invalid name and keeps it read-only' {
+        $path = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name 'Bibliothekssicherung_0123456789abcdef0123456789abcde.status' -AgeDays 10
+        Set-ItemProperty -LiteralPath $path -Name IsReadOnly -Value $true
+        try {
+            Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory
+            Test-Path -LiteralPath $path | Should -Be $true
+            (Get-Item -LiteralPath $path -Force).IsReadOnly | Should -Be $true
+        } finally {
+            if (Test-Path -LiteralPath $path) { Set-ItemProperty -LiteralPath $path -Name IsReadOnly -Value $false }
+        }
+    }
+
+    It 'refreshes metadata and rejects reparse points before any attribute mutation' {
+        # Struktureller Vertragstest: Refresh() -> ReparsePoint-Ablehnung ->
+        # ReadOnly-Behandlung -> Delete muessen in dieser Reihenfolge stehen.
+        $sharedScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'M24Backup.Shared.ps1'
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($sharedScript, [ref]$tokens, [ref]$parseErrors)
+        $cleanupFunction = $ast.Find({
+                param($node)
+                ($node -is [System.Management.Automation.Language.FunctionDefinitionAst]) -and
+                $node.Name -eq 'Remove-M24StaleTempArtifacts'
+            }, $true)
+        $cleanupFunction | Should -Not -BeNullOrEmpty
+        $text = $cleanupFunction.Extent.Text
+        $refreshIndex = $text.IndexOf('.Refresh()')
+        $reparseIndex = $text.IndexOf('::ReparsePoint')
+        $setAttributesIndex = $text.IndexOf('::SetAttributes')
+        $deleteIndex = $text.IndexOf('[System.IO.File]::Delete')
+        $refreshIndex | Should -BeGreaterThan -1
+        $reparseIndex | Should -BeGreaterThan $refreshIndex
+        $setAttributesIndex | Should -BeGreaterThan $reparseIndex
+        $deleteIndex | Should -BeGreaterThan $setAttributesIndex
+    }
+
+    It 'continues after a candidate cannot be removed' {
+        # Der gesperrte Kandidat liegt alphabetisch vor dem zweiten, wird
+        # also zuerst enumeriert; die Bereinigung muss trotzdem fortfahren.
+        $lockedPath = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ('Bibliothekssicherung_{0}.status' -f ('a' * 32)) -AgeDays 10
+        $otherPath = New-M24CleanupTestFile -Directory $script:cleanupDirectory -Name ('Bibliothekssicherung_{0}.cancel' -f ('b' * 32)) -AgeDays 10
+        $handle = [System.IO.File]::Open($lockedPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+        try {
+            { Remove-M24StaleTempArtifacts -TempDirectory $script:cleanupDirectory } | Should -Not -Throw
+        } finally {
+            $handle.Dispose()
+        }
+        Test-Path -LiteralPath $lockedPath | Should -Be $true
+        Test-Path -LiteralPath $otherPath | Should -Be $false
+    }
+
+    It 'is called exactly once by the GUI script' {
+        $guiScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'Bibliothekssicherung-GUI.ps1'
+        $content = Get-Content -LiteralPath $guiScript -Raw
+        ([regex]::Matches($content, 'Remove-M24StaleTempArtifacts')).Count | Should -Be 1
+    }
+}
+
+Describe 'Stop-M24WorkerProcess' {
+    BeforeAll {
+        # Kindprozesse laufen immer unter Windows PowerShell, wie der echte
+        # Worker; das haelt die Tests unter PS7 und PS5.1 identisch.
+        $script:windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+
+        function Start-M24TestChild {
+            param([string]$Command)
+            $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $startInfo.FileName = $script:windowsPowerShell
+            $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -Command ' + (ConvertTo-M24ProcessArgument $Command)
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $child = New-Object System.Diagnostics.Process
+            $child.StartInfo = $startInfo
+            if (-not $child.Start()) { throw 'Test child process could not be started.' }
+            return $child
+        }
+
+        # Sicherheitsnetz: Kein Test darf einen Kindprozess zuruecklassen,
+        # auch nicht nach einer fehlgeschlagenen Assertion.
+        function Stop-M24TestChildById {
+            param([int]$ProcessId)
+            try { Stop-Process -Id $ProcessId -Force -ErrorAction Stop } catch {}
+        }
+    }
+
+    It 'kills a worker that ignores the cancellation request' {
+        $child = Start-M24TestChild -Command 'Start-Sleep -Seconds 120'
+        $childId = $child.Id
+        try {
+            $cancelFile = Join-Path $TestDrive ("cancel_{0}.txt" -f [guid]::NewGuid().ToString('N'))
+            $confirmed = Stop-M24WorkerProcess -Process $child -CancelFile $cancelFile -GracefulWaitMilliseconds 250 -KillWaitMilliseconds 10000
+            $confirmed | Should -BeTrue
+            Get-Process -Id $childId -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+            Test-Path -LiteralPath $cancelFile | Should -Be $true
+        } finally {
+            Stop-M24TestChildById -ProcessId $childId
+        }
+    }
+
+    It 'lets a cancel-aware worker exit gracefully without killing it' {
+        $cancelFile = Join-Path $TestDrive ("cancel_{0}.txt" -f [guid]::NewGuid().ToString('N'))
+        $doneFile = Join-Path $TestDrive ("done_{0}.txt" -f [guid]::NewGuid().ToString('N'))
+        # Der Kindprozess wartet auf die Cancel-Datei und hinterlaesst nur bei
+        # freiwilligem Ende die Done-Datei; ein Kill wuerde sie verhindern.
+        $childCommand = "while (-not (Test-Path -LiteralPath '{0}')) {{ Start-Sleep -Milliseconds 100 }}; Set-Content -LiteralPath '{1}' -Value ok" -f $cancelFile, $doneFile
+        $child = Start-M24TestChild -Command $childCommand
+        $childId = $child.Id
+        try {
+            $confirmed = Stop-M24WorkerProcess -Process $child -CancelFile $cancelFile -GracefulWaitMilliseconds 20000 -KillWaitMilliseconds 2000
+            $confirmed | Should -BeTrue
+            Test-Path -LiteralPath $doneFile | Should -Be $true
+            Get-Process -Id $childId -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+        } finally {
+            Stop-M24TestChildById -ProcessId $childId
+        }
+    }
+
+    It 'confirms the exit for a process object that was never started' {
+        $unstarted = New-Object System.Diagnostics.Process
+        $confirmed = Stop-M24WorkerProcess -Process $unstarted
+        $confirmed | Should -BeTrue
+    }
+
+    It 'confirms the exit for a missing process' {
+        $confirmed = Stop-M24WorkerProcess -Process $null
+        $confirmed | Should -BeTrue
+    }
+
+    It 'handles an already exited process without cancel marker and confirms the exit' {
+        $cancelFile = Join-Path $TestDrive ("cancel_{0}.txt" -f [guid]::NewGuid().ToString('N'))
+        $child = Start-M24TestChild -Command 'exit 0'
+        $childId = $child.Id
+        try {
+            [void]$child.WaitForExit(30000)
+            $output = @(Stop-M24WorkerProcess -Process $child -CancelFile $cancelFile)
+            # Genau die Bestaetigung, keine weitere Pipeline-Ausgabe.
+            $output.Count | Should -Be 1
+            $output[0] | Should -BeTrue
+            Test-Path -LiteralPath $cancelFile | Should -Be $false
+        } finally {
+            Stop-M24TestChildById -ProcessId $childId
+        }
+    }
+
+    It 'reports an unconfirmed exit without throwing when the process cannot be killed' {
+        # Prozess-Attrappe, deren Ende sich weder abwarten noch erzwingen
+        # laesst. Der untypisierte Process-Parameter macht das moeglich, ohne
+        # einen echten unbeendbaren Prozess zu benoetigen.
+        $stubborn = [pscustomobject]@{ HasExited = $false }
+        $stubborn | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds) return $false }
+        $stubborn | Add-Member -MemberType ScriptMethod -Name Kill -Value { throw 'access denied' }
+        $stubborn | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+        $cancelFile = Join-Path $TestDrive ("cancel_{0}.txt" -f [guid]::NewGuid().ToString('N'))
+        { $script:confirmed = Stop-M24WorkerProcess -Process $stubborn -CancelFile $cancelFile } | Should -Not -Throw
+        $script:confirmed | Should -BeFalse
+        # Das Abbruchsignal wurde trotzdem hinterlegt.
+        Test-Path -LiteralPath $cancelFile | Should -Be $true
+    }
+
+    It 'caps graceful and kill waits inside the function body' {
+        $sharedScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'M24Backup.Shared.ps1'
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($sharedScript, [ref]$tokens, [ref]$parseErrors)
+        $stopFunction = $ast.Find({
+                param($node)
+                ($node -is [System.Management.Automation.Language.FunctionDefinitionAst]) -and
+                $node.Name -eq 'Stop-M24WorkerProcess'
+            }, $true)
+        $stopFunction | Should -Not -BeNullOrEmpty
+        ([regex]::Matches($stopFunction.Extent.Text, [regex]::Escape('[Math]::Min(10000, [Math]::Max(0,'))).Count | Should -Be 2
+    }
+}
+
+Describe 'GUI worker launch and drive discovery contract' {
+    BeforeAll {
+        # AST-basierte Vertragstests: Sie pruefen Struktur und Reihenfolge der
+        # gehaerteten GUI-Ablaeufe, ohne die WinForms-Anwendung auszufuehren
+        # und ohne auf Zeilennummern angewiesen zu sein.
+        $guiScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'Bibliothekssicherung-GUI.ps1'
+        $tokens = $null
+        $parseErrors = $null
+        $script:guiAst = [System.Management.Automation.Language.Parser]::ParseFile($guiScript, [ref]$tokens, [ref]$parseErrors)
+        $script:guiParseErrorCount = @($parseErrors).Count
+        $script:guiText = $script:guiAst.Extent.Text
+
+        $script:launchTry = $script:guiAst.Find({
+                param($node)
+                ($node -is [System.Management.Automation.Language.TryStatementAst]) -and
+                @($node.CatchClauses | Where-Object { $_.Extent.Text -match "'GUI\.WorkerStart'" }).Count -gt 0
+            }, $true)
+        $script:launchTryText = if ($script:launchTry) { $script:launchTry.Body.Extent.Text } else { '' }
+        $script:launchCatchText = if ($script:launchTry) {
+            @($script:launchTry.CatchClauses | Where-Object { $_.Extent.Text -match "'GUI\.WorkerStart'" })[0].Extent.Text
+        } else { '' }
+
+        $script:updateDriveList = $script:guiAst.Find({
+                param($node)
+                ($node -is [System.Management.Automation.Language.FunctionDefinitionAst]) -and
+                $node.Name -eq 'Update-DriveList'
+            }, $true)
+        $script:updateDriveListText = if ($script:updateDriveList) { $script:updateDriveList.Extent.Text } else { '' }
+    }
+
+    It 'parses the GUI script and locates launch try and Update-DriveList' {
+        $script:guiParseErrorCount | Should -Be 0
+        $script:launchTry | Should -Not -BeNullOrEmpty
+        $script:updateDriveList | Should -Not -BeNullOrEmpty
+    }
+
+    It 'starts the polling timer exactly once, before the worker process start' {
+        ([regex]::Matches($script:guiText, [regex]::Escape('$timer.Start()'))).Count | Should -Be 1
+        $timerIndex = $script:launchTryText.IndexOf('$timer.Start()')
+        $processIndex = $script:launchTryText.IndexOf('$script:backupProcess.Start()')
+        $timerIndex | Should -BeGreaterThan (-1)
+        $processIndex | Should -BeGreaterThan $timerIndex
+    }
+
+    It 'stops the polling timer inside the launch catch' {
+        $script:launchCatchText.Contains('$timer.Stop()') | Should -Be $true
+    }
+
+    It 'terminates the worker via Stop-M24WorkerProcess before cleaning communication files' {
+        $stopIndex = $script:launchCatchText.IndexOf('Stop-M24WorkerProcess')
+        $cleanupIndex = $script:launchCatchText.IndexOf('Remove-Item')
+        $stopIndex | Should -BeGreaterThan (-1)
+        $cleanupIndex | Should -BeGreaterThan $stopIndex
+        $script:launchCatchText.Contains('-CancelFile') | Should -Be $true
+    }
+
+    It 'cleans communication files only after a confirmed worker exit' {
+        # Ohne Bestaetigung muss die Cancel-Datei erhalten bleiben, damit das
+        # Abbruchsignal fuer einen weiterlaufenden Worker wirksam bleibt.
+        $script:launchCatchText.Contains('$workerExitConfirmed = Stop-M24WorkerProcess') | Should -Be $true
+        $script:launchCatchText.Contains('if ($workerExitConfirmed)') | Should -Be $true
+        $guardIndex = $script:launchCatchText.IndexOf('if ($workerExitConfirmed)')
+        $cleanupIndex = $script:launchCatchText.IndexOf('Remove-Item')
+        $cleanupIndex | Should -BeGreaterThan $guardIndex
+    }
+
+    It 'bounds the Win32_LogicalDisk query with an 8 second timeout and terminating errors' {
+        $cimQuery = $script:updateDriveList.Find({
+                param($node)
+                ($node -is [System.Management.Automation.Language.CommandAst]) -and
+                $node.GetCommandName() -eq 'Get-CimInstance'
+            }, $true)
+        $cimQuery | Should -Not -BeNullOrEmpty
+        $cimQuery.Extent.Text | Should -Match 'Win32_LogicalDisk'
+        $cimQuery.Extent.Text | Should -Match '-OperationTimeoutSec 8'
+        $cimQuery.Extent.Text | Should -Match '-ErrorAction Stop'
+    }
+
+    It 'skips automatic refresh during retry backoff but lets Force bypass it' {
+        $backoffIf = $script:updateDriveList.Find({
+                param($node)
+                ($node -is [System.Management.Automation.Language.IfStatementAst]) -and
+                $node.Clauses[0].Item1.Extent.Text -match 'driveRetryAfterUtc'
+            }, $true)
+        $backoffIf | Should -Not -BeNullOrEmpty
+        $backoffIf.Clauses[0].Item1.Extent.Text | Should -Match '-not \$Force'
+        $backoffIf.Clauses[0].Item2.Extent.Text | Should -Match 'return'
+    }
+
+    It 'resets the backoff after a successful query, before the snapshot early return' {
+        $resetIndex = $script:updateDriveListText.IndexOf('$script:driveRetryAfterUtc = [DateTime]::MinValue')
+        $snapshotIndex = $script:updateDriveListText.IndexOf('$script:driveSnapshot -eq $currentSnapshot')
+        $resetIndex | Should -BeGreaterThan (-1)
+        $snapshotIndex | Should -BeGreaterThan $resetIndex
+    }
+
+    It 'sets a 30 second backoff and keeps the visible drive error in the catch' {
+        $driveCatch = $script:updateDriveList.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.CatchClauseAst]
+            }, $true)
+        $driveCatch | Should -Not -BeNullOrEmpty
+        $driveCatch.Extent.Text | Should -Match ([regex]::Escape('[DateTime]::UtcNow.AddSeconds(30)'))
+        $driveCatch.Extent.Text | Should -Match ([regex]::Escape('$driveInfoLabel.Text'))
     }
 }

@@ -281,6 +281,21 @@ Restore-Protokolle heißen `restore_JJJJMMTT_HHMMSS.log`.
 Robocopy-Codes von 0 bis 7 gelten als Erfolg oder Erfolg mit Hinweisen. Ab
 Code 8 liegt ein Kopierfehler vor.
 
+### Lokales Diagnoseprotokoll der Oberfläche
+
+Fehler der grafischen Oberfläche selbst (zum Beispiel ein fehlgeschlagener
+Start des Sicherungsprozesses) werden zusätzlich lokal festgehalten unter:
+
+`%LOCALAPPDATA%\M24Backup\Logs\gui.log`
+
+Dieses Diagnoseprotokoll ist unabhängig von den Backup- und
+Restore-Protokollen im Ordner `_logs\` auf dem Sicherungslaufwerk und steht
+auch ohne angeschlossenes Laufwerk zur Verfügung. Es rotiert automatisch
+(`gui.1.log` bis `gui.4.log`) und belegt insgesamt etwa 10 MB; einzelne
+ungewöhnlich große Einträge können diesen Richtwert geringfügig überschreiten.
+Die Einträge können lokale Dateipfade und technische Fehlerdetails
+enthalten; sie dienen ausschließlich der Fehlerdiagnose im Supportfall.
+
 ## Häufige Probleme
 
 | Problem | Empfehlung |
