@@ -45,8 +45,9 @@ start shows a notice and exits without changing anything.
 4. Select the destination drive.
 5. Select the folders to include.
 6. Optionally add more folders.
-7. Optionally adjust dry-run, safe eject, checksum, super fast, or the Windows
-   startup **Reminder** setting.
+7. Optionally adjust **Dry run**, safe eject, checksums, **Fast mode (no
+   preflight checks)**, or the **Remind me at Windows sign-in when a backup is
+   due** setting.
 8. Click **Start backup**.
 9. Wait for the completion message.
 
@@ -106,10 +107,11 @@ Use dry-run mode when you want to review what would be copied or overwritten
 before taking any risk.
 
 <a id="super-fast"></a>
-## Super fast: maximum speed without checks
+## Fast mode: maximum speed without checks
 
-The **Super fast (skip checks)** option copies as fast as possible by skipping
-every time-consuming check:
+The **Fast mode (no preflight checks)** option — called **Super fast** in
+earlier versions — copies as fast as possible by skipping every time-consuming
+check:
 
 - no file preflight, and therefore no file-based disk-space estimate and no
   advance check for files of 4 GB or larger on FAT32,
@@ -168,7 +170,8 @@ enough information.
 
 ## Backup reminder at Windows startup
 
-The **Reminder** setting is enabled by default and displays a notification at
+The **Remind me at Windows sign-in when a backup is due** setting is enabled by
+default and displays a notification at
 sign-in when the last successful backup made through the app is at least 14 days
 old, or when no backup has been made yet. It stays silent
 while the backup is current; clicking the notification opens Library Backup.
@@ -341,8 +344,8 @@ confirmations.
 Examples:
 
 - Normal backup to `G:`: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Bibliothekssicherung.ps1" -Mode Backup -UsbDrive G:`
-- Super fast backup: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast`
-- Super fast with 16 threads: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast -Threads 16`
+- Fast-mode backup: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast`
+- Fast mode with 16 threads: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast -Threads 16`
 - Simulation only: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -DryRun`
 - Without updating the manifest: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SkipChecksums`
 - Selected folders only: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SelectedFolders "Desktop|Dokumente|Bilder"`

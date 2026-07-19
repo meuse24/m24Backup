@@ -8,6 +8,29 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ### Geändert
 
+- Modernisierte Windows-11-Oberfläche: Das Hauptfenster ist jetzt frei in der
+  Größe veränderbar und maximierbar; die Ordnerliste nutzt zusätzlichen Platz.
+  Das Layout basiert auf flexiblen Layout-Containern statt fester Koordinaten.
+- Die Anwendung ist explizit System-DPI-aware und skaliert ihr Layout scharf
+  auf die Anzeigeskalierung (100–200 %). PerMonitorV2 ist unter dem
+  Windows-PowerShell-Host ohne App-Konfiguration nicht zuverlässig verfügbar;
+  die gewählte Strategie ist im GUI-Skript dokumentiert.
+- Ordnerauswahl und Backupverwaltung sind klar getrennt: **Verlauf**,
+  **Backup prüfen** und **Backup löschen** bilden eine eigene beschriftete
+  Gruppe; **Backup löschen** steht räumlich abgesetzt. Das große Logo wurde
+  aus dem Arbeitsbereich entfernt (Branding verbleibt in Symbol und Splash).
+- Einheitliche, größere Bedienziele: Sekundärbefehle sind mindestens
+  32 logische Pixel hoch, die Hauptaktionen im Fußbereich 40.
+- Die Option **Superschnell** heißt jetzt **Schnellmodus (ohne Vorprüfung)**,
+  damit die Sicherheitsfolge sichtbar ist. Die Erinnerung beim Windows-Login
+  ist als dauerhafte Einstellung (**Beim Windows-Login an fällige Sicherungen
+  erinnern**) von den Vorgangsoptionen getrennt.
+- Bei aktivem Windows-Hochkontrastmodus verwendet die Oberfläche durchgehend
+  Systemfarben und die Systemdarstellung der Schaltflächen; wichtige
+  Steuerelemente besitzen jetzt Namen für die UI-Automatisierung (Narrator).
+- Der Splashscreen erscheint nur noch bei messbar langsamen Starts (ab etwa
+  0,4 s), ist deutlich kleiner, nicht mehr immer im Vordergrund und hält den
+  Start nicht mehr künstlich um 300 ms auf.
 - Die Kurzanleitung nennt die Windows-Start-Erinnerung nun ausdrücklich bei
   den Optionen einer Sicherung, damit der vorhandene ausführliche Hilfeabschnitt
   leichter auffindbar ist.

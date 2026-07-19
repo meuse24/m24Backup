@@ -22,9 +22,9 @@ auf Englisch.
 - Prüft Ziel, freien Speicherplatz und FAT32-Einschränkungen vor dem Start.
 - Kann eine Sicherung per Dry-Run simulieren und die geplanten Änderungen im
   Protokoll anzeigen, ohne Nutzdaten zu kopieren.
-- Bietet einen Superschnell-Modus, der Vorprüfung, Prüfsummenaktualisierung und
-  Kopierwiederholungen weglässt, wenn maximale Geschwindigkeit wichtiger ist
-  als Vorabkontrollen.
+- Bietet einen Schnellmodus (ohne Vorprüfung, früher „Superschnell“), der
+  Vorprüfung, Prüfsummenaktualisierung und Kopierwiederholungen weglässt, wenn
+  maximale Geschwindigkeit wichtiger ist als Vorabkontrollen.
 - Kann zusätzliche frei gewählte Ordner in die Sicherung aufnehmen und über
   gespeicherte Metadaten wiederherstellen.
 - Kann ein erfolgreich verwendetes USB-Sicherungslaufwerk anschließend sicher
@@ -84,11 +84,10 @@ direkt auf einem Sicherungslaufwerk liegen.
 
 1. Sicherungslaufwerk anschließen und die Anwendung starten.
 2. Modus **Sichern** und das gewünschte Ziellaufwerk auswählen.
-3. Zu sichernde Ordner markieren, bei Bedarf **Weiteren Ordner...** nutzen
-   oder **Nur simulieren (Dry-Run)** aktivieren.
-4. Optional **Laufwerk nach Erfolg sicher auswerfen** oder für maximale
-   Geschwindigkeit ohne Vorabkontrollen **Superschnell (ohne Prüfungen)**
-   aktivieren.
+3. Zu sichernde Ordner markieren, bei Bedarf **Hinzufügen** nutzen
+   oder **Simulation** aktivieren.
+4. Optional **Nach Erfolg auswerfen** oder für maximale Geschwindigkeit ohne
+   Vorabkontrollen **Schnellmodus (ohne Vorprüfung)** aktivieren.
 5. **Sicherung starten** wählen, den Abschlussstatus prüfen und bei Bedarf das
    Protokoll öffnen.
 

@@ -48,8 +48,9 @@ verändern.
 4. Ziellaufwerk auswählen.
 5. Gewünschte Ordner markieren.
 6. Optional weitere Ordner hinzufügen.
-7. Optional Dry-Run, sicheren Auswurf, Prüfsummen, den Superschnell-Modus oder
-   **Erinnern** beim Windows-Start anpassen.
+7. Optional **Simulation**, sicheren Auswurf, Prüfsummen, den **Schnellmodus
+   (ohne Vorprüfung)** oder die Einstellung **Beim Windows-Login an fällige
+   Sicherungen erinnern** anpassen.
 8. **Sicherung starten** klicken.
 9. Warten, bis der Status den Abschluss meldet.
 
@@ -115,10 +116,11 @@ Ein Dry-Run eignet sich, wenn Sie vorab prüfen möchten, welche Dateien
 kopiert oder überschrieben würden.
 
 <a id="super-fast"></a>
-## Superschnell: maximale Geschwindigkeit ohne Prüfungen
+## Schnellmodus: maximale Geschwindigkeit ohne Prüfungen
 
-Die Option **Superschnell (ohne Prüfungen)** kopiert so schnell wie möglich und
-lässt dafür alle zeitaufwendigen Kontrollen weg:
+Die Option **Schnellmodus (ohne Vorprüfung)** – in früheren Versionen
+**Superschnell** genannt – kopiert so schnell wie möglich und lässt dafür alle
+zeitaufwendigen Kontrollen weg:
 
 - keine Datei-Vorprüfung, damit auch keine dateibasierte Speicherplatzschätzung
   und keine Vorabprüfung auf Dateien ab 4 GB bei FAT32,
@@ -181,7 +183,8 @@ sofern diese aus den Metadaten ermittelt werden kann.
 
 ## Backup-Erinnerung beim Windows-Start
 
-Die standardmäßig aktivierte Einstellung **Erinnern** erinnert beim Anmelden,
+Die standardmäßig aktivierte Einstellung **Beim Windows-Login an fällige
+Sicherungen erinnern** erinnert beim Anmelden,
 wenn das letzte erfolgreiche Backup über die App mindestens 14 Tage zurückliegt
 oder noch nie ein Backup erstellt wurde.
 Die Benachrichtigung bleibt bei einem aktuellen Backup aus; ein Klick darauf
@@ -367,8 +370,8 @@ Ohne `-Silent` zeigt er Konsolenausgaben und stellt erforderliche Rückfragen.
 Beispiele:
 
 - Normale Sicherung auf `G:`: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Bibliothekssicherung.ps1" -Mode Backup -UsbDrive G:`
-- Superschnelle Sicherung: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast`
-- Superschnell mit 16 Threads: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast -Threads 16`
+- Sicherung im Schnellmodus: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast`
+- Schnellmodus mit 16 Threads: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SuperFast -Threads 16`
 - Nur simulieren: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -DryRun`
 - Ohne Manifestaktualisierung: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SkipChecksums`
 - Bestimmte Ordner: `.\Bibliothekssicherung.ps1 -Mode Backup -UsbDrive G: -SelectedFolders "Desktop|Dokumente|Bilder"`
