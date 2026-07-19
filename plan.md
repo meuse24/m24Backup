@@ -19,7 +19,7 @@ driven by the verified runtime environment (Windows PowerShell 5.1 host via
    nested table layout for the folder area. The window is resizable and
    maximizable; minimum and initial size are clamped to the active monitor's
    working area in the `Shown` handler (after DPI scaling). Whole-form
-   Whole-form scrolling was replaced by a dedicated scrollable content host;
+   scrolling was replaced by a dedicated scrollable content host;
    the footer remains visible. At ordinary sizes the folder list receives all
    spare height and scrolls locally. If the complete minimum layout cannot fit
    at high scaling (for example 175%), the content host scrolls vertically

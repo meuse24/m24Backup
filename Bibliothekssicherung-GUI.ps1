@@ -2211,11 +2211,11 @@ function Update-DriveList {
     param([switch]$Force)
 
     # The CIM call can legitimately take several seconds. Run only that
-    # blocking query in a background runspace and pump the UI while waiting.
-    # This makes the 400 ms splash threshold real during startup and keeps an
-    # already visible window responsive during a manual refresh. The guard
-    # prevents DoEvents from re-entering drive discovery through a timer or
-    # another Refresh click.
+    # blocking query in a background runspace. During startup the UI is pumped
+    # so the 400 ms splash threshold is honored. Once the main window is shown,
+    # waiting deliberately remains briefly blocking to prevent interaction with
+    # a partially refreshed drive state. The guard prevents re-entry through a
+    # timer or another Refresh click.
     if ($script:driveDiscoveryActive) { return }
     $script:driveDiscoveryActive = $true
 
