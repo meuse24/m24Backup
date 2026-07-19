@@ -28,10 +28,13 @@ Windows systems and in English on all other systems.
   stored folder metadata.
 - Can safely eject a successfully used USB backup drive after completion.
 - Shows progress and a clear result directly in the application window.
+- Shows file count and occupied space for every folder plus a total for the
+  selected folders; measurement runs in the background.
 - Opens existing logs and backup folders immediately after drive selection and
   can copy the result summary.
 - Remembers folder selections, shows recent operations, and verifies complete
-  file contents against per-file SHA-256 checksums.
+  file contents against per-file SHA-256 checksums. Every verification writes
+  a persistent log containing its result and error details.
 - Can completely delete the current computer and user's backup from the
   selected drive after showing its details and requiring two safety
   confirmations.

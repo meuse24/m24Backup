@@ -6,6 +6,28 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ## [Unreleased]
 
+## [1.9.0] – 2026-07-19
+
+### Hinzugefügt
+
+- „Backup prüfen“ schreibt für erfolgreiche, fehlgeschlagene und abgebrochene
+  Prüfungen ein dauerhaftes Protokoll unter `_logs`. Es enthält Prüfart,
+  SHA-256-Algorithmus, Beginn, Ende, Dauer, Datenumfang, Ergebnis und
+  Fehlerdetails und ist anschließend über „Protokoll“ und „Verlauf“ erreichbar.
+- Die Ordnerliste zeigt hinter jedem Ordner Dateianzahl und Platzbedarf an
+  (z. B. „Dokumente — 249 Dateien, 4,94 GB“). Die Ermittlung läuft im
+  Hintergrund und blockiert die Oberfläche nicht; im Modus
+  **Wiederherstellen** wird der Inhalt des Backups vermessen. Die Zählung
+  folgt der Vorprüfung der Sicherung: Der gewählte Ordner selbst wird immer
+  vermessen, untergeordnete Junctions werden wie bei Robocopy `/XJ` nicht
+  verfolgt, Verzeichnis-Symlinks dagegen schon; unzugängliche Unterordner
+  werden übersprungen. Die Werte sind einmal je Sitzung ermittelte
+  Näherungen.
+- Die Ergebnisübersicht ergänzt „x Ordner ausgewählt“ um die Gesamtzahl der
+  Dateien und den Gesamtplatzbedarf der angehakten Ordner (z. B. „9 Ordner
+  ausgewählt (7.455 Dateien, 11,42 GB).“). Solange Messungen laufen, steht
+  dort „Gesamtgröße wird ermittelt …“.
+
 ### Geändert
 
 - Modernisierte Windows-11-Oberfläche: Das Hauptfenster ist jetzt frei in der

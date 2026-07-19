@@ -385,6 +385,13 @@ $script:folderCheckStates = @{}
 $script:backupSelectionSnapshot = $null
 $script:artifactCache = @{}
 $script:suppressArtifactRetarget = $false
+# Ordnergroessen (Dateianzahl und Bytes) werden je Pfad einmal pro Sitzung in
+# einem Hintergrund-Runspace ermittelt. Cache und Warteschlange sind
+# synchronisiert, weil GUI-Thread und Scanner gleichzeitig darauf zugreifen.
+$script:folderSizeCache = [hashtable]::Synchronized(@{})
+$script:folderSizeQueue = [System.Collections.Queue]::Synchronized((New-Object System.Collections.Queue))
+$script:folderSizePowerShell = $null
+$script:folderSizeAsyncResult = $null
 $settingsDirectory = Join-Path $env:LOCALAPPDATA 'M24Backup'
 $settingsFile = Join-Path $settingsDirectory 'settings.json'
 $script:knownDrive = $null
@@ -405,13 +412,65 @@ function Get-LibraryDefinitions {
     return @(Get-M24StandardFolderDefinitions | Where-Object { $IncludeMissing -or (Test-Path -LiteralPath $_.Path) })
 }
 
+function Get-FolderSizeKey {
+    param([string]$Path)
+    try { return [System.IO.Path]::GetFullPath($Path).TrimEnd('\').ToLowerInvariant() } catch { return $Path.ToLowerInvariant() }
+}
+
+function Format-FolderSizeText {
+    param([int64]$Bytes)
+    if ($Bytes -ge 1GB) { return '{0:N2} GB' -f ($Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return '{0:N1} MB' -f ($Bytes / 1MB) }
+    if ($Bytes -ge 1KB) { return '{0:N1} KB' -f ($Bytes / 1KB) }
+    return (L '{0} Bytes' '{0} bytes') -f $Bytes
+}
+
+function Format-FolderFileCountText {
+    param([int64]$Files)
+    if ($Files -eq 1) { return L '1 Datei' '1 file' }
+    return (L '{0:N0} Dateien' '{0:N0} files') -f $Files
+}
+
+function Get-FolderSizeCaption {
+    param([string]$SizePath)
+    if ([string]::IsNullOrWhiteSpace($SizePath)) { return '' }
+    $entry = $script:folderSizeCache[(Get-FolderSizeKey $SizePath)]
+    if ($null -eq $entry) { return '' }
+    if ($entry -is [string]) { return L 'wird ermittelt …' 'calculating …' }
+    if ([int64]$entry.Files -eq 0) { return L 'leer' 'empty' }
+    return '{0}, {1}' -f (Format-FolderFileCountText -Files ([int64]$entry.Files)), (Format-FolderSizeText -Bytes ([int64]$entry.Bytes))
+}
+
+# Summiert die bereits ermittelten Groessen aller angehakten Ordner.
+# Pending meldet, ob noch Messungen ausstehen; Known, ob mindestens ein
+# Ergebnis vorliegt (ohne beides bleibt die Ergebnisuebersicht unveraendert).
+function Get-CheckedFolderSizeTotal {
+    $files = [int64]0
+    $bytes = [int64]0
+    $pending = $false
+    $known = $false
+    foreach ($item in $libraryList.CheckedItems) {
+        if (-not $item -or -not $item.PSObject.Properties['SizePath']) { continue }
+        $sizePath = [string]$item.SizePath
+        if ([string]::IsNullOrWhiteSpace($sizePath)) { continue }
+        $entry = $script:folderSizeCache[(Get-FolderSizeKey $sizePath)]
+        if ($null -eq $entry) { continue }
+        if ($entry -is [string]) { $pending = $true; continue }
+        $files += [int64]$entry.Files
+        $bytes += [int64]$entry.Bytes
+        $known = $true
+    }
+    return [pscustomobject]@{ Files = $files; Bytes = $bytes; Pending = $pending; Known = $known }
+}
+
 function New-FolderListItem {
     param(
         [string]$Name,
         [string]$DisplayName,
         [string]$Path,
         [bool]$IsCustom,
-        [bool]$Checked = $true
+        [bool]$Checked = $true,
+        [string]$SizePath
     )
 
     $item = [pscustomobject]@{
@@ -420,8 +479,15 @@ function New-FolderListItem {
         Path = $Path
         IsCustom = $IsCustom
         Checked = $Checked
+        # Im Sichern-Modus wird der Quellordner vermessen, im
+        # Wiederherstellen-Modus der zugehoerige Ordner im Backup.
+        SizePath = if ([string]::IsNullOrWhiteSpace($SizePath)) { $Path } else { $SizePath }
     }
-    $item | Add-Member -MemberType ScriptMethod -Name ToString -Value { return $this.DisplayName } -Force
+    $item | Add-Member -MemberType ScriptMethod -Name ToString -Value {
+        $caption = Get-FolderSizeCaption -SizePath $this.SizePath
+        if ($caption) { return "{0}  —  {1}" -f $this.DisplayName, $caption }
+        return $this.DisplayName
+    } -Force
     return $item
 }
 
@@ -430,6 +496,85 @@ function Get-FolderItemDisplayName {
     if ($Item -and $Item.PSObject.Properties['DisplayName']) { return [string]$Item.DisplayName }
     if ($Item -and $Item.PSObject.Properties['Name']) { return Get-M24FolderDisplayName ([string]$Item.Name) $script:isGerman }
     return [string]$Item
+}
+
+# Stellt noch nicht vermessene Ordner in die Warteschlange und startet bei
+# Bedarf den Hintergrund-Scanner. Bereits ermittelte Groessen bleiben fuer die
+# Sitzung im Cache; erneute Aufrufe (Moduswechsel, Laufwerkswechsel) messen
+# also nur neue Pfade.
+function Request-FolderSizeScan {
+    param($Items)
+    $queued = $false
+    foreach ($item in @($Items)) {
+        if (-not $item -or -not $item.PSObject.Properties['SizePath']) { continue }
+        $sizePath = [string]$item.SizePath
+        if ([string]::IsNullOrWhiteSpace($sizePath)) { continue }
+        $key = Get-FolderSizeKey $sizePath
+        if ($script:folderSizeCache.ContainsKey($key)) { continue }
+        if (-not (Test-Path -LiteralPath $sizePath -PathType Container)) { continue }
+        $script:folderSizeCache[$key] = 'pending'
+        $script:folderSizeQueue.Enqueue([pscustomobject]@{ Key = $key; Path = $sizePath })
+        $queued = $true
+    }
+    if ($queued) { Start-FolderSizeScanner }
+}
+
+function Start-FolderSizeScanner {
+    if ($script:folderSizeAsyncResult -and -not $script:folderSizeAsyncResult.IsCompleted) {
+        # Der laufende Scanner arbeitet die Warteschlange von selbst ab; der
+        # Timer stellt sicher, dass ein Rest nach dessen Ende erneut startet.
+        $folderSizeTimer.Start()
+        return
+    }
+    if ($script:folderSizePowerShell) {
+        try { $script:folderSizePowerShell.Dispose() } catch {}
+        $script:folderSizePowerShell = $null
+        $script:folderSizeAsyncResult = $null
+    }
+    if ($script:folderSizeQueue.Count -eq 0) { return }
+    $scanScript = {
+        param($queue, $cache)
+        while ($true) {
+            $entry = $null
+            # Dequeue wirft bei leerer Warteschlange; das beendet den Scanner.
+            try { $entry = $queue.Dequeue() } catch { break }
+            $files = [int64]0
+            $bytes = [int64]0
+            $stack = New-Object System.Collections.Generic.Stack[object]
+            # Der Stammordner wird immer vermessen, auch wenn er selbst eine
+            # Junction oder ein Symlink ist: Robocopy kopiert den Inhalt des
+            # gewaehlten Quellordners unabhaengig von dessen Link-Typ.
+            $stack.Push([pscustomobject]@{ Path = [string]$entry.Path; Depth = 0 })
+            while ($stack.Count -gt 0) {
+                $current = $stack.Pop()
+                # Tiefenbegrenzung als Schutz vor Symlink-Zyklen: Der Anzeige-
+                # Scan darf niemals endlos laufen; echte Ordnerbaeume bleiben
+                # weit unterhalb dieser Grenze.
+                if ([int]$current.Depth -ge 64) { continue }
+                # Get-ChildItem wie in der Vorpruefung des Workers: LinkType
+                # unterscheidet Junction und Symlink, Lesefehler einzelner
+                # Ordner brechen die Aufzaehlung nicht ab.
+                foreach ($child in @(Get-ChildItem -LiteralPath ([string]$current.Path) -Force -ErrorAction SilentlyContinue)) {
+                    if ($child.PSIsContainer) {
+                        # Wie Robocopy /XJ und die Vorpruefung: Junctions nicht
+                        # verfolgen (Schleifengefahr), Verzeichnis-Symlinks
+                        # dagegen schon - sie werden auch gesichert.
+                        if ([string]$child.LinkType -ne 'Junction') {
+                            $stack.Push([pscustomobject]@{ Path = $child.FullName; Depth = ([int]$current.Depth + 1) })
+                        }
+                    } else {
+                        $files++
+                        $bytes += [int64]$child.Length
+                    }
+                }
+            }
+            $cache[[string]$entry.Key] = [pscustomobject]@{ Files = $files; Bytes = $bytes }
+        }
+    }
+    $script:folderSizePowerShell = [System.Management.Automation.PowerShell]::Create()
+    [void]$script:folderSizePowerShell.AddScript($scanScript.ToString()).AddArgument($script:folderSizeQueue).AddArgument($script:folderSizeCache)
+    $script:folderSizeAsyncResult = $script:folderSizePowerShell.BeginInvoke()
+    $folderSizeTimer.Start()
 }
 
 function Get-FolderMetadataFile {
@@ -446,7 +591,7 @@ function Get-RestoreCustomFolders {
         return @($metadata | Where-Object {
             $_.Name -and $_.OriginalPath -and (Test-Path -LiteralPath (Join-Path $BackupRoot $_.Name) -PathType Container)
         } | ForEach-Object {
-            New-FolderListItem -Name ([string]$_.Name) -DisplayName ("{0} ({1})" -f $_.Name, $_.OriginalPath) -Path ([string]$_.OriginalPath) -IsCustom $true -Checked $true
+            New-FolderListItem -Name ([string]$_.Name) -DisplayName ("{0} ({1})" -f $_.Name, $_.OriginalPath) -Path ([string]$_.OriginalPath) -IsCustom $true -Checked $true -SizePath (Join-Path $BackupRoot ([string]$_.Name))
         })
     } catch {
         return @()
@@ -1827,6 +1972,29 @@ $driveWatchTimer.Add_Tick({
     Update-DriveList
 })
 
+# Zeigt waehrend des Groessen-Scans laufend neue Ergebnisse an und raeumt den
+# Scanner-Runspace nach Abschluss auf. Bleiben Eintraege in der Warteschlange
+# zurueck (Wettlauf zwischen Enqueue und Scanner-Ende), startet er neu.
+$folderSizeTimer = New-Object System.Windows.Forms.Timer
+$folderSizeTimer.Interval = 400
+$folderSizeTimer.Add_Tick({
+    if ($form.IsDisposed -or -not $form.IsHandleCreated) { $folderSizeTimer.Stop(); return }
+    $libraryList.Invalidate()
+    Update-ResultOverview
+    if ($script:folderSizeAsyncResult -and $script:folderSizeAsyncResult.IsCompleted) {
+        try { [void]$script:folderSizePowerShell.EndInvoke($script:folderSizeAsyncResult) } catch {}
+        try { $script:folderSizePowerShell.Dispose() } catch {}
+        $script:folderSizePowerShell = $null
+        $script:folderSizeAsyncResult = $null
+        if ($script:folderSizeQueue.Count -gt 0) {
+            Start-FolderSizeScanner
+        } else {
+            $folderSizeTimer.Stop()
+            $libraryList.Invalidate()
+        }
+    }
+})
+
 $ejectTimer = New-Object System.Windows.Forms.Timer
 $ejectTimer.Interval = 3500
 $ejectTimer.Add_Tick({
@@ -1842,6 +2010,18 @@ $verificationTimer.Add_Tick({
     try {
         $output = @($script:verificationPowerShell.EndInvoke($script:verificationAsyncResult))
         $verification = $output | Select-Object -Last 1
+        if ($verification.LogFile -and (Test-Path -LiteralPath ([string]$verification.LogFile) -PathType Leaf)) {
+            $script:lastLogFile = [string]$verification.LogFile
+            if ($driveCombo.SelectedItem) {
+                $verificationDisk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+                if ($verificationDisk) {
+                    $verificationCacheKey = "{0}|{1}" -f $verificationDisk.DeviceID, (Get-NormalizedVolumeSerial -Disk $verificationDisk)
+                    $script:artifactCache[$verificationCacheKey] = [pscustomobject]@{ DestinationExists = $true; LogFile = $script:lastLogFile }
+                }
+            }
+            $logButton.Enabled = $true
+            $historyButton.Enabled = $true
+        }
         $gb = [math]::Round(([double]$verification.Bytes / 1GB), 2)
         if ($verification.Cancelled) {
             $statusLabel.Text = L 'Backup-Prüfung abgebrochen.' 'Backup verification cancelled.'
@@ -1855,6 +2035,10 @@ $verificationTimer.Add_Tick({
                 $resultBox.Text = (L '{0} Dateien ({1:N2} GB) stimmen mit ihren SHA-256-Prüfsummen überein.' '{0} files ({1:N2} GB) match their SHA-256 checksums.') -f $verification.Files, $gb
             }
             Show-CompletionNotification -Title (L 'Backup geprüft' 'Backup verified') -Text $resultBox.Text -Icon Info
+        } elseif ($verification.UnexpectedError) {
+            $statusLabel.Text = L 'Backup-Prüfung fehlgeschlagen.' 'Backup verification failed.'
+            $resultBox.Text = L 'Die Backup-Prüfung konnte nicht abgeschlossen werden. Details stehen im Protokoll.' 'Backup verification could not be completed. See the log for details.'
+            [System.Windows.Forms.MessageBox]::Show(([string]$verification.UnexpectedError), $form.Text, 'OK', 'Error') | Out-Null
         } else {
             $statusLabel.Text = L 'Backup-Prüfung mit Integritätsfehlern beendet.' 'Backup verification found integrity errors.'
             $resultBox.Text = (L '{0} Integritätsfehler gefunden.' '{0} integrity errors found.') -f $verification.ErrorCount
@@ -1966,10 +2150,22 @@ function Update-ResultOverview {
     # Waehrend eines laufenden Vorgangs gehoert die Anzeige dem Fortschritt.
     if ($script:backupProcess) { return }
     $count = $libraryList.CheckedItems.Count
+    # Gesamtgroesse der angehakten Ordner anfuegen, sobald der Hintergrund-
+    # Scan Ergebnisse liefert; solange Messungen ausstehen, wird das kenntlich
+    # gemacht statt eine zu niedrige Zwischensumme zu zeigen.
+    $sizeSuffix = ''
+    if ($count -gt 0) {
+        $total = Get-CheckedFolderSizeTotal
+        if ($total.Pending) {
+            $sizeSuffix = L ' (Gesamtgröße wird ermittelt …)' ' (calculating total size …)'
+        } elseif ($total.Known) {
+            $sizeSuffix = ' ({0}, {1})' -f (Format-FolderFileCountText -Files $total.Files), (Format-FolderSizeText -Bytes $total.Bytes)
+        }
+    }
     $selectionLine = if ($script:isGerman) {
-        if ($count -eq 1) { "1 Ordner ausgewählt." } else { "$count Ordner ausgewählt." }
+        if ($count -eq 1) { "1 Ordner ausgewählt$sizeSuffix." } else { "$count Ordner ausgewählt$sizeSuffix." }
     } else {
-        if ($count -eq 1) { "1 folder selected." } else { "$count folders selected." }
+        if ($count -eq 1) { "1 folder selected$sizeSuffix." } else { "$count folders selected$sizeSuffix." }
     }
     $resultBox.Text = "{0}{1}{2}" -f $script:resultSummary, [Environment]::NewLine, $selectionLine
 }
@@ -2146,7 +2342,7 @@ function Update-LibraryList {
             $backupRoot = Get-BackupRoot -Drive $disk.DeviceID
             $items += @(Get-LibraryDefinitions -IncludeMissing | Where-Object { Test-Path -LiteralPath (Join-Path $backupRoot $_.Name) -PathType Container } | ForEach-Object {
                 $checked = if ($script:folderCheckStates.ContainsKey([string]$_.Name)) { [bool]$script:folderCheckStates[[string]$_.Name] } else { $true }
-                New-FolderListItem -Name $_.Name -DisplayName (Get-M24FolderDisplayName $_.Name $script:isGerman) -Path $_.Path -IsCustom $false -Checked $checked
+                New-FolderListItem -Name $_.Name -DisplayName (Get-M24FolderDisplayName $_.Name $script:isGerman) -Path $_.Path -IsCustom $false -Checked $checked -SizePath (Join-Path $backupRoot ([string]$_.Name))
             })
             $items += @(Get-RestoreCustomFolders -BackupRoot $backupRoot)
         }
@@ -2170,6 +2366,7 @@ function Update-LibraryList {
     foreach ($item in $items) {
         [void]$libraryList.Items.Add($item, [bool]$item.Checked)
     }
+    Request-FolderSizeScan -Items $items
     Update-BackupOptionState
     Update-SelectionState
 }
@@ -3209,7 +3406,9 @@ $historyButton.Add_Click({
         Sort-Object LastWriteTime -Descending | Select-Object -First 10)
     if (-not $logs) { return }
     $lines = @($logs | ForEach-Object {
-        $kind = if ($_.BaseName -like 'restore_*') { L 'Wiederherstellung' 'Restore' } else { L 'Sicherung' 'Backup' }
+        $kind = if ($_.BaseName -like 'restore_*') { L 'Wiederherstellung' 'Restore' }
+            elseif ($_.BaseName -like 'verify_*') { L 'Prüfung' 'Verification' }
+            else { L 'Sicherung' 'Backup' }
         '{0}  ·  {1}  ·  {2:N1} KB' -f $_.LastWriteTime.ToString('dd.MM.yyyy HH:mm'), $kind, ($_.Length / 1KB)
     })
     $message = ($lines -join [Environment]::NewLine) + [Environment]::NewLine + [Environment]::NewLine +
@@ -3382,32 +3581,65 @@ $verifyButton.Add_Click({
     $verificationScript = {
         param([string]$root, [string]$sharedScript, [string]$manifestPath, [bool]$initialize, [string]$cancelFile, [string]$missingFoldersMessage)
         . $sharedScript
-        $dataFolders = @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction Stop | Where-Object { -not $_.Name.StartsWith('_') })
-        if ($dataFolders.Count -eq 0) {
-            return [pscustomobject]@{ Initialized = $initialize; Files = 0; Bytes = 0; ErrorCount = 1; Errors = @($missingFoldersMessage) }
-        }
-        $folders = @($dataFolders | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.FullName } })
-        $excluded = @(Get-M24DefaultExcludedFiles)
+        $startedAt = Get-Date
+        $logDir = Join-Path $root '_logs'
+        New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop | Out-Null
+        $logFile = Join-Path $logDir ("verify_{0}_{1}_{2}.log" -f $startedAt.ToString('yyyyMMdd_HHmmss'), $PID, [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $result = $null
+        $unexpectedError = $null
         $lockFile = Join-Path $root '_backup.lock'; $lockStream = $null; $lockAcquired = $false
         try {
-            $lockStream = [System.IO.File]::Open($lockFile, 'OpenOrCreate', 'ReadWrite', 'None'); $lockAcquired = $true
-            if ($initialize) {
-                $created = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles $excluded -ForceRehash `
-                    -CancelCallback { Test-Path -LiteralPath $cancelFile }
-                return [pscustomobject]@{ Initialized = $true; Cancelled = $created.Cancelled; Files = $created.Files; Bytes = $created.Bytes; ErrorCount = 0; Errors = @() }
+            $dataFolders = @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction Stop | Where-Object { -not $_.Name.StartsWith('_') })
+            if ($dataFolders.Count -eq 0) {
+                $result = [pscustomobject]@{ Initialized = $initialize; Cancelled = $false; Files = 0; Bytes = 0; ErrorCount = 1; Errors = @($missingFoldersMessage) }
+            } else {
+                $folders = @($dataFolders | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.FullName } })
+                $excluded = @(Get-M24DefaultExcludedFiles)
+                $lockStream = [System.IO.File]::Open($lockFile, 'OpenOrCreate', 'ReadWrite', 'None'); $lockAcquired = $true
+                if ($initialize) {
+                    $created = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles $excluded -ForceRehash `
+                        -CancelCallback { Test-Path -LiteralPath $cancelFile }
+                    $result = [pscustomobject]@{ Initialized = $true; Cancelled = $created.Cancelled; Files = $created.Files; Bytes = $created.Bytes; ErrorCount = 0; Errors = @() }
+                } else {
+                    $checked = Test-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles $excluded `
+                        -CancelCallback { Test-Path -LiteralPath $cancelFile }
+                    if (-not $checked.Cancelled -and [int]$checked.ErrorCount -eq 0) {
+                        # Erfolgreiche Vollpruefung in den Metadaten vermerken; die
+                        # Restore-Vorschau zeigt diesen Stand als Integritaetsstatus an.
+                        Set-M24ChecksumVerifiedMetadata -MetadataFile (Join-Path $root '_Sicherungsinfo.txt')
+                    }
+                    $result = [pscustomobject]@{ Initialized = $false; Cancelled = $checked.Cancelled; Files = $checked.Files; Bytes = $checked.Bytes; ErrorCount = $checked.ErrorCount; Errors = @($checked.Errors) }
+                }
             }
-            $checked = Test-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles $excluded `
-                -CancelCallback { Test-Path -LiteralPath $cancelFile }
-            if (-not $checked.Cancelled -and [int]$checked.ErrorCount -eq 0) {
-                # Erfolgreiche Vollpruefung in den Metadaten vermerken; die
-                # Restore-Vorschau zeigt diesen Stand als Integritaetsstatus an.
-                Set-M24ChecksumVerifiedMetadata -MetadataFile (Join-Path $root '_Sicherungsinfo.txt')
-            }
-            return [pscustomobject]@{ Initialized = $false; Cancelled = $checked.Cancelled; Files = $checked.Files; Bytes = $checked.Bytes; ErrorCount = $checked.ErrorCount; Errors = @($checked.Errors) }
+        } catch {
+            $unexpectedError = $_.Exception.Message
+            $result = [pscustomobject]@{ Initialized = $initialize; Cancelled = $false; Files = 0; Bytes = 0; ErrorCount = 1; Errors = @($unexpectedError) }
         } finally {
             if ($lockStream) { $lockStream.Dispose() }
             if ($lockAcquired) { Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue }
+            $finishedAt = Get-Date
+            $outcome = if ($unexpectedError) { 'Fehlgeschlagen' } elseif ($result.Cancelled) { 'Abgebrochen' } elseif ([int]$result.ErrorCount -gt 0) { 'Integritaetsfehler' } elseif ($initialize) { 'Pruefsummenmanifest erstellt' } else { 'Erfolgreich' }
+            $lines = @(
+                'M24 Backup-Pruefprotokoll',
+                "Backup: $root",
+                "Pruefart: $(if ($initialize) { 'SHA-256-Manifest initial erstellen' } else { 'SHA-256-Pruefsummen vergleichen' })",
+                "Hashalgorithmus: SHA-256",
+                "Beginn: $($startedAt.ToString('yyyy-MM-dd HH:mm:ss'))",
+                "Ende: $($finishedAt.ToString('yyyy-MM-dd HH:mm:ss'))",
+                ("Dauer: {0:N1} Sekunden" -f ($finishedAt - $startedAt).TotalSeconds),
+                "Ergebnis: $outcome",
+                "Dateien: $([int64]$result.Files)",
+                "Bytes: $([int64]$result.Bytes)",
+                "Integritaetsfehler: $([int]$result.ErrorCount)"
+            )
+            if (@($result.Errors).Count -gt 0) {
+                $lines += ''
+                $lines += 'Fehlerdetails:'
+                $lines += @($result.Errors | ForEach-Object { "- $_" })
+            }
+            try { [System.IO.File]::WriteAllLines($logFile, [string[]]$lines, [System.Text.Encoding]::Unicode) } catch {}
         }
+        return [pscustomobject]@{ Initialized = $result.Initialized; Cancelled = $result.Cancelled; Files = $result.Files; Bytes = $result.Bytes; ErrorCount = $result.ErrorCount; Errors = @($result.Errors); UnexpectedError = $unexpectedError; LogFile = $logFile }
     }
     $script:verificationPowerShell = [System.Management.Automation.PowerShell]::Create()
     [void]$script:verificationPowerShell.AddScript($verificationScript.ToString()).AddArgument($script:lastDestination).AddArgument($sharedScript).AddArgument($manifestPath).AddArgument($initializeManifest).AddArgument($script:verificationCancelFile).AddArgument((L 'Keine Sicherungsordner mit Nutzdaten gefunden.' 'No backup data folders were found.'))
@@ -3501,6 +3733,14 @@ $form.Add_FormClosing({
 
 $form.Add_FormClosed({
     $driveWatchTimer.Stop()
+    $folderSizeTimer.Stop()
+    # Der Groessen-Scan darf das Beenden nicht verzoegern; er wird abgebrochen.
+    if ($script:folderSizePowerShell) {
+        try { $script:folderSizePowerShell.Stop() } catch {}
+        try { $script:folderSizePowerShell.Dispose() } catch {}
+        $script:folderSizePowerShell = $null
+        $script:folderSizeAsyncResult = $null
+    }
     try { Save-FolderSelection } catch {}
 })
 

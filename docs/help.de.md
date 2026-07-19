@@ -54,6 +54,16 @@ verändern.
 8. **Sicherung starten** klicken.
 9. Warten, bis der Status den Abschluss meldet.
 
+Hinter jedem Ordner zeigt die Liste nach einer kurzen Hintergrundmessung
+Dateianzahl und Platzbedarf an. Währenddessen steht dort **wird ermittelt …**,
+bei leeren Ordnern **leer**. Die Ergebnisübersicht summiert nur die markierten
+Ordner und zeigt bis zum Abschluss aller benötigten Messungen
+**Gesamtgröße wird ermittelt …**. Im Modus **Sichern** wird die Quelle, im
+Modus **Wiederherstellen** der jeweilige Backup-Ordner gemessen. Ergebnisse
+bleiben während der Sitzung im Cache. Untergeordnete Junctions werden wie bei
+Robocopy `/XJ` ausgelassen, Verzeichnis-Symlinks verfolgt und unzugängliche
+Unterordner übersprungen; die Anzeige ist deshalb eine Näherung.
+
 Sicherungsordner und vorhandene technische Protokolle können direkt nach der
 Laufwerkswahl aus der App geöffnet werden. Die Ergebnisübersicht lässt sich
 über ihr Kontextmenü kopieren. Die Laufwerksliste aktualisiert sich automatisch;
@@ -99,7 +109,10 @@ deren Größe oder exakter Zielzeitstempel sich geändert hat. **Backup prüfen*
 liest unabhängig davon immer alle Dateien vollständig, weil nur so der aktuelle
 Inhalt sicher verglichen werden kann. Die laufende Prüfung lässt sich über
 **Prüfung abbrechen** beenden. Bei einer abgebrochenen Initialisierung wird kein
-unvollständiges Manifest gespeichert.
+unvollständiges Manifest gespeichert. Jede Initialisierung oder Prüfung
+schreibt außerdem ein dauerhaftes Protokoll – auch bei Integritätsfehlern,
+Abbruch oder einem unerwarteten Fehler. **Protokoll** öffnet den jüngsten Lauf;
+**Verlauf** kennzeichnet diese Einträge als **Prüfung**.
 
 Die Prüfsummen erkennen zufällige Beschädigungen und unerwartete Änderungen.
 Sie sind nicht kryptografisch signiert; ein Angreifer mit Schreibzugriff auf
@@ -303,12 +316,16 @@ In diesem Ordner befinden sich:
 - `_Sicherungsinfo.txt`: Zuordnung und Angaben zur Sicherung.
 - `_Ordner.json`: Originalpfade frei hinzugefügter Ordner.
 - `_Pruefsummen.tsv`: SHA-256-Prüfsummen der gesicherten Dateien.
-- `_logs\`: technische Backup- und Restore-Protokolle.
+- `_logs\`: technische Backup-, Restore- und Prüfprotokolle.
 
 ## Protokolle
 
 Backup-Protokolle heißen `robocopy_JJJJMMTT_HHMMSS.log`.
 Restore-Protokolle heißen `restore_JJJJMMTT_HHMMSS.log`.
+Prüfprotokolle heißen `verify_JJJJMMTT_HHMMSS_PID_ID.log`. Sie enthalten
+Backup-Pfad, Prüfart, SHA-256-Algorithmus, Beginn, Ende, Dauer, geprüfte
+Dateien und Bytes, Ergebnis sowie verfügbare Fehlerdetails. Auch abgebrochene
+und fehlgeschlagene Prüfungen werden protokolliert.
 
 Robocopy-Codes von 0 bis 7 gelten als Erfolg oder Erfolg mit Hinweisen. Ab
 Code 8 liegt ein Kopierfehler vor.

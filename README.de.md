@@ -30,10 +30,13 @@ auf Englisch.
 - Kann ein erfolgreich verwendetes USB-Sicherungslaufwerk anschließend sicher
   auswerfen.
 - Zeigt Fortschritt und ein verständliches Ergebnis direkt im Fenster an.
+- Zeigt für jeden Ordner Dateianzahl und Platzbedarf sowie für die markierte
+  Auswahl eine Gesamtsumme an; die Ermittlung läuft im Hintergrund.
 - Öffnet vorhandene Protokolle und Sicherungsordner direkt nach der
   Laufwerkswahl und kann die Ergebnisübersicht kopieren.
 - Merkt sich die Ordnerauswahl, zeigt einen Verlauf und prüft gesicherte Dateien
-  vollständig gegen dateiweise SHA-256-Prüfsummen.
+  vollständig gegen dateiweise SHA-256-Prüfsummen. Jede Prüfung erhält ein
+  dauerhaftes Protokoll mit Ergebnis und Fehlerdetails.
 - Kann die Sicherung des aktuellen Computers und Benutzers auf dem ausgewählten
   Laufwerk nach einer Detailanzeige und zweistufigen Sicherheitsabfrage
   vollständig löschen.

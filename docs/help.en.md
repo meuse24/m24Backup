@@ -51,6 +51,15 @@ start shows a notice and exits without changing anything.
 8. Click **Start backup**.
 9. Wait for the completion message.
 
+After a short background scan, the folder list shows each folder's file count
+and occupied space. It displays **calculating …** while measuring and **empty**
+for empty folders. The summary totals only selected folders and displays
+**calculating total size …** until every required result is available. Backup
+mode measures the source; restore mode measures the corresponding backup
+folder. Results remain cached for the session. Child junctions are skipped like
+Robocopy `/XJ`, directory symlinks are followed, and inaccessible subfolders
+are ignored, so the figures are estimates.
+
 The backup folder and existing technical logs can be opened directly after
 selecting a drive. The summary can be copied from its context menu. The drive
 list updates automatically; a drive with an existing backup for this profile is
@@ -90,7 +99,10 @@ existing destination data once more. Later runs only rehash files whose size or
 exact destination timestamp changed. **Verify backup** still reads every file
 completely because a reliable comparison requires the current contents. Use
 **Cancel verification** to stop a running check. Cancelling an initial baseline
-does not save an incomplete manifest.
+does not save an incomplete manifest. Every initialization or verification also
+writes a persistent log, including integrity-error, cancellation, and
+unexpected-failure outcomes. **Log** opens the newest run, while **History**
+labels these entries as **Verification**.
 
 Checksums detect accidental corruption and unexpected modifications. They are
 not cryptographically signed, so an attacker with write access could alter both
@@ -277,12 +289,16 @@ The folder contains:
 - `_Sicherungsinfo.txt`: identity and backup metadata.
 - `_Ordner.json`: original paths for additional folders.
 - `_Pruefsummen.tsv`: SHA-256 checksums for backed-up files.
-- `_logs\`: technical backup and restore logs.
+- `_logs\`: technical backup, restore, and verification logs.
 
 ## Logs
 
 Backup logs use `robocopy_YYYYMMDD_HHMMSS.log`.
 Restore logs use `restore_YYYYMMDD_HHMMSS.log`.
+Verification logs use `verify_YYYYMMDD_HHMMSS_PID_ID.log`. They record the
+backup path, verification type, SHA-256 algorithm, start and finish time,
+duration, checked files and bytes, outcome, and available error details.
+Cancelled and failed verifications are logged as well.
 
 Robocopy exit codes 0 to 7 mean success or success with notes. Codes 8 and
 above indicate copy errors.
