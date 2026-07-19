@@ -106,6 +106,7 @@ $script:fatalGuiError = $false
 # Arbeitspaket 7).
 $script:startupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $script:splashDelayMilliseconds = 400
+$script:driveDiscoveryActive = $false
 
 function New-StartupSplashForm {
     # Ein optionaler Splashscreen darf den eigentlichen Programmstart nie
@@ -942,6 +943,9 @@ ComboBox-Listen, Scrollbalken und Menues weiterhin hell; statt eines
 inkonsistenten dunklen Themes bleibt ein konsistentes, kontrastgeprueftes
 helles Theme erhalten (Risikoabwaegung aus plan.md).
 #>
+# Der Hochkontrastzustand wird bewusst nur einmal beim Start gelesen; ein
+# Schemawechsel bei laufender Anwendung greift nach einem Neustart (die von
+# plan.md erlaubte Neustart-Variante fuer Themenwechsel).
 $script:highContrast = [System.Windows.Forms.SystemInformation]::HighContrast
 if ($script:highContrast) {
     $formBackColor = [System.Drawing.SystemColors]::Control
@@ -1038,7 +1042,9 @@ $form.StartPosition = "CenterScreen"
 # am Skriptanfang). Alle Masse in dieser Datei sind 96-DPI-Logikpixel.
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 $form.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
-$form.ClientSize = New-Object System.Drawing.Size(780, 810)
+# Breit genug, damit die vier Vorgangsoptionen bei deutschen Beschriftungen
+# normalerweise in einer Zeile stehen; bei schmaleren Fenstern brechen sie um.
+$form.ClientSize = New-Object System.Drawing.Size(840, 810)
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
 $form.MaximizeBox = $true
 $form.MinimizeBox = $true
@@ -1080,18 +1086,34 @@ Bereichsflaechen sind zugleich die Eltern ihrer Steuerelemente; separate
 dekorative Panels samt SendToBack-Reparatur entfallen.
 #>
 $layoutRoot = New-Object System.Windows.Forms.TableLayoutPanel
-$layoutRoot.Dock = [System.Windows.Forms.DockStyle]::Fill
+$contentHost = New-Object System.Windows.Forms.Panel
+$contentHost.Dock = [System.Windows.Forms.DockStyle]::Fill
+$contentHost.AutoScroll = $true
+$contentHost.BackColor = [System.Drawing.Color]::Transparent
+$contentHost.TabIndex = 0
+$form.Controls.Add($contentHost)
+
+$layoutRoot.Dock = [System.Windows.Forms.DockStyle]::Top
+$layoutRoot.AutoSize = $true
+$layoutRoot.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
 $layoutRoot.BackColor = [System.Drawing.Color]::Transparent
 $layoutRoot.ColumnCount = 1
 [void]$layoutRoot.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
-$layoutRoot.RowCount = 6
+$layoutRoot.RowCount = 5
 [void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
 [void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
-[void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
-$form.Controls.Add($layoutRoot)
+$contentHost.Controls.Add($layoutRoot)
+
+# Fill the available content height at normal DPI so the folder list receives
+# spare space. If the preferred height is larger (for example at 175% with
+# enlarged controls), the host supplies a vertical scrollbar instead of
+# allowing later rows to disappear.
+$contentHost.Add_SizeChanged({
+    $layoutRoot.MinimumSize = New-Object System.Drawing.Size(0, $contentHost.ClientSize.Height)
+})
 
 $headerPanel = New-Object System.Windows.Forms.TableLayoutPanel
 $headerPanel.AutoSize = $true
@@ -1124,6 +1146,8 @@ $titleLabel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 2)
 $headerTextFlow.Controls.Add($titleLabel)
 
 $descriptionLabel = New-Object System.Windows.Forms.Label
+# Voller Wortlaut wie in Update-LibraryList, das den Text bei jedem
+# Moduswechsel ohnehin neu setzt; die Kopfzeile bricht bei Platzmangel um.
 $descriptionLabel.Text = L "Wählen Sie Ziel und Ordner. Vorhandene Dateien werden nicht gelöscht." "Choose a destination and folders. Existing files are not deleted."
 $descriptionLabel.AutoSize = $true
 $descriptionLabel.ForeColor = $secondaryTextColor
@@ -1178,11 +1202,20 @@ $restoreRadio.Location = New-Object System.Drawing.Point(($backupRadio.Left + $b
 
 $modePanel.Size = New-Object System.Drawing.Size(($restoreRadio.Left + $restoreRadio.GetPreferredSize([System.Drawing.Size]::Empty).Width + 14), 36)
 
-$targetSurface = New-Object System.Windows.Forms.Panel
+$targetSurface = New-Object System.Windows.Forms.TableLayoutPanel
 $targetSurface.BackColor = $surfaceColor
-$targetSurface.Size = New-Object System.Drawing.Size(748, 90)
+$targetSurface.AutoSize = $true
+$targetSurface.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+$targetSurface.ColumnCount = 3
+[void]$targetSurface.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$targetSurface.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$targetSurface.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$targetSurface.RowCount = 2
+[void]$targetSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$targetSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$targetSurface.Padding = New-Object System.Windows.Forms.Padding(12, 10, 12, 8)
 $targetSurface.Margin = New-Object System.Windows.Forms.Padding(16, 4, 16, 4)
-$targetSurface.Anchor = 'Top, Left, Right'
+$targetSurface.Dock = [System.Windows.Forms.DockStyle]::Top
 $targetSurface.TabIndex = 1
 $layoutRoot.Controls.Add($targetSurface, 0, 1)
 
@@ -1190,40 +1223,50 @@ $driveLabel = New-Object System.Windows.Forms.Label
 $driveLabel.Text = L "Ziellaufwerk:" "Destination drive:"
 $driveLabel.AutoSize = $true
 $driveLabel.Font = $captionFont
-$driveLabel.Location = New-Object System.Drawing.Point(16, 21)
 $driveLabel.BackColor = $surfaceColor
-$targetSurface.Controls.Add($driveLabel)
+$driveLabel.Margin = New-Object System.Windows.Forms.Padding(4, 8, 12, 0)
+$driveLabel.Anchor = 'Left'
+$targetSurface.Controls.Add($driveLabel, 0, 0)
 
 $driveCombo = New-Object System.Windows.Forms.ComboBox
 $driveCombo.DropDownStyle = "DropDownList"
-$driveCombo.Location = New-Object System.Drawing.Point(140, 17)
-$driveCombo.Size = New-Object System.Drawing.Size(464, 27)
-$driveCombo.Anchor = "Top, Left, Right"
+$driveCombo.Dock = [System.Windows.Forms.DockStyle]::Fill
+$driveCombo.Margin = New-Object System.Windows.Forms.Padding(0, 4, 8, 4)
 $driveCombo.AccessibleName = L 'Ziellaufwerk' 'Destination drive'
 $driveCombo.TabIndex = 0
-$targetSurface.Controls.Add($driveCombo)
+$targetSurface.Controls.Add($driveCombo, 1, 0)
 
 $driveToolTip = New-Object System.Windows.Forms.ToolTip
 
 $refreshButton = New-M24Button -Text (L "Aktualisieren" "Refresh") -Width 120 -Height 32
-$refreshButton.Location = New-Object System.Drawing.Point(612, 15)
-$refreshButton.Anchor = "Top, Right"
+$refreshButton.Margin = New-Object System.Windows.Forms.Padding(0, 2, 4, 2)
+$refreshButton.Anchor = 'Right'
 $refreshButton.TabIndex = 1
-$targetSurface.Controls.Add($refreshButton)
+$targetSurface.Controls.Add($refreshButton, 2, 0)
+
+$driveStatusPanel = New-Object System.Windows.Forms.Panel
+$driveStatusPanel.BackColor = $surfaceColor
+# Breite vor dem Hinzufuegen der verankerten Kinder setzen: Die Anker-Deltas
+# von healthPanel und fat32Label beziehen sich auf diese Ausgangsbreite.
+$driveStatusPanel.Size = New-Object System.Drawing.Size(716, 28)
+$driveStatusPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
+$driveStatusPanel.Margin = New-Object System.Windows.Forms.Padding(4, 0, 4, 0)
+$targetSurface.Controls.Add($driveStatusPanel, 0, 1)
+$targetSurface.SetColumnSpan($driveStatusPanel, 3)
 
 $driveInfoLabel = New-Object System.Windows.Forms.Label
 $driveInfoLabel.AutoSize = $true
 $driveInfoLabel.ForeColor = $secondaryTextColor
-$driveInfoLabel.Location = New-Object System.Drawing.Point(16, 55)
+$driveInfoLabel.Location = New-Object System.Drawing.Point(0, 4)
 $driveInfoLabel.BackColor = $surfaceColor
-$targetSurface.Controls.Add($driveInfoLabel)
+$driveStatusPanel.Controls.Add($driveInfoLabel)
 
 $healthPanel = New-Object System.Windows.Forms.Panel
-$healthPanel.Location = New-Object System.Drawing.Point(180, 51)
+$healthPanel.Location = New-Object System.Drawing.Point(164, 0)
 $healthPanel.Size = New-Object System.Drawing.Size(552, 25)
 $healthPanel.Anchor = 'Top, Left, Right'
 $healthPanel.BackColor = $surfaceColor
-$targetSurface.Controls.Add($healthPanel)
+$driveStatusPanel.Controls.Add($healthPanel)
 
 $healthDot = New-Object System.Windows.Forms.Panel
 $healthDot.Location = New-Object System.Drawing.Point(0, 6)
@@ -1285,12 +1328,12 @@ $fat32Label.ForeColor = $infoTextColor
 $fat32Label.BackColor = $infoBackColor
 $fat32Label.AutoSize = $false
 $fat32Label.TextAlign = 'MiddleLeft'
-$fat32Label.Location = New-Object System.Drawing.Point(16, 51)
+$fat32Label.Location = New-Object System.Drawing.Point(0, 0)
 $fat32Label.Size = New-Object System.Drawing.Size(716, 25)
 $fat32Label.Anchor = 'Top, Left, Right'
 $fat32Label.Padding = New-Object System.Windows.Forms.Padding(10, 0, 0, 0)
 $fat32Label.Visible = $false
-$targetSurface.Controls.Add($fat32Label)
+$driveStatusPanel.Controls.Add($fat32Label)
 
 <#
 Ordnerbereich (plan.md Arbeitspaket 3): Die Ordnerliste ist der dominante
@@ -1313,6 +1356,11 @@ $folderSurface.RowCount = 3
 $folderSurface.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 10)
 $folderSurface.Margin = New-Object System.Windows.Forms.Padding(16, 4, 16, 4)
 $folderSurface.Dock = [System.Windows.Forms.DockStyle]::Fill
+# Die flexible Listenzeile darf nie niedriger als das danebenliegende
+# 2x2-Raster der Auswahlbefehle werden. 176 Logikpixel fuer den gesamten
+# Abschnitt lassen nach Ueberschrift, Innenabstaenden und Backupverwaltung
+# mindestens die benoetigten 72 Pixel fuer Alle/Keine/Hinzufuegen/Entfernen.
+$folderSurface.MinimumSize = New-Object System.Drawing.Size(0, 176)
 $folderSurface.TabIndex = 2
 $layoutRoot.Controls.Add($folderSurface, 0, 2)
 
@@ -1435,9 +1483,17 @@ um, statt abgeschnitten zu werden. Der fruehere Name "Superschnell" heisst
 jetzt "Schnellmodus (ohne Vorprüfung)", damit die Sicherheitsfolge sichtbar
 ist und nicht allein im Tooltip steht.
 #>
-$optionsSurface = New-Object System.Windows.Forms.Panel
+$optionsSurface = New-Object System.Windows.Forms.TableLayoutPanel
 $optionsSurface.BackColor = $surfaceColor
-$optionsSurface.Size = New-Object System.Drawing.Size(748, 84)
+$optionsSurface.AutoSize = $false
+$optionsSurface.Size = New-Object System.Drawing.Size(748, 78)
+$optionsSurface.ColumnCount = 2
+[void]$optionsSurface.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$optionsSurface.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$optionsSurface.RowCount = 2
+[void]$optionsSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 34)))
+[void]$optionsSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 32)))
+$optionsSurface.Padding = New-Object System.Windows.Forms.Padding(12, 6, 12, 6)
 $optionsSurface.Margin = New-Object System.Windows.Forms.Padding(16, 4, 16, 4)
 $optionsSurface.Anchor = 'Top, Left, Right'
 $optionsSurface.TabIndex = 3
@@ -1448,17 +1504,19 @@ $optionsCaption.Text = L 'Optionen:' 'Options:'
 $optionsCaption.AutoSize = $true
 $optionsCaption.Font = $captionFont
 $optionsCaption.BackColor = $surfaceColor
-$optionsCaption.Location = New-Object System.Drawing.Point(16, 15)
-$optionsSurface.Controls.Add($optionsCaption)
+$optionsCaption.Margin = New-Object System.Windows.Forms.Padding(4, 9, 12, 0)
+$optionsCaption.Anchor = 'Top, Left'
+$optionsSurface.Controls.Add($optionsCaption, 0, 0)
 
 $operationOptionsFlow = New-Object System.Windows.Forms.FlowLayoutPanel
 $operationOptionsFlow.AutoSize = $true
 $operationOptionsFlow.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
-$operationOptionsFlow.WrapContents = $false
+$operationOptionsFlow.WrapContents = $true
 $operationOptionsFlow.BackColor = $surfaceColor
-$operationOptionsFlow.Location = New-Object System.Drawing.Point(106, 6)
+$operationOptionsFlow.Dock = [System.Windows.Forms.DockStyle]::Fill
+$operationOptionsFlow.Margin = New-Object System.Windows.Forms.Padding(0)
 $operationOptionsFlow.TabIndex = 0
-$optionsSurface.Controls.Add($operationOptionsFlow)
+$optionsSurface.Controls.Add($operationOptionsFlow, 1, 0)
 
 function New-M24OptionCheckBox {
     param([string]$Text, [int]$TabIndex)
@@ -1500,19 +1558,48 @@ $settingCaption.Text = L 'Einstellung:' 'Setting:'
 $settingCaption.AutoSize = $true
 $settingCaption.Font = $captionFont
 $settingCaption.BackColor = $surfaceColor
-$settingCaption.Location = New-Object System.Drawing.Point(16, 53)
-$optionsSurface.Controls.Add($settingCaption)
+$settingCaption.Margin = New-Object System.Windows.Forms.Padding(4, 9, 12, 0)
+$settingCaption.Anchor = 'Top, Left'
+$optionsSurface.Controls.Add($settingCaption, 0, 1)
 
 # Dauerhafte Anwendungs-Einstellung, kein Vorgangs-Schalter: gilt ueber
 # Programmstarts hinweg und registriert bzw. entfernt den Login-Autostart.
 $reminderCheckBox = New-M24OptionCheckBox -Text (L 'Beim Windows-Login an fällige Sicherungen erinnern' 'Remind me at Windows sign-in when a backup is due') -TabIndex 1
-$reminderCheckBox.Location = New-Object System.Drawing.Point(108, 44)
-$optionsSurface.Controls.Add($reminderCheckBox)
+$reminderCheckBox.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 2)
+$reminderCheckBox.Anchor = 'Top, Left'
+$optionsSurface.Controls.Add($reminderCheckBox, 1, 1)
 $reminderDetails = L `
     'Beim Windows-Login wird nach 14 Tagen ohne erfolgreiches GUI-Backup erinnert. Es wird kein Hintergrunddienst installiert.' `
     'At Windows login, a reminder appears after 14 days without a successful GUI backup. No background service is installed.'
 $optionsToolTip.SetToolTip($reminderCheckBox, $reminderDetails)
 $reminderCheckBox.AccessibleDescription = $reminderDetails
+
+# Die Absolute-Zeilenhoehen des Optionsbereichs wachsen mit, sobald die
+# umbruchfaehige Optionszeile oder der Erinnerungstext bei schmalen Fenstern
+# (z. B. 200 % Skalierung auf 1366 Pixel Arbeitsbreite) mehrzeilig wird.
+# Feste Zeilen plus explizite Nachberechnung umgehen die unzuverlaessige
+# Wunschhoehen-Messung verschachtelter AutoSize-TableLayoutPanels.
+function Update-OptionsSurfaceHeight {
+    $scaleFactor = $form.CurrentAutoScaleDimensions.Width / 96
+    if ($scaleFactor -le 0) { $scaleFactor = 1 }
+    $contentWidth = $optionsSurface.ClientSize.Width - $optionsSurface.Padding.Horizontal -
+        [math]::Max($optionsCaption.Width + $optionsCaption.Margin.Horizontal, $settingCaption.Width + $settingCaption.Margin.Horizontal)
+    $contentWidth = [math]::Max([int](120 * $scaleFactor), $contentWidth)
+    # MaximumSize laesst den langen Erinnerungstext bei Platzmangel im
+    # Kontrollkaestchen selbst umbrechen, statt rechts abgeschnitten zu werden.
+    $reminderCheckBox.MaximumSize = New-Object System.Drawing.Size($contentWidth, 0)
+    $flowPreferred = $operationOptionsFlow.GetPreferredSize((New-Object System.Drawing.Size($contentWidth, 0)))
+    $reminderPreferred = $reminderCheckBox.GetPreferredSize((New-Object System.Drawing.Size($contentWidth, 0)))
+    $optionsRowHeight = [math]::Max([int](34 * $scaleFactor), $flowPreferred.Height + [int](2 * $scaleFactor))
+    $settingRowHeight = [math]::Max([int](32 * $scaleFactor), $reminderPreferred.Height + [int](4 * $scaleFactor))
+    # Nur bei echten Aenderungen schreiben: Die Hoehenzuweisung loest erneut
+    # Resize aus; identische Werte beenden die Rekursion sofort.
+    if ([int]$optionsSurface.RowStyles[0].Height -ne $optionsRowHeight) { $optionsSurface.RowStyles[0].Height = $optionsRowHeight }
+    if ([int]$optionsSurface.RowStyles[1].Height -ne $settingRowHeight) { $optionsSurface.RowStyles[1].Height = $settingRowHeight }
+    $surfaceHeight = $optionsRowHeight + $settingRowHeight + $optionsSurface.Padding.Vertical
+    if ($optionsSurface.Height -ne $surfaceHeight) { $optionsSurface.Height = $surfaceHeight }
+}
+$optionsSurface.Add_Resize({ Update-OptionsSurfaceHeight })
 
 $activitySurface = New-Object System.Windows.Forms.Panel
 $activitySurface.BackColor = $surfaceColor
@@ -1605,49 +1692,57 @@ $copyResultMenuItem.Add_Click({
 [void]$resultContextMenu.Items.Add($copyResultMenuItem)
 $resultBox.ContextMenuStrip = $resultContextMenu
 
-$footerSurface = New-Object System.Windows.Forms.Panel
+$footerSurface = New-Object System.Windows.Forms.FlowLayoutPanel
 $footerSurface.BackColor = $surfaceColor
-$footerSurface.Size = New-Object System.Drawing.Size(780, 72)
+$footerSurface.AutoSize = $true
+$footerSurface.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+$footerSurface.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
+$footerSurface.WrapContents = $true
+$footerSurface.Padding = New-Object System.Windows.Forms.Padding(24, 12, 24, 12)
 $footerSurface.Margin = New-Object System.Windows.Forms.Padding(0, 8, 0, 0)
-$footerSurface.Anchor = 'Top, Left, Right'
+$footerSurface.Dock = [System.Windows.Forms.DockStyle]::Bottom
 $footerSurface.TabIndex = 5
-$layoutRoot.Controls.Add($footerSurface, 0, 5)
+$form.Controls.Add($footerSurface)
+# Das Fill-gedockte Inhalts-Panel muss vorn in der Z-Reihenfolge stehen:
+# WinForms dockt Kinder von hinten nach vorn, der Footer reserviert also
+# zuerst die Unterkante und der Inhalt erhaelt danach den Rest. Andernfalls
+# laege der Inhalt unter dem Footer und seine letzten Zeilen waeren verdeckt.
+$contentHost.BringToFront()
 
 $startButton = New-M24Button -Text (L "Sicherung starten" "Start backup") -Width 200 -Height 40 -Kind 'Primary' -Font $footerButtonFont
-$startButton.Location = New-Object System.Drawing.Point(24, 16)
-$startButton.Anchor = "Top, Left"
+$startButton.Dock = [System.Windows.Forms.DockStyle]::Fill
 $startButton.TabIndex = 0
-$footerSurface.Controls.Add($startButton)
+$primaryActionHost = New-Object System.Windows.Forms.Panel
+$primaryActionHost.Size = New-Object System.Drawing.Size(200, 40)
+$primaryActionHost.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
+$primaryActionHost.Controls.Add($startButton)
+$footerSurface.Controls.Add($primaryActionHost)
 $form.AcceptButton = $startButton
 
 $logButton = New-M24Button -Text (L "Protokoll öffnen" "Open log") -Width 150 -Height 40 -Font $footerButtonFont
-$logButton.Location = New-Object System.Drawing.Point(232, 16)
+$logButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
 $logButton.Enabled = $false
-$logButton.Anchor = "Top, Left"
 $logButton.TabIndex = 1
 $footerSurface.Controls.Add($logButton)
 
 $destinationButton = New-M24Button -Text (L "Sicherungsordner öffnen" "Open backup folder") -Width 190 -Height 40 -Font $footerButtonFont
-$destinationButton.Location = New-Object System.Drawing.Point(390, 16)
+$destinationButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
 $destinationButton.Enabled = $false
-$destinationButton.Anchor = "Top, Left"
 $destinationButton.TabIndex = 2
 $footerSurface.Controls.Add($destinationButton)
 
 $closeButton = New-M24Button -Text (L "Schließen" "Close") -Width 135 -Height 40 -Font $footerButtonFont
-$closeButton.Location = New-Object System.Drawing.Point(621, 16)
-$closeButton.Anchor = "Top, Right"
+$closeButton.Margin = New-Object System.Windows.Forms.Padding(0)
 $closeButton.TabIndex = 3
 $footerSurface.Controls.Add($closeButton)
 
 $cancelButton = New-M24Button -Text (L "Sicherung abbrechen" "Cancel backup") -Width 200 -Height 40 -Kind 'Danger' -Font $footerButtonFont
 # Der Abbrechen-Button ersetzt den Start-Button an derselben Position und
 # muss deshalb auch gleich verankert sein.
-$cancelButton.Location = New-Object System.Drawing.Point(24, 16)
-$cancelButton.Anchor = "Top, Left"
+$cancelButton.Dock = [System.Windows.Forms.DockStyle]::Fill
 $cancelButton.TabIndex = 0
 $cancelButton.Visible = $false
-$footerSurface.Controls.Add($cancelButton)
+$primaryActionHost.Controls.Add($cancelButton)
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 500
@@ -2115,10 +2210,20 @@ function Get-PhysicalDriveConnectionInfo {
 function Update-DriveList {
     param([switch]$Force)
 
+    # The CIM call can legitimately take several seconds. Run only that
+    # blocking query in a background runspace and pump the UI while waiting.
+    # This makes the 400 ms splash threshold real during startup and keeps an
+    # already visible window responsive during a manual refresh. The guard
+    # prevents DoEvents from re-entering drive discovery through a timer or
+    # another Refresh click.
+    if ($script:driveDiscoveryActive) { return }
+    $script:driveDiscoveryActive = $true
+
     # Waehrend eines aktiven Retry-Backoffs nach einem Erkennungsfehler wird
     # nur automatisch uebersprungen; eine ausdrueckliche Aktualisierung
     # (-Force) fragt immer sofort ab.
     if (-not $Force -and [DateTime]::UtcNow -lt $script:driveRetryAfterUtc) {
+        $script:driveDiscoveryActive = $false
         return
     }
 
@@ -2132,9 +2237,39 @@ function Update-DriveList {
     try {
         # OperationTimeoutSec begrenzt eine haengende WMI/CIM-Abfrage, damit
         # der GUI-Thread nicht unbegrenzt blockiert.
-        $drives = @(Get-CimInstance Win32_LogicalDisk -OperationTimeoutSec 8 -ErrorAction Stop |
-            Where-Object { $_.DriveType -in 2, 3 -and $_.DeviceID -ne $systemDrive -and $_.Size -gt 0 } |
-            Sort-Object DriveType, DeviceID)
+        $driveProbe = [powershell]::Create()
+        try {
+            [void]$driveProbe.AddScript(@'
+param($SystemDrive)
+Get-CimInstance Win32_LogicalDisk -OperationTimeoutSec 8 -ErrorAction Stop |
+    Where-Object { $_.DriveType -in 2, 3 -and $_.DeviceID -ne $SystemDrive -and $_.Size -gt 0 } |
+    Sort-Object DriveType, DeviceID
+'@).AddArgument($systemDrive)
+            $driveProbeResult = $driveProbe.BeginInvoke()
+            while (-not $driveProbeResult.IsCompleted) {
+                if ($script:mainWindowShown) {
+                    # Nach dem Fensterstart wird bewusst ohne DoEvents gewartet:
+                    # Eine Nachrichtenpumpe mitten in der Laufwerkssuche wuerde
+                    # Klicks (z. B. "Sicherung starten") in einen halb
+                    # aktualisierten Zustand einschleusen. Das kurze Blockieren
+                    # entspricht dem bisherigen Verhalten.
+                    [void]$driveProbeResult.AsyncWaitHandle.WaitOne(250)
+                } else {
+                    # Startphase: Statusaktualisierung pumpt die Nachrichten-
+                    # schleife und laesst den Splash nach Ueberschreiten der
+                    # 400-ms-Schwelle zuverlaessig erscheinen, auch wenn die
+                    # CIM-Abfrage bis zu ihrem 8-Sekunden-Timeout haengt.
+                    Set-StartupSplashStatus (L 'Sicherungslaufwerke werden geprüft ...' 'Checking backup drives ...')
+                    [System.Threading.Thread]::Sleep(40)
+                }
+            }
+            $drives = @($driveProbe.EndInvoke($driveProbeResult))
+            if ($driveProbe.HadErrors -and $driveProbe.Streams.Error.Count -gt 0) {
+                throw $driveProbe.Streams.Error[0]
+            }
+        } finally {
+            if ($driveProbe) { $driveProbe.Dispose() }
+        }
 
         # Reset direkt nach der erfolgreichen CIM-Abfrage - noch vor dem
         # Early-Return bei unveraendertem Snapshot, der ihn sonst ueberspringen
@@ -2285,6 +2420,8 @@ function Update-DriveList {
         Update-BackupOptionState
         Update-SelectionState
         $startButton.Enabled = $false
+    } finally {
+        $script:driveDiscoveryActive = $false
     }
 }
 
@@ -3307,8 +3444,11 @@ $form.Add_Shown({
     $scaleFactor = $form.CurrentAutoScaleDimensions.Width / 96
     if ($scaleFactor -le 0) { $scaleFactor = 1 }
     $workingArea = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+    # 770 logische Pixel Mindestbreite halten die vier Fusszeilen-Befehle
+    # einzeilig; wird das Fenster durch eine kleine Arbeitsflaeche schmaler
+    # geklemmt, bricht die Fusszeile kontrolliert um statt zu ueberlappen.
     $form.MinimumSize = New-Object System.Drawing.Size(
-        [math]::Min([int](760 * $scaleFactor), $workingArea.Width),
+        [math]::Min([int](770 * $scaleFactor), $workingArea.Width),
         [math]::Min([int](700 * $scaleFactor), $workingArea.Height))
     if ($form.Width -gt $workingArea.Width -or $form.Height -gt $workingArea.Height) {
         $form.Size = New-Object System.Drawing.Size(
@@ -3382,6 +3522,9 @@ Update-SelectionState
 # hier einmalig explizit auf die System-DPI skaliert.
 $form.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
 $form.PerformAutoScale()
+# Nach der Skalierung einmal initial nachrechnen, damit die Absolute-Zeilen
+# des Optionsbereichs bereits vor der ersten Anzeige DPI-korrekt sind.
+Update-OptionsSurfaceHeight
 
 # Der Splash muss vor ShowDialog vollstaendig geschlossen sein. Andernfalls
 # kann WinForms das modale Hauptfenster implizit dem noch aktiven Splash als

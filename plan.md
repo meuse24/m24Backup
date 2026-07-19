@@ -19,8 +19,13 @@ driven by the verified runtime environment (Windows PowerShell 5.1 host via
    nested table layout for the folder area. The window is resizable and
    maximizable; minimum and initial size are clamped to the active monitor's
    working area in the `Shown` handler (after DPI scaling). Whole-form
-   `AutoScroll` was removed; on very small screens the folder list shrinks and
-   scrolls locally.
+   Whole-form scrolling was replaced by a dedicated scrollable content host;
+   the footer remains visible. At ordinary sizes the folder list receives all
+   spare height and scrolls locally. If the complete minimum layout cannot fit
+   at high scaling (for example 175%), the content host scrolls vertically
+   instead of dropping entire rows. Destination, option, and footer commands
+   use nested table or wrapping flow layouts so width clamping cannot overlap
+   them.
 3. **Folder/backup management (WP 3):** Implemented as planned. The large logo
    was removed from the workflow; History, Verify backup, and Delete backup
    form a labeled "Backup management" row below the list, with Delete last and
@@ -37,14 +42,22 @@ driven by the verified runtime environment (Windows PowerShell 5.1 host via
 6. **Themes and accessibility (WP 6):** Per the plan's risk mitigation, no
    dark mode ships: WinForms on .NET Framework renders drop-downs, scroll
    bars, and menus light, so a coherent, contrast-checked light theme plus
-   full High Contrast support (system colors and system-styled buttons) was
-   implemented instead. Colors moved to a central semantic palette; key
-   controls expose `AccessibleName`/`AccessibleDescription`; the summary box
-   is keyboard-reachable.
+   High Contrast support (system colors and system-styled buttons) was
+   implemented instead. High Contrast is evaluated once at startup; a scheme
+   change while the app is running takes effect after a restart, the
+   restart-based behavior the plan permits for theme changes. Colors moved to
+   a central semantic palette. Accessibility metadata
+   (`AccessibleName`/`AccessibleDescription`) was added to key controls and
+   the summary box is keyboard-reachable; this is metadata coverage, not yet
+   a verified Narrator/UI-Automation pass (see the remaining manual
+   verification below).
 7. **Splash (WP 7):** Instead of a startup measurement campaign, the splash is
    created lazily after a fixed 400 ms threshold, so fast starts show no
-   splash at all. It is small, never `TopMost`, centered on the monitor with
-   the cursor, and the artificial 300 ms completion delay was removed.
+   splash at all. The potentially slow logical-drive query runs in a guarded
+   background runspace while the UI thread pumps status updates, so the
+   threshold is also honored while CIM is waiting. The splash is small, never
+   `TopMost`, centered on the monitor with the cursor, and the artificial
+   300 ms completion delay was removed.
 
 Remaining manual verification (not automatable here): the full visual test
 matrix of section 12 (multiple scale factors and monitors, Narrator

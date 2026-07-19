@@ -66,12 +66,17 @@ Describe 'Shared folder metadata' {
         Get-M24FolderDisplayName 'Custom' $false | Should -Be 'Custom'
     }
 
-    It 'returns every canonical standard folder name once' {
+    It 'returns every available canonical standard folder name once' {
         $names = @(Get-M24StandardFolderDefinitions | ForEach-Object Name)
-        $names.Count | Should -Be 9
-        @($names | Select-Object -Unique).Count | Should -Be 9
+        # Windows may redirect a known folder to the profile root. The
+        # production helper deliberately excludes that unsafe broad target,
+        # so the available count is environment-dependent. Uniqueness and the
+        # explicitly resolved non-known-folder entries are the stable contract.
+        $names.Count | Should -BeGreaterOrEqual 7
+        @($names | Select-Object -Unique).Count | Should -Be $names.Count
         ($names -contains 'Downloads') | Should -Be $true
         ($names -contains 'Gespeicherte Spiele') | Should -Be $true
+        ($names -contains 'Kontakte') | Should -Be $true
     }
 }
 
@@ -1233,15 +1238,15 @@ Describe 'GUI worker launch and drive discovery contract' {
     }
 
     It 'bounds the Win32_LogicalDisk query with an 8 second timeout and terminating errors' {
-        $cimQuery = $script:updateDriveList.Find({
-                param($node)
-                ($node -is [System.Management.Automation.Language.CommandAst]) -and
-                $node.GetCommandName() -eq 'Get-CimInstance'
-            }, $true)
-        $cimQuery | Should -Not -BeNullOrEmpty
-        $cimQuery.Extent.Text | Should -Match 'Win32_LogicalDisk'
-        $cimQuery.Extent.Text | Should -Match '-OperationTimeoutSec 8'
-        $cimQuery.Extent.Text | Should -Match '-ErrorAction Stop'
+        # The CIM command intentionally lives inside the script passed to a
+        # background runspace, so inspect the function text rather than only
+        # the outer PowerShell AST.
+        $updateText = $script:updateDriveList.Extent.Text
+        $updateText | Should -Match 'Get-CimInstance Win32_LogicalDisk'
+        $updateText | Should -Match '-OperationTimeoutSec 8'
+        $updateText | Should -Match '-ErrorAction Stop'
+        $updateText | Should -Match ([regex]::Escape('$driveProbe.BeginInvoke()'))
+        $updateText | Should -Match ([regex]::Escape('Set-StartupSplashStatus'))
     }
 
     It 'skips automatic refresh during retry backoff but lets Force bypass it' {
@@ -1352,7 +1357,26 @@ Describe 'GUI worker launch and drive discovery contract' {
         $script:guiText | Should -Match '\$reminderCheckBox = New-M24OptionCheckBox'
         $script:guiText | Should -Match ([regex]::Escape("L 'Beim Windows-Login an fällige Sicherungen erinnern' 'Remind me at Windows sign-in when a backup is due'"))
         $script:guiText | Should -Match ([regex]::Escape("L 'Einstellung:' 'Setting:'"))
-        $script:guiText | Should -Match ([regex]::Escape('$optionsSurface.Controls.Add($reminderCheckBox)'))
+        $script:guiText | Should -Match ([regex]::Escape('$optionsSurface.Controls.Add($reminderCheckBox, 1, 1)'))
+    }
+
+    It 'uses wrapping layouts for options and footer commands' {
+        $script:guiText | Should -Match ([regex]::Escape('$contentHost.AutoScroll = $true'))
+        $script:guiText | Should -Match ([regex]::Escape('$layoutRoot.MinimumSize = New-Object System.Drawing.Size(0, $contentHost.ClientSize.Height)'))
+        $script:guiText | Should -Match ([regex]::Escape('$targetSurface = New-Object System.Windows.Forms.TableLayoutPanel'))
+        $script:guiText | Should -Match ([regex]::Escape('$operationOptionsFlow.WrapContents = $true'))
+        $script:guiText | Should -Match ([regex]::Escape('$optionsSurface.AutoSize = $false'))
+        $script:guiText | Should -Match ([regex]::Escape('$folderSurface.MinimumSize = New-Object System.Drawing.Size(0, 176)'))
+        $script:guiText | Should -Match 'function Update-OptionsSurfaceHeight'
+        $script:guiText | Should -Match ([regex]::Escape('$optionsSurface.Add_Resize({ Update-OptionsSurfaceHeight })'))
+        $script:guiText | Should -Match ([regex]::Escape('$footerSurface = New-Object System.Windows.Forms.FlowLayoutPanel'))
+        $script:guiText | Should -Match ([regex]::Escape('$footerSurface.WrapContents = $true'))
+        $script:guiText | Should -Match ([regex]::Escape('$form.Controls.Add($footerSurface)'))
+        # Das Fill-gedockte Inhalts-Panel muss zuletzt gedockt werden, damit
+        # der Footer den Inhalt nicht verdeckt.
+        $script:guiText | Should -Match ([regex]::Escape('$contentHost.BringToFront()'))
+        $script:guiText | Should -Not -Match ([regex]::Escape('$footerSurface.BringToFront()'))
+        $script:guiText | Should -Not -Match ([regex]::Escape('$closeButton.Location = New-Object System.Drawing.Point(621, 16)'))
     }
 
     It 'enables reminders by default and migrates the original seven-day default to fourteen days' {
