@@ -22,6 +22,44 @@ function L {
     return $English
 }
 
+<#
+DPI-Strategie (dokumentiert, siehe plan.md Arbeitspaket 1):
+Die GUI laeuft unter Windows PowerShell 5.1 (.NET Framework). Der dafuer von
+Microsoft dokumentierte PerMonitorV2-Weg erfordert eine App-Konfiguration
+(app.config) des Hostprozesses; powershell.exe.config kann eine portable App
+nicht setzen. Ohne diese Konfiguration wuerde reines API-PerMonitorV2 zwar den
+Prozess umstellen, WinForms wuerde Fenster bei DPI-Wechseln aber nicht neu
+skalieren - das Layout waere auf dem Zweitmonitor defekt. Deshalb wird der
+Prozess frueh und vor dem ersten Fensterhandle explizit System-DPI-aware
+gesetzt: Beim Start skaliert WinForms das Layout ueber AutoScaleMode.Dpi
+scharf auf die System-DPI; beim Verschieben auf einen Monitor mit anderer
+Skalierung streckt Windows die fertige Darstellung (unscharf, aber korrekt
+und vollstaendig). Der Aufruf ist idempotent: Ist die Awareness bereits durch
+das Manifest des Hosts gesetzt, schlagen die APIs folgenlos fehl.
+#>
+function Initialize-M24DpiAwareness {
+    try {
+        Add-Type -Namespace M24Backup -Name DpiNative -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("shcore.dll")]
+public static extern int SetProcessDpiAwareness(int value);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool SetProcessDPIAware();
+'@ -ErrorAction Stop
+    } catch { return }
+    try {
+        # 1 = PROCESS_SYSTEM_DPI_AWARE. shcore.dll existiert ab Windows 8.1;
+        # aeltere Systeme nutzen den user32-Fallback.
+        if ([M24Backup.DpiNative]::SetProcessDpiAwareness(1) -ne 0) {
+            [void][M24Backup.DpiNative]::SetProcessDPIAware()
+        }
+    } catch {
+        try { [void][M24Backup.DpiNative]::SetProcessDPIAware() } catch {
+            # Ohne API bleibt die Manifest-Voreinstellung des Hosts wirksam.
+        }
+    }
+}
+Initialize-M24DpiAwareness
+
 function Open-HelpTopic {
     param([string]$Anchor)
 
@@ -63,33 +101,92 @@ $script:splashStatusLabel = $null
 $script:splashProgress = $null
 $script:mainWindowShown = $false
 $script:fatalGuiError = $false
+# Der Splash erscheint erst, wenn der Start messbar laenger dauert. Schnelle
+# Starts bleiben dadurch ohne kurz aufblitzendes Zwischenfenster (plan.md,
+# Arbeitspaket 7).
+$script:startupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$script:splashDelayMilliseconds = 400
+
+function New-StartupSplashForm {
+    # Ein optionaler Splashscreen darf den eigentlichen Programmstart nie
+    # verhindern, etwa wenn das Logo auf einem langsamen Medium nicht lesbar ist.
+    try {
+        $splash = New-Object System.Windows.Forms.Form
+        $splash.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+        $splash.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
+        $splash.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
+        $splash.ClientSize = New-Object System.Drawing.Size(380, 96)
+        $splash.BackColor = [System.Drawing.Color]::White
+        $splash.ShowInTaskbar = $false
+        # Kein TopMost: Der Splash soll andere Anwendungen nicht verdecken.
+        $splash.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+
+        $splashLogoBox = New-Object System.Windows.Forms.PictureBox
+        $splashLogoBox.Location = New-Object System.Drawing.Point(16, 20)
+        $splashLogoBox.Size = New-Object System.Drawing.Size(56, 56)
+        $splashLogoBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+        $splashLogoBox.BackColor = [System.Drawing.Color]::White
+        if (Test-Path -LiteralPath $logoFile -PathType Leaf) {
+            $splashLogoStream = [System.IO.File]::Open($logoFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            try {
+                $splashLogoSource = [System.Drawing.Image]::FromStream($splashLogoStream)
+                try { $script:splashLogoImage = New-Object System.Drawing.Bitmap($splashLogoSource) } finally { $splashLogoSource.Dispose() }
+            } finally { $splashLogoStream.Dispose() }
+            $splashLogoBox.Image = $script:splashLogoImage
+        }
+        $splash.Controls.Add($splashLogoBox)
+
+        $script:splashStatusLabel = New-Object System.Windows.Forms.Label
+        $script:splashStatusLabel.Text = L 'Bibliothekssicherung wird gestartet ...' 'Library Backup is starting ...'
+        $script:splashStatusLabel.AccessibleName = L 'Startstatus' 'Startup status'
+        $script:splashStatusLabel.Location = New-Object System.Drawing.Point(84, 24)
+        $script:splashStatusLabel.Size = New-Object System.Drawing.Size(280, 24)
+        $script:splashStatusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+        $script:splashStatusLabel.AutoEllipsis = $true
+        $script:splashStatusLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
+        $script:splashStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(31, 55, 74)
+        $splash.Controls.Add($script:splashStatusLabel)
+
+        $script:splashProgress = New-Object System.Windows.Forms.ProgressBar
+        $script:splashProgress.Location = New-Object System.Drawing.Point(84, 56)
+        $script:splashProgress.Size = New-Object System.Drawing.Size(280, 8)
+        $script:splashProgress.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+        $script:splashProgress.MarqueeAnimationSpeed = 24
+        $script:splashProgress.AccessibleName = L 'Startfortschritt' 'Startup progress'
+        $splash.Controls.Add($script:splashProgress)
+
+        # Explizite DPI-Skalierung wie beim Hauptfenster; erst danach laesst
+        # sich die endgueltige Fenstergroesse fuer die Zentrierung auf dem
+        # Monitor mit dem Mauszeiger verwenden.
+        $splash.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
+        $splash.PerformAutoScale()
+        $cursorArea = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
+        $splash.Location = New-Object System.Drawing.Point(
+            ($cursorArea.Left + [int](($cursorArea.Width - $splash.Width) / 2)),
+            ($cursorArea.Top + [int](($cursorArea.Height - $splash.Height) / 2)))
+
+        $script:splashForm = $splash
+        $script:splashForm.Show()
+        $script:splashForm.Refresh()
+        [System.Windows.Forms.Application]::DoEvents()
+    } catch {
+        Close-StartupSplash
+    }
+}
 
 function Set-StartupSplashStatus {
     param([string]$Text)
+    if (-not $script:splashForm) {
+        # Verzögerte Anzeige: Erst wenn der Start laenger als die Schwelle
+        # dauert, lohnt sich ein eigenes Feedback-Fenster.
+        if ($script:startupStopwatch.ElapsedMilliseconds -lt $script:splashDelayMilliseconds) { return }
+        if ($script:mainWindowShown) { return }
+        New-StartupSplashForm
+    }
     if (-not $script:splashForm -or $script:splashForm.IsDisposed) { return }
     $script:splashStatusLabel.Text = $Text
     $script:splashForm.Refresh()
     [System.Windows.Forms.Application]::DoEvents()
-}
-
-function Complete-StartupSplash {
-    if (-not $script:splashForm -or $script:splashForm.IsDisposed -or -not $script:splashProgress) { return }
-    $script:splashStatusLabel.Text = L 'Bereit.' 'Ready.'
-    $script:splashProgress.MarqueeAnimationSpeed = 0
-    $script:splashProgress.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-    $script:splashProgress.Minimum = 0
-    $script:splashProgress.Maximum = 100
-    # The native Windows progress control animates forward changes. Briefly
-    # stepping backwards forces it to snap to the completed position before
-    # the splash is closed instead of animating after the form is already gone.
-    $script:splashProgress.Value = 100
-    $script:splashProgress.Value = 99
-    $script:splashProgress.Value = 100
-    $script:splashProgress.Refresh()
-    $script:splashForm.Refresh()
-    [System.Windows.Forms.Application]::DoEvents()
-    # Keep the rendered completion state visible long enough to be perceived.
-    Start-Sleep -Milliseconds 300
 }
 
 function Close-StartupSplash {
@@ -223,56 +320,10 @@ try {
     exit 1
 }
 
-# Das Hauptfenster erscheint erst nach Laufwerks- und Metadatenabfragen. Der
-# Splashscreen gibt waehrend dieser Startphase sofort sichtbares Feedback.
-try {
-    $script:splashForm = New-Object System.Windows.Forms.Form
-    $script:splashForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
-    $script:splashForm.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-    $script:splashForm.ClientSize = New-Object System.Drawing.Size(390, 285)
-    $script:splashForm.BackColor = [System.Drawing.Color]::White
-    $script:splashForm.ShowInTaskbar = $false
-    $script:splashForm.TopMost = $true
-
-    $splashLogoBox = New-Object System.Windows.Forms.PictureBox
-    $splashLogoBox.Location = New-Object System.Drawing.Point(45, 18)
-    $splashLogoBox.Size = New-Object System.Drawing.Size(300, 205)
-    $splashLogoBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
-    $splashLogoBox.BackColor = [System.Drawing.Color]::White
-    if (Test-Path -LiteralPath $logoFile -PathType Leaf) {
-        $splashLogoStream = [System.IO.File]::Open($logoFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        try {
-            $splashLogoSource = [System.Drawing.Image]::FromStream($splashLogoStream)
-            try { $script:splashLogoImage = New-Object System.Drawing.Bitmap($splashLogoSource) } finally { $splashLogoSource.Dispose() }
-        } finally { $splashLogoStream.Dispose() }
-        $splashLogoBox.Image = $script:splashLogoImage
-    }
-    $script:splashForm.Controls.Add($splashLogoBox)
-
-    $script:splashStatusLabel = New-Object System.Windows.Forms.Label
-    $script:splashStatusLabel.Text = L 'Bibliothekssicherung wird gestartet ...' 'Library Backup is starting ...'
-    $script:splashStatusLabel.Location = New-Object System.Drawing.Point(30, 229)
-    $script:splashStatusLabel.Size = New-Object System.Drawing.Size(330, 24)
-    $script:splashStatusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $script:splashStatusLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
-    $script:splashStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(31, 55, 74)
-    $script:splashForm.Controls.Add($script:splashStatusLabel)
-
-    $script:splashProgress = New-Object System.Windows.Forms.ProgressBar
-    $script:splashProgress.Location = New-Object System.Drawing.Point(45, 262)
-    $script:splashProgress.Size = New-Object System.Drawing.Size(300, 8)
-    $script:splashProgress.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
-    $script:splashProgress.MarqueeAnimationSpeed = 24
-    $script:splashForm.Controls.Add($script:splashProgress)
-
-    $script:splashForm.Show()
-    $script:splashForm.Refresh()
-    [System.Windows.Forms.Application]::DoEvents()
-} catch {
-    # Ein optionaler Splashscreen darf den eigentlichen Programmstart nie
-    # verhindern, etwa wenn das Logo auf einem langsamen Medium nicht lesbar ist.
-    Close-StartupSplash
-}
+# Das Hauptfenster erscheint erst nach Laufwerks- und Metadatenabfragen.
+# Dauert diese Startphase spuerbar (siehe $script:splashDelayMilliseconds),
+# blendet Set-StartupSplashStatus einen kleinen Status-Splash ein; schnelle
+# Starts kommen ganz ohne Zwischenfenster aus.
 
 try {
 $appIcon = $null
@@ -880,24 +931,120 @@ function Get-BackupHealth {
     }
 }
 
+<#
+Theme-Strategie (dokumentiert, siehe plan.md Arbeitspaket 6):
+Die Oberflaeche verwendet eine zentrale semantische Palette statt verstreuter
+RGB-Literale. Bei aktivem Windows-Hochkontrastmodus werden ausschliesslich
+Systemfarben und die Systemdarstellung der Buttons verwendet, damit das
+gewaehlte Kontrastschema vollstaendig wirksam bleibt. Ein eigener Dark Mode
+wird bewusst nicht ausgeliefert: WinForms unter .NET Framework rendert
+ComboBox-Listen, Scrollbalken und Menues weiterhin hell; statt eines
+inkonsistenten dunklen Themes bleibt ein konsistentes, kontrastgeprueftes
+helles Theme erhalten (Risikoabwaegung aus plan.md).
+#>
+$script:highContrast = [System.Windows.Forms.SystemInformation]::HighContrast
+if ($script:highContrast) {
+    $formBackColor = [System.Drawing.SystemColors]::Control
+    $surfaceColor = [System.Drawing.SystemColors]::Control
+    $listBackColor = [System.Drawing.SystemColors]::Window
+    $buttonBorderColor = [System.Drawing.SystemColors]::ControlText
+    $secondaryTextColor = [System.Drawing.SystemColors]::ControlText
+    $hoverBackColor = [System.Drawing.SystemColors]::Control
+    $dangerTextColor = [System.Drawing.SystemColors]::ControlText
+    $dangerHoverBackColor = [System.Drawing.SystemColors]::Control
+    $successTextColor = [System.Drawing.SystemColors]::ControlText
+    $warningTextColor = [System.Drawing.SystemColors]::ControlText
+    $errorTextColor = [System.Drawing.SystemColors]::ControlText
+    $healthProblemTextColor = [System.Drawing.SystemColors]::ControlText
+    $infoBackColor = [System.Drawing.SystemColors]::Info
+    $infoTextColor = [System.Drawing.SystemColors]::InfoText
+} else {
+    $formBackColor = [System.Drawing.Color]::FromArgb(243, 246, 249)
+    $surfaceColor = [System.Drawing.Color]::FromArgb(255, 255, 255)
+    $listBackColor = [System.Drawing.Color]::White
+    $buttonBorderColor = [System.Drawing.Color]::FromArgb(185, 193, 202)
+    # 82,89,96 auf Weiss erreicht rund 5,9:1 und erfuellt damit die geforderte
+    # Mindestkontrastrate von 4,5:1 fuer normalen Text.
+    $secondaryTextColor = [System.Drawing.Color]::FromArgb(82, 89, 96)
+    $hoverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
+    $dangerTextColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
+    $dangerHoverBackColor = [System.Drawing.Color]::FromArgb(253, 239, 240)
+    $successTextColor = [System.Drawing.Color]::DarkGreen
+    $warningTextColor = [System.Drawing.Color]::FromArgb(157, 93, 0)
+    $errorTextColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
+    $healthProblemTextColor = [System.Drawing.Color]::FromArgb(153, 27, 27)
+    $infoBackColor = [System.Drawing.Color]::FromArgb(255, 247, 224)
+    $infoTextColor = [System.Drawing.Color]::FromArgb(128, 72, 0)
+}
+$accentColor = [System.Drawing.SystemColors]::Highlight
+$accentTextColor = [System.Drawing.SystemColors]::HighlightText
+$accentHoverColor = [System.Windows.Forms.ControlPaint]::Dark($accentColor)
+$captionFont = New-Object System.Drawing.Font($semiboldFontName, 9.5)
+$footerButtonFont = New-Object System.Drawing.Font($semiboldFontName, 10)
+
+<#
+Interaktionsziele (plan.md Arbeitspaket 4): Alle Befehle entstehen ueber eine
+gemeinsame Fabrik mit einheitlichen Zustaenden. Regulaere Befehle sind
+mindestens 32 logische Pixel hoch, die Hauptaktionen im Fussbereich 40.
+Im Hochkontrastmodus rendert die Systemdarstellung Rahmen und Fokus.
+#>
+function New-M24Button {
+    param(
+        [string]$Text,
+        [int]$Width = 100,
+        [int]$Height = 32,
+        [ValidateSet('Primary', 'Secondary', 'Danger')][string]$Kind = 'Secondary',
+        [System.Drawing.Font]$Font
+    )
+    $button = New-Object System.Windows.Forms.Button
+    $button.Text = $Text
+    $button.Size = New-Object System.Drawing.Size($Width, $Height)
+    if ($Font) { $button.Font = $Font }
+    if ($script:highContrast) {
+        $button.FlatStyle = [System.Windows.Forms.FlatStyle]::System
+        return $button
+    }
+    $button.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    switch ($Kind) {
+        'Primary' {
+            $button.BackColor = $accentColor
+            $button.ForeColor = $accentTextColor
+            $button.FlatAppearance.BorderSize = 0
+            $button.FlatAppearance.MouseOverBackColor = $accentHoverColor
+        }
+        'Danger' {
+            $button.BackColor = $surfaceColor
+            $button.ForeColor = $dangerTextColor
+            $button.FlatAppearance.BorderSize = 1
+            $button.FlatAppearance.BorderColor = $dangerTextColor
+            $button.FlatAppearance.MouseOverBackColor = $dangerHoverBackColor
+        }
+        default {
+            $button.BackColor = $surfaceColor
+            $button.FlatAppearance.BorderSize = 1
+            $button.FlatAppearance.BorderColor = $buttonBorderColor
+            $button.FlatAppearance.MouseOverBackColor = $hoverBackColor
+        }
+    }
+    return $button
+}
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = L "Bibliothekssicherung" "Library Backup"
 if ($appVersion) { $form.Text = "{0} {1}" -f $form.Text, $appVersion }
 $form.StartPosition = "CenterScreen"
-$form.ClientSize = New-Object System.Drawing.Size(720, 698)
-$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedSingle
-$form.MaximizeBox = $false
+# AutoScaleMode.Dpi skaliert das komplette logisch definierte Layout beim
+# Start einmalig scharf auf die tatsaechliche System-DPI (siehe DPI-Strategie
+# am Skriptanfang). Alle Masse in dieser Datei sind 96-DPI-Logikpixel.
+$form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
+$form.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
+$form.ClientSize = New-Object System.Drawing.Size(780, 810)
+$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+$form.MaximizeBox = $true
 $form.MinimizeBox = $true
-$form.SizeGripStyle = [System.Windows.Forms.SizeGripStyle]::Hide
-# Kleine Bildschirme (z. B. 1366x768): Das Fenster darf niedriger werden als
-# das Layout; der Inhalt wird dann gescrollt. Nach oben ist die Hoehe auf die
-# Layouthoehe begrenzt. Die feste Rahmenart verhindert eine manuelle
-# Groessenaenderung, die automatische Anpassung bleibt aber moeglich.
-$form.MinimumSize = New-Object System.Drawing.Size(736, 560)
-$form.AutoScroll = $true
 $form.KeyPreview = $true
 $form.Font = New-Object System.Drawing.Font($textFontName, 9.5)
-$form.BackColor = [System.Drawing.Color]::FromArgb(243, 246, 249)
+$form.BackColor = $formBackColor
 $appIconFile = Join-Path $PSScriptRoot 'app.ico'
 if (Test-Path -LiteralPath $appIconFile -PathType Leaf) {
     try {
@@ -924,62 +1071,87 @@ function Show-CompletionNotification {
     $notificationTimer.Stop()
     $notificationTimer.Start()
 }
-$surfaceColor = [System.Drawing.Color]::FromArgb(255, 255, 255)
-$borderColor = [System.Drawing.Color]::FromArgb(222, 226, 230)
-$buttonBorderColor = [System.Drawing.Color]::FromArgb(185, 193, 202)
-$secondaryTextColor = [System.Drawing.Color]::FromArgb(82, 89, 96)
-$accentColor = [System.Drawing.SystemColors]::Highlight
-$accentTextColor = [System.Drawing.SystemColors]::HighlightText
-$accentHoverColor = [System.Windows.Forms.ControlPaint]::Dark($accentColor)
+<#
+Responsives Layout (plan.md Arbeitspaket 2): Ein aeusseres TableLayoutPanel
+stapelt die Funktionsbereiche vertikal. Kopf-, Ziel-, Options-, Aktivitaets-
+und Fussbereich bemessen sich selbst; der Ordnerbereich erhaelt die restliche
+Hoehe und waechst beim Vergroessern oder Maximieren des Fensters mit. Die
+Bereichsflaechen sind zugleich die Eltern ihrer Steuerelemente; separate
+dekorative Panels samt SendToBack-Reparatur entfallen.
+#>
+$layoutRoot = New-Object System.Windows.Forms.TableLayoutPanel
+$layoutRoot.Dock = [System.Windows.Forms.DockStyle]::Fill
+$layoutRoot.BackColor = [System.Drawing.Color]::Transparent
+$layoutRoot.ColumnCount = 1
+[void]$layoutRoot.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$layoutRoot.RowCount = 6
+[void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$form.Controls.Add($layoutRoot)
 
-function New-SurfacePanel {
-    param(
-        [System.Drawing.Point]$Location,
-        [System.Drawing.Size]$Size,
-        [string]$Anchor = 'Top, Left, Right'
-    )
-    $panel = New-Object System.Windows.Forms.Panel
-    $panel.Location = $Location
-    $panel.Size = $Size
-    $panel.Anchor = $Anchor
-    $panel.BackColor = $surfaceColor
-    $form.Controls.Add($panel)
-    return $panel
-}
+$headerPanel = New-Object System.Windows.Forms.TableLayoutPanel
+$headerPanel.AutoSize = $true
+$headerPanel.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+$headerPanel.BackColor = [System.Drawing.Color]::Transparent
+$headerPanel.ColumnCount = 2
+[void]$headerPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$headerPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$headerPanel.RowCount = 1
+$headerPanel.Margin = New-Object System.Windows.Forms.Padding(16, 12, 16, 4)
+$headerPanel.Anchor = 'Top, Left, Right'
+$headerPanel.TabIndex = 0
+$layoutRoot.Controls.Add($headerPanel, 0, 0)
+
+$headerTextFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+$headerTextFlow.FlowDirection = [System.Windows.Forms.FlowDirection]::TopDown
+$headerTextFlow.WrapContents = $false
+$headerTextFlow.AutoSize = $true
+$headerTextFlow.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+$headerTextFlow.BackColor = [System.Drawing.Color]::Transparent
+$headerTextFlow.Margin = New-Object System.Windows.Forms.Padding(0)
+$headerTextFlow.Anchor = 'Top, Left'
+$headerPanel.Controls.Add($headerTextFlow, 0, 0)
 
 $titleLabel = New-Object System.Windows.Forms.Label
 $titleLabel.Text = L "Dateien sichern" "Back up files"
 $titleLabel.Font = New-Object System.Drawing.Font($displayFontName, 18)
 $titleLabel.AutoSize = $true
-$titleLabel.Location = New-Object System.Drawing.Point(30, 16)
-$form.Controls.Add($titleLabel)
+$titleLabel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 2)
+$headerTextFlow.Controls.Add($titleLabel)
 
 $descriptionLabel = New-Object System.Windows.Forms.Label
 $descriptionLabel.Text = L "Wählen Sie Ziel und Ordner. Vorhandene Dateien werden nicht gelöscht." "Choose a destination and folders. Existing files are not deleted."
 $descriptionLabel.AutoSize = $true
 $descriptionLabel.ForeColor = $secondaryTextColor
-$descriptionLabel.Location = New-Object System.Drawing.Point(30, 52)
-$form.Controls.Add($descriptionLabel)
+$descriptionLabel.Margin = New-Object System.Windows.Forms.Padding(2, 0, 0, 0)
+$headerTextFlow.Controls.Add($descriptionLabel)
 
-$helpButton = New-Object System.Windows.Forms.Button
-$helpButton.Text = L "Hilfe" "Help"
-$helpButton.Location = New-Object System.Drawing.Point(398, 12)
-$helpButton.Size = New-Object System.Drawing.Size(64, 36)
-$helpButton.Anchor = 'Top, Right'
-$helpButton.BackColor = $surfaceColor
-$helpButton.FlatStyle = 'Flat'
-$helpButton.FlatAppearance.BorderSize = 1
-$helpButton.FlatAppearance.BorderColor = $buttonBorderColor
-$helpButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
-$helpButton.TabIndex = 2
-$form.Controls.Add($helpButton)
+$headerCommandFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+$headerCommandFlow.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
+$headerCommandFlow.WrapContents = $false
+$headerCommandFlow.AutoSize = $true
+$headerCommandFlow.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+$headerCommandFlow.BackColor = [System.Drawing.Color]::Transparent
+$headerCommandFlow.Margin = New-Object System.Windows.Forms.Padding(8, 0, 0, 0)
+$headerCommandFlow.Anchor = 'Top, Right'
+$headerPanel.Controls.Add($headerCommandFlow, 1, 0)
+
+$helpButton = New-M24Button -Text (L "Hilfe" "Help") -Width 76 -Height 36
+$helpButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
+$helpButton.TabIndex = 0
+$headerCommandFlow.Controls.Add($helpButton)
 
 # Der Modus-Umschalter liegt auf einer eigenen umrahmten Flaeche, damit er
-# sich vom Formularhintergrund abhebt und nicht gedrungen wirkt. Breite und
-# Position ergeben sich aus der Textlaenge der jeweiligen Sprache.
+# sich vom Formularhintergrund abhebt und nicht gedrungen wirkt. Seine Breite
+# ergibt sich aus der Textlaenge der jeweiligen Sprache.
 $modePanel = New-Object System.Windows.Forms.Panel
 $modePanel.BackColor = $surfaceColor
-$modePanel.Anchor = 'Top, Right'
+$modePanel.Margin = New-Object System.Windows.Forms.Padding(0)
+$modePanel.TabIndex = 1
 $modePanel.Add_Paint({
     param($sender, $eventArgs)
     $borderPen = New-Object System.Drawing.Pen($buttonBorderColor)
@@ -987,7 +1159,7 @@ $modePanel.Add_Paint({
         $eventArgs.Graphics.DrawRectangle($borderPen, 0, 0, $sender.ClientSize.Width - 1, $sender.ClientSize.Height - 1)
     } finally { $borderPen.Dispose() }
 })
-$form.Controls.Add($modePanel)
+$headerCommandFlow.Controls.Add($modePanel)
 
 $backupRadio = New-Object System.Windows.Forms.RadioButton
 $backupRadio.Text = L "Sichern" "Back up"
@@ -1005,52 +1177,53 @@ $modePanel.Controls.Add($restoreRadio)
 $restoreRadio.Location = New-Object System.Drawing.Point(($backupRadio.Left + $backupRadio.GetPreferredSize([System.Drawing.Size]::Empty).Width + 14), 8)
 
 $modePanel.Size = New-Object System.Drawing.Size(($restoreRadio.Left + $restoreRadio.GetPreferredSize([System.Drawing.Size]::Empty).Width + 14), 36)
-$modePanel.Location = New-Object System.Drawing.Point((690 - $modePanel.Width), 12)
-$helpButton.Location = New-Object System.Drawing.Point(($modePanel.Left - $helpButton.Width - 8), $modePanel.Top)
-$targetSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 86)) -Size (New-Object System.Drawing.Size(692, 92))
+
+$targetSurface = New-Object System.Windows.Forms.Panel
+$targetSurface.BackColor = $surfaceColor
+$targetSurface.Size = New-Object System.Drawing.Size(748, 90)
+$targetSurface.Margin = New-Object System.Windows.Forms.Padding(16, 4, 16, 4)
+$targetSurface.Anchor = 'Top, Left, Right'
+$targetSurface.TabIndex = 1
+$layoutRoot.Controls.Add($targetSurface, 0, 1)
 
 $driveLabel = New-Object System.Windows.Forms.Label
 $driveLabel.Text = L "Ziellaufwerk:" "Destination drive:"
 $driveLabel.AutoSize = $true
-$driveLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$driveLabel.Location = New-Object System.Drawing.Point(30, 104)
+$driveLabel.Font = $captionFont
+$driveLabel.Location = New-Object System.Drawing.Point(16, 21)
 $driveLabel.BackColor = $surfaceColor
-$form.Controls.Add($driveLabel)
+$targetSurface.Controls.Add($driveLabel)
 
 $driveCombo = New-Object System.Windows.Forms.ComboBox
 $driveCombo.DropDownStyle = "DropDownList"
-$driveCombo.Location = New-Object System.Drawing.Point(145, 98)
-$driveCombo.Size = New-Object System.Drawing.Size(434, 27)
+$driveCombo.Location = New-Object System.Drawing.Point(140, 17)
+$driveCombo.Size = New-Object System.Drawing.Size(464, 27)
 $driveCombo.Anchor = "Top, Left, Right"
-$driveCombo.TabIndex = 3
-$form.Controls.Add($driveCombo)
+$driveCombo.AccessibleName = L 'Ziellaufwerk' 'Destination drive'
+$driveCombo.TabIndex = 0
+$targetSurface.Controls.Add($driveCombo)
 
 $driveToolTip = New-Object System.Windows.Forms.ToolTip
 
-$refreshButton = New-Object System.Windows.Forms.Button
-$refreshButton.Text = L "Aktualisieren" "Refresh"
-$refreshButton.Location = New-Object System.Drawing.Point(587, 98)
-$refreshButton.Size = New-Object System.Drawing.Size(103, 27)
-$refreshButton.BackColor = $surfaceColor
-$refreshButton.FlatStyle = 'Flat'
-$refreshButton.FlatAppearance.BorderColor = $buttonBorderColor
+$refreshButton = New-M24Button -Text (L "Aktualisieren" "Refresh") -Width 120 -Height 32
+$refreshButton.Location = New-Object System.Drawing.Point(612, 15)
 $refreshButton.Anchor = "Top, Right"
-$refreshButton.TabIndex = 4
-$form.Controls.Add($refreshButton)
+$refreshButton.TabIndex = 1
+$targetSurface.Controls.Add($refreshButton)
 
 $driveInfoLabel = New-Object System.Windows.Forms.Label
 $driveInfoLabel.AutoSize = $true
 $driveInfoLabel.ForeColor = $secondaryTextColor
-$driveInfoLabel.Location = New-Object System.Drawing.Point(30, 133)
+$driveInfoLabel.Location = New-Object System.Drawing.Point(16, 55)
 $driveInfoLabel.BackColor = $surfaceColor
-$form.Controls.Add($driveInfoLabel)
+$targetSurface.Controls.Add($driveInfoLabel)
 
 $healthPanel = New-Object System.Windows.Forms.Panel
-$healthPanel.Location = New-Object System.Drawing.Point(180, 129)
-$healthPanel.Size = New-Object System.Drawing.Size(510, 25)
+$healthPanel.Location = New-Object System.Drawing.Point(180, 51)
+$healthPanel.Size = New-Object System.Drawing.Size(552, 25)
 $healthPanel.Anchor = 'Top, Left, Right'
 $healthPanel.BackColor = $surfaceColor
-$form.Controls.Add($healthPanel)
+$targetSurface.Controls.Add($healthPanel)
 
 $healthDot = New-Object System.Windows.Forms.Panel
 $healthDot.Location = New-Object System.Drawing.Point(0, 6)
@@ -1068,9 +1241,10 @@ $healthPanel.Controls.Add($healthDot)
 $healthLabel = New-Object System.Windows.Forms.Label
 $healthLabel.AutoEllipsis = $true
 $healthLabel.Location = New-Object System.Drawing.Point(20, 2)
-$healthLabel.Size = New-Object System.Drawing.Size(462, 21)
+$healthLabel.Size = New-Object System.Drawing.Size(512, 21)
 $healthLabel.Anchor = 'Top, Left, Right'
 $healthLabel.Text = L 'Keine Sicherung für dieses Profil' 'No backup for this profile'
+$healthLabel.AccessibleName = L 'Sicherungsstatus' 'Backup status'
 $healthPanel.Controls.Add($healthLabel)
 
 $healthToolTip = New-Object System.Windows.Forms.ToolTip
@@ -1097,7 +1271,7 @@ function Update-BackupHealth {
         default { [System.Drawing.Color]::FromArgb(196, 43, 28) }
     }
     $healthLabel.Text = $health.Text
-    $healthLabel.ForeColor = if ($health.Level -eq 'Red') { [System.Drawing.Color]::FromArgb(153, 27, 27) } else { $secondaryTextColor }
+    $healthLabel.ForeColor = if ($health.Level -eq 'Red') { $healthProblemTextColor } else { $secondaryTextColor }
     $healthToolTip.SetToolTip($healthPanel, $health.Details)
     $healthToolTip.SetToolTip($healthLabel, $health.Details)
     $healthToolTip.SetToolTip($healthDot, $health.Details)
@@ -1107,269 +1281,318 @@ function Update-BackupHealth {
 
 $fat32Label = New-Object System.Windows.Forms.Label
 $fat32Label.Text = L "Hinweis: FAT32 kann keine Dateien über 4 GB speichern. exFAT oder NTFS wird empfohlen." "FAT32 cannot store files of 4 GB or larger. exFAT or NTFS is recommended."
-$fat32Label.ForeColor = [System.Drawing.Color]::FromArgb(128, 72, 0)
-$fat32Label.BackColor = [System.Drawing.Color]::FromArgb(255, 247, 224)
+$fat32Label.ForeColor = $infoTextColor
+$fat32Label.BackColor = $infoBackColor
 $fat32Label.AutoSize = $false
 $fat32Label.TextAlign = 'MiddleLeft'
-$fat32Label.Location = New-Object System.Drawing.Point(30, 129)
-$fat32Label.Size = New-Object System.Drawing.Size(660, 25)
+$fat32Label.Location = New-Object System.Drawing.Point(16, 51)
+$fat32Label.Size = New-Object System.Drawing.Size(716, 25)
+$fat32Label.Anchor = 'Top, Left, Right'
 $fat32Label.Padding = New-Object System.Windows.Forms.Padding(10, 0, 0, 0)
 $fat32Label.Visible = $false
-$form.Controls.Add($fat32Label)
+$targetSurface.Controls.Add($fat32Label)
 
-$folderSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 186)) -Size (New-Object System.Drawing.Size(692, 224))
+<#
+Ordnerbereich (plan.md Arbeitspaket 3): Die Ordnerliste ist der dominante
+Inhalt und waechst mit dem Fenster. Direkt wirkende Auswahlbefehle stehen
+rechts neben der Liste; Befehle, die ein vorhandenes Backup betreffen,
+bilden eine eigene beschriftete Gruppe am unteren Rand. "Backup loeschen"
+steht dort bewusst zuletzt und raeumlich getrennt von den haeufig genutzten
+Auswahlbefehlen. Das grosse Logo wurde aus dem Arbeitsbereich entfernt;
+Branding verbleibt in Fenstersymbol, Titel und Splash.
+#>
+$folderSurface = New-Object System.Windows.Forms.TableLayoutPanel
+$folderSurface.BackColor = $surfaceColor
+$folderSurface.ColumnCount = 2
+[void]$folderSurface.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$folderSurface.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$folderSurface.RowCount = 3
+[void]$folderSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$folderSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$folderSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$folderSurface.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 10)
+$folderSurface.Margin = New-Object System.Windows.Forms.Padding(16, 4, 16, 4)
+$folderSurface.Dock = [System.Windows.Forms.DockStyle]::Fill
+$folderSurface.TabIndex = 2
+$layoutRoot.Controls.Add($folderSurface, 0, 2)
 
 $libraryLabel = New-Object System.Windows.Forms.Label
 $libraryLabel.Text = L "Diese Ordner werden gesichert:" "These folders will be backed up:"
 $libraryLabel.AutoSize = $true
-$libraryLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$libraryLabel.Location = New-Object System.Drawing.Point(30, 195)
+$libraryLabel.Font = $captionFont
 $libraryLabel.BackColor = $surfaceColor
-$form.Controls.Add($libraryLabel)
+$libraryLabel.Margin = New-Object System.Windows.Forms.Padding(4, 6, 4, 6)
+$libraryLabel.Anchor = 'Top, Left'
+$folderSurface.Controls.Add($libraryLabel, 0, 0)
+$folderSurface.SetColumnSpan($libraryLabel, 2)
+
+# Die Liste fuellt ihre Zelle vollstaendig; zusaetzlicher Platz beim
+# Vergroessern oder Maximieren des Fensters kommt direkt ihr zugute.
 $libraryList = New-Object System.Windows.Forms.CheckedListBox
-# Die Ordnernamen sind kurz; eine schmale, dafuer hoehere Liste zeigt alle
-# Eintraege ohne Scrollbalken. Alle/Keine und der Auswahlzaehler nutzen den
-# frei gewordenen Platz rechts daneben.
-$libraryList.Location = New-Object System.Drawing.Point(30, 218)
-$libraryList.Size = New-Object System.Drawing.Size(340, 184)
-$libraryList.Anchor = "Top, Left"
+$libraryList.Dock = [System.Windows.Forms.DockStyle]::Fill
+$libraryList.Margin = New-Object System.Windows.Forms.Padding(4, 2, 12, 2)
 $libraryList.CheckOnClick = $true
-$libraryList.BackColor = [System.Drawing.Color]::White
-$libraryList.TabIndex = 5
-$form.Controls.Add($libraryList)
+$libraryList.IntegralHeight = $false
+$libraryList.BackColor = $listBackColor
+$libraryList.AccessibleName = L 'Ordnerauswahl' 'Folder selection'
+$libraryList.TabIndex = 0
+$folderSurface.Controls.Add($libraryList, 0, 1)
 
 foreach ($folder in Get-LibraryDefinitions) {
     $item = New-FolderListItem -Name $folder.Name -DisplayName (Get-M24FolderDisplayName $folder.Name $script:isGerman) -Path $folder.Path -IsCustom $false -Checked $true
     [void]$libraryList.Items.Add($item, $true)
 }
 
-$allButton = New-Object System.Windows.Forms.Button
-$allButton.Text = L "Alle" "All"
-$allButton.Location = New-Object System.Drawing.Point(384, 218)
-$allButton.Size = New-Object System.Drawing.Size(50, 27)
-$allButton.FlatStyle = 'Flat'
-$allButton.FlatAppearance.BorderSize = 1
-$allButton.FlatAppearance.BorderColor = $buttonBorderColor
-$allButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
-$allButton.BackColor = $surfaceColor
-$allButton.TabIndex = 6
-$form.Controls.Add($allButton)
+# Auswahlbefehle als kompaktes 2x2-Raster rechts neben der Liste.
+$folderCommandPanel = New-Object System.Windows.Forms.TableLayoutPanel
+$folderCommandPanel.AutoSize = $true
+$folderCommandPanel.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+$folderCommandPanel.BackColor = $surfaceColor
+$folderCommandPanel.ColumnCount = 2
+[void]$folderCommandPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$folderCommandPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$folderCommandPanel.RowCount = 2
+[void]$folderCommandPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$folderCommandPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$folderCommandPanel.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 0)
+$folderCommandPanel.Anchor = 'Top, Right'
+$folderCommandPanel.TabIndex = 1
+$folderSurface.Controls.Add($folderCommandPanel, 1, 1)
 
-$noneButton = New-Object System.Windows.Forms.Button
-$noneButton.Text = L "Keine" "None"
-$noneButton.Location = New-Object System.Drawing.Point(440, 218)
-$noneButton.Size = New-Object System.Drawing.Size(50, 27)
-$noneButton.FlatStyle = 'Flat'
-$noneButton.FlatAppearance.BorderSize = 1
-$noneButton.FlatAppearance.BorderColor = $buttonBorderColor
-$noneButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
-$noneButton.BackColor = $surfaceColor
-$noneButton.TabIndex = 7
-$form.Controls.Add($noneButton)
+$allButton = New-M24Button -Text (L "Alle" "All") -Width 88
+$allButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 8)
+$allButton.TabIndex = 0
+$folderCommandPanel.Controls.Add($allButton, 0, 0)
 
-$addFolderButton = New-Object System.Windows.Forms.Button
-$addFolderButton.Text = L "Hinzufügen" "Add folder"
-$addFolderButton.Location = New-Object System.Drawing.Point(384, 255)
-$addFolderButton.Size = New-Object System.Drawing.Size(106, 27)
-$addFolderButton.TextAlign = 'MiddleCenter'
-$addFolderButton.FlatStyle = 'Flat'
-$addFolderButton.FlatAppearance.BorderSize = 1
-$addFolderButton.FlatAppearance.BorderColor = $buttonBorderColor
-$addFolderButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
-$addFolderButton.BackColor = $surfaceColor
-$addFolderButton.TabIndex = 8
-$form.Controls.Add($addFolderButton)
+$noneButton = New-M24Button -Text (L "Keine" "None") -Width 88
+$noneButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
+$noneButton.TabIndex = 1
+$folderCommandPanel.Controls.Add($noneButton, 1, 0)
 
-$removeFolderButton = New-Object System.Windows.Forms.Button
-$removeFolderButton.Text = L "Entfernen" "Remove"
-$removeFolderButton.Location = New-Object System.Drawing.Point(384, 292)
-$removeFolderButton.Size = New-Object System.Drawing.Size(106, 27)
-$removeFolderButton.FlatStyle = 'Flat'
-$removeFolderButton.FlatAppearance.BorderSize = 1
-$removeFolderButton.FlatAppearance.BorderColor = $buttonBorderColor
-$removeFolderButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
-$removeFolderButton.BackColor = $surfaceColor
+$addFolderButton = New-M24Button -Text (L "Hinzufügen" "Add folder") -Width 88
+$addFolderButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
+$addFolderButton.TabIndex = 2
+$folderCommandPanel.Controls.Add($addFolderButton, 0, 1)
+
+$removeFolderButton = New-M24Button -Text (L "Entfernen" "Remove") -Width 88
+$removeFolderButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 0)
 $removeFolderButton.Enabled = $false
-$removeFolderButton.TabIndex = 9
-$form.Controls.Add($removeFolderButton)
+$removeFolderButton.TabIndex = 3
+$folderCommandPanel.Controls.Add($removeFolderButton, 1, 1)
 
-$historyButton = New-Object System.Windows.Forms.Button
-$historyButton.Text = L 'Verlauf' 'History'
-$historyButton.Location = New-Object System.Drawing.Point(384, 329)
-$historyButton.Size = New-Object System.Drawing.Size(106, 27)
-$historyButton.FlatStyle = 'Flat'
-$historyButton.FlatAppearance.BorderColor = $buttonBorderColor
-$historyButton.BackColor = $surfaceColor
+# Backupverwaltung: Befehle, die ein vorhandenes Backup betreffen, bilden
+# eine eigene beschriftete Zeile. "Backup loeschen" steht zuletzt und wird
+# durch die flexible Leerspalte raeumlich von den Routinebefehlen getrennt.
+$manageRow = New-Object System.Windows.Forms.TableLayoutPanel
+$manageRow.AutoSize = $true
+$manageRow.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+$manageRow.BackColor = $surfaceColor
+$manageRow.ColumnCount = 5
+[void]$manageRow.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$manageRow.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$manageRow.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$manageRow.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$manageRow.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$manageRow.RowCount = 1
+$manageRow.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
+$manageRow.Anchor = 'Top, Left, Right'
+$manageRow.TabIndex = 2
+$folderSurface.Controls.Add($manageRow, 0, 2)
+$folderSurface.SetColumnSpan($manageRow, 2)
+
+$manageLabel = New-Object System.Windows.Forms.Label
+$manageLabel.Text = L 'Backupverwaltung:' 'Backup management:'
+$manageLabel.AutoSize = $true
+$manageLabel.Font = $captionFont
+$manageLabel.BackColor = $surfaceColor
+$manageLabel.Margin = New-Object System.Windows.Forms.Padding(4, 9, 12, 0)
+$manageLabel.Anchor = 'Left'
+$manageRow.Controls.Add($manageLabel, 0, 0)
+
+$historyButton = New-M24Button -Text (L 'Verlauf' 'History') -Width 110
+$historyButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
 $historyButton.Enabled = $false
-$historyButton.TabIndex = 10
-$form.Controls.Add($historyButton)
+$historyButton.TabIndex = 0
+$manageRow.Controls.Add($historyButton, 1, 0)
 
-$verifyButton = New-Object System.Windows.Forms.Button
-$verifyButton.Text = L 'Backup prüfen' 'Verify backup'
-$verifyButton.Location = New-Object System.Drawing.Point(384, 366)
-$verifyButton.Size = New-Object System.Drawing.Size(106, 27)
-$verifyButton.FlatStyle = 'Flat'
-$verifyButton.FlatAppearance.BorderColor = $buttonBorderColor
-$verifyButton.BackColor = $surfaceColor
+$verifyButton = New-M24Button -Text (L 'Backup prüfen' 'Verify backup') -Width 130
+$verifyButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
 $verifyButton.Enabled = $false
-$verifyButton.TabIndex = 11
-$form.Controls.Add($verifyButton)
+$verifyButton.TabIndex = 1
+$manageRow.Controls.Add($verifyButton, 2, 0)
 
-$deleteBackupButton = New-Object System.Windows.Forms.Button
-$deleteBackupButton.Text = L 'Backup löschen' 'Delete backup'
-$deleteBackupButton.Location = New-Object System.Drawing.Point(503, 366)
-$deleteBackupButton.Size = New-Object System.Drawing.Size(187, 27)
-$deleteBackupButton.FlatStyle = 'Flat'
-$deleteBackupButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
-$deleteBackupButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(253, 239, 240)
-$deleteBackupButton.BackColor = $surfaceColor
-$deleteBackupButton.ForeColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
+$deleteBackupButton = New-M24Button -Text (L 'Backup löschen' 'Delete backup') -Width 150 -Kind 'Danger'
+$deleteBackupButton.Margin = New-Object System.Windows.Forms.Padding(24, 0, 0, 0)
 $deleteBackupButton.Enabled = $false
-$deleteBackupButton.TabIndex = 12
-$form.Controls.Add($deleteBackupButton)
+$deleteBackupButton.TabIndex = 2
+$manageRow.Controls.Add($deleteBackupButton, 4, 0)
 
-# Das Logo nutzt den freien Bereich rechts neben Ordnerliste und Buttons
-# in voller Hoehe von Beschriftung und Liste.
-# Es ist optional: Fehlt die Datei, bleibt die Flaeche einfach leer.
-$logoBox = New-Object System.Windows.Forms.PictureBox
-$logoBox.Location = New-Object System.Drawing.Point(503, 195)
-$logoBox.Size = New-Object System.Drawing.Size(187, 164)
-$logoBox.SizeMode = 'Zoom'
-$logoBox.BackColor = $surfaceColor
-$logoBox.Anchor = 'Top, Right'
-if (Test-Path -LiteralPath $logoFile -PathType Leaf) {
-    # Ueber einen Stream laden und in ein unabhaengiges Bitmap kopieren,
-    # damit die Datei nicht fuer die Prozesslaufzeit gesperrt bleibt.
-    try {
-        $logoStream = New-Object System.IO.FileStream($logoFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
-        try {
-            $logoSource = [System.Drawing.Image]::FromStream($logoStream)
-            try {
-                $logoBox.Image = New-Object System.Drawing.Bitmap($logoSource)
-            } finally { $logoSource.Dispose() }
-        } finally { $logoStream.Dispose() }
-    } catch {}
+<#
+Optionen (plan.md Arbeitspaket 5): Vorgangsbezogene Optionen und die
+dauerhafte Erinnerungs-Einstellung stehen in getrennten, beschrifteten
+Zeilen. Die Optionszeile bricht bei schmalen Fenstern oder grosser Schrift
+um, statt abgeschnitten zu werden. Der fruehere Name "Superschnell" heisst
+jetzt "Schnellmodus (ohne Vorprüfung)", damit die Sicherheitsfolge sichtbar
+ist und nicht allein im Tooltip steht.
+#>
+$optionsSurface = New-Object System.Windows.Forms.Panel
+$optionsSurface.BackColor = $surfaceColor
+$optionsSurface.Size = New-Object System.Drawing.Size(748, 84)
+$optionsSurface.Margin = New-Object System.Windows.Forms.Padding(16, 4, 16, 4)
+$optionsSurface.Anchor = 'Top, Left, Right'
+$optionsSurface.TabIndex = 3
+$layoutRoot.Controls.Add($optionsSurface, 0, 3)
+
+$optionsCaption = New-Object System.Windows.Forms.Label
+$optionsCaption.Text = L 'Optionen:' 'Options:'
+$optionsCaption.AutoSize = $true
+$optionsCaption.Font = $captionFont
+$optionsCaption.BackColor = $surfaceColor
+$optionsCaption.Location = New-Object System.Drawing.Point(16, 15)
+$optionsSurface.Controls.Add($optionsCaption)
+
+$operationOptionsFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+$operationOptionsFlow.AutoSize = $true
+$operationOptionsFlow.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+$operationOptionsFlow.WrapContents = $false
+$operationOptionsFlow.BackColor = $surfaceColor
+$operationOptionsFlow.Location = New-Object System.Drawing.Point(106, 6)
+$operationOptionsFlow.TabIndex = 0
+$optionsSurface.Controls.Add($operationOptionsFlow)
+
+function New-M24OptionCheckBox {
+    param([string]$Text, [int]$TabIndex)
+    # Padding vergroessert die klickbare Flaeche der gesamten Optionszeile
+    # ueber das reine Kaestchen hinaus (plan.md Arbeitspaket 4).
+    $checkBox = New-Object System.Windows.Forms.CheckBox
+    $checkBox.Text = $Text
+    $checkBox.AutoSize = $true
+    $checkBox.BackColor = $surfaceColor
+    $checkBox.Margin = New-Object System.Windows.Forms.Padding(0, 2, 16, 2)
+    $checkBox.Padding = New-Object System.Windows.Forms.Padding(2, 3, 2, 3)
+    $checkBox.TabIndex = $TabIndex
+    return $checkBox
 }
-$form.Controls.Add($logoBox)
 
-# Kurze Bezeichnungen halten alle fünf Optionen in einer Zeile; ausfuehrliche
-# Erklaerungen stehen bei den nicht selbsterklaerenden Modi im Tooltip.
-$optionsSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 418)) -Size (New-Object System.Drawing.Size(692, 34))
+$dryRunCheckBox = New-M24OptionCheckBox -Text (L "Simulation" "Dry run") -TabIndex 0
+$operationOptionsFlow.Controls.Add($dryRunCheckBox)
 
-$dryRunCheckBox = New-Object System.Windows.Forms.CheckBox
-$dryRunCheckBox.Text = L "Simulation" "Dry run"
-$dryRunCheckBox.AutoSize = $true
-$dryRunCheckBox.Location = New-Object System.Drawing.Point(30, 426)
-$dryRunCheckBox.BackColor = $surfaceColor
-$dryRunCheckBox.TabIndex = 12
-$form.Controls.Add($dryRunCheckBox)
-$ejectCheckBox = New-Object System.Windows.Forms.CheckBox
-$ejectCheckBox.Text = L "Nach Erfolg auswerfen" "Eject after success"
-$ejectCheckBox.AutoSize = $true
-$ejectCheckBox.Location = New-Object System.Drawing.Point(135, 426)
-$ejectCheckBox.BackColor = $surfaceColor
-$ejectCheckBox.TabIndex = 13
-$form.Controls.Add($ejectCheckBox)
+$ejectCheckBox = New-M24OptionCheckBox -Text (L "Nach Erfolg auswerfen" "Eject after success") -TabIndex 1
+$operationOptionsFlow.Controls.Add($ejectCheckBox)
 
-$checksumCheckBox = New-Object System.Windows.Forms.CheckBox
-$checksumCheckBox.Text = L "Prüfsummen" "Checksums"
-$checksumCheckBox.AutoSize = $true
-$checksumCheckBox.Location = New-Object System.Drawing.Point(320, 426)
-$checksumCheckBox.BackColor = $surfaceColor
+$checksumCheckBox = New-M24OptionCheckBox -Text (L "Prüfsummen" "Checksums") -TabIndex 2
 $checksumCheckBox.Checked = $true
-$checksumCheckBox.TabIndex = 14
-$checksumCheckBox.Anchor = "Top, Right"
-$form.Controls.Add($checksumCheckBox)
+$operationOptionsFlow.Controls.Add($checksumCheckBox)
 
-$superFastCheckBox = New-Object System.Windows.Forms.CheckBox
-$superFastCheckBox.Text = L "Superschnell" "Super fast"
-$superFastCheckBox.AutoSize = $true
-$superFastCheckBox.Location = New-Object System.Drawing.Point(435, 426)
-$superFastCheckBox.BackColor = $surfaceColor
-$superFastCheckBox.TabIndex = 15
-$form.Controls.Add($superFastCheckBox)
+$superFastCheckBox = New-M24OptionCheckBox -Text (L "Schnellmodus (ohne Vorprüfung)" "Fast mode (no preflight checks)") -TabIndex 3
+$operationOptionsFlow.Controls.Add($superFastCheckBox)
+
 $optionsToolTip = New-Object System.Windows.Forms.ToolTip
 $optionsToolTip.AutoPopDelay = 20000
-$optionsToolTip.SetToolTip($superFastCheckBox, (L `
+$superFastDetails = L `
     "Maximale Geschwindigkeit: keine Datei-Vorprüfung, keine Speicherplatz- und 4-GB-Dateiprüfung, keine Prüfsummenaktualisierung, keine BitLocker-Abfrage, keine Kopierwiederholungen. Fehler (z. B. volles Ziel) fallen ggf. erst beim Kopieren auf." `
-    "Maximum speed: no file preflight, no disk-space or 4 GB file check, no checksum update, no BitLocker query, no copy retries. Errors (e.g. a full destination) may only surface while copying."))
-$reminderCheckBox = New-Object System.Windows.Forms.CheckBox
-$reminderCheckBox.Text = L 'Erinnern' 'Reminder'
-$reminderCheckBox.AutoSize = $true
-$reminderCheckBox.Location = New-Object System.Drawing.Point(570, 426)
-$reminderCheckBox.BackColor = $surfaceColor
-$reminderCheckBox.TabIndex = 16
-$form.Controls.Add($reminderCheckBox)
-$optionsToolTip.SetToolTip($reminderCheckBox, (L `
-    'Beim Windows-Login wird nach 14 Tagen ohne erfolgreiches GUI-Backup erinnert. Es wird kein Hintergrunddienst installiert.' `
-    'At Windows login, a reminder appears after 14 days without a successful GUI backup. No background service is installed.'))
+    "Maximum speed: no file preflight, no disk-space or 4 GB file check, no checksum update, no BitLocker query, no copy retries. Errors (e.g. a full destination) may only surface while copying."
+$optionsToolTip.SetToolTip($superFastCheckBox, $superFastDetails)
+$superFastCheckBox.AccessibleDescription = $superFastDetails
 
-$activitySurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(14, 460)) -Size (New-Object System.Drawing.Size(692, 148))
+$settingCaption = New-Object System.Windows.Forms.Label
+$settingCaption.Text = L 'Einstellung:' 'Setting:'
+$settingCaption.AutoSize = $true
+$settingCaption.Font = $captionFont
+$settingCaption.BackColor = $surfaceColor
+$settingCaption.Location = New-Object System.Drawing.Point(16, 53)
+$optionsSurface.Controls.Add($settingCaption)
+
+# Dauerhafte Anwendungs-Einstellung, kein Vorgangs-Schalter: gilt ueber
+# Programmstarts hinweg und registriert bzw. entfernt den Login-Autostart.
+$reminderCheckBox = New-M24OptionCheckBox -Text (L 'Beim Windows-Login an fällige Sicherungen erinnern' 'Remind me at Windows sign-in when a backup is due') -TabIndex 1
+$reminderCheckBox.Location = New-Object System.Drawing.Point(108, 44)
+$optionsSurface.Controls.Add($reminderCheckBox)
+$reminderDetails = L `
+    'Beim Windows-Login wird nach 14 Tagen ohne erfolgreiches GUI-Backup erinnert. Es wird kein Hintergrunddienst installiert.' `
+    'At Windows login, a reminder appears after 14 days without a successful GUI backup. No background service is installed.'
+$optionsToolTip.SetToolTip($reminderCheckBox, $reminderDetails)
+$reminderCheckBox.AccessibleDescription = $reminderDetails
+
+$activitySurface = New-Object System.Windows.Forms.Panel
+$activitySurface.BackColor = $surfaceColor
+$activitySurface.Size = New-Object System.Drawing.Size(748, 158)
+$activitySurface.Margin = New-Object System.Windows.Forms.Padding(16, 4, 16, 4)
+$activitySurface.Anchor = 'Top, Left, Right'
+$activitySurface.TabIndex = 4
+$layoutRoot.Controls.Add($activitySurface, 0, 4)
 
 $statusCaption = New-Object System.Windows.Forms.Label
 $statusCaption.Text = "Status:"
 $statusCaption.AutoSize = $true
-$statusCaption.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$statusCaption.Location = New-Object System.Drawing.Point(30, 470)
+$statusCaption.Font = $captionFont
+$statusCaption.Location = New-Object System.Drawing.Point(16, 12)
 $statusCaption.BackColor = $surfaceColor
-$form.Controls.Add($statusCaption)
+$activitySurface.Controls.Add($statusCaption)
 
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = L "Bereit." "Ready."
 $statusLabel.AutoEllipsis = $true
-$statusLabel.Location = New-Object System.Drawing.Point(82, 470)
-$statusLabel.Size = New-Object System.Drawing.Size(480, 22)
+$statusLabel.Location = New-Object System.Drawing.Point(70, 12)
+$statusLabel.Size = New-Object System.Drawing.Size(540, 22)
 $statusLabel.BackColor = $surfaceColor
 $statusLabel.Anchor = "Top, Left, Right"
-$form.Controls.Add($statusLabel)
+$statusLabel.AccessibleName = L 'Status' 'Status'
+$activitySurface.Controls.Add($statusLabel)
 
 $durationCaption = New-Object System.Windows.Forms.Label
 $durationCaption.Text = L "Dauer:" "Elapsed:"
 $durationCaption.AutoSize = $true
-$durationCaption.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$durationCaption.Location = New-Object System.Drawing.Point(574, 470)
+$durationCaption.Font = $captionFont
+$durationCaption.Location = New-Object System.Drawing.Point(618, 12)
 $durationCaption.BackColor = $surfaceColor
 $durationCaption.Anchor = "Top, Right"
-$form.Controls.Add($durationCaption)
+$activitySurface.Controls.Add($durationCaption)
 
 $durationLabel = New-Object System.Windows.Forms.Label
 $durationLabel.Text = "--:--"
-$durationLabel.Location = New-Object System.Drawing.Point(632, 470)
+$durationLabel.Location = New-Object System.Drawing.Point(674, 12)
 $durationLabel.Size = New-Object System.Drawing.Size(58, 22)
 $durationLabel.TextAlign = 'TopRight'
 $durationLabel.BackColor = $surfaceColor
 $durationLabel.Anchor = "Top, Right"
-$form.Controls.Add($durationLabel)
+$durationLabel.AccessibleName = L 'Dauer' 'Elapsed time'
+$activitySurface.Controls.Add($durationLabel)
 
 $progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(30, 496)
-$progressBar.Size = New-Object System.Drawing.Size(660, 8)
+$progressBar.Location = New-Object System.Drawing.Point(16, 42)
+$progressBar.Size = New-Object System.Drawing.Size(716, 8)
 $progressBar.Anchor = "Top, Left, Right"
 $progressBar.Style = "Blocks"
 $progressBar.MarqueeAnimationSpeed = 0
-$form.Controls.Add($progressBar)
+$progressBar.AccessibleName = L 'Fortschritt' 'Progress'
+$activitySurface.Controls.Add($progressBar)
 
 $resultLabel = New-Object System.Windows.Forms.Label
 $resultLabel.Text = L "Ergebnisübersicht:" "Summary:"
 $resultLabel.AutoSize = $true
-$resultLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 9.5)
-$resultLabel.Location = New-Object System.Drawing.Point(30, 512)
+$resultLabel.Font = $captionFont
+$resultLabel.Location = New-Object System.Drawing.Point(16, 58)
 $resultLabel.BackColor = $surfaceColor
-$form.Controls.Add($resultLabel)
+$activitySurface.Controls.Add($resultLabel)
 
 $resultBox = New-Object System.Windows.Forms.TextBox
-$resultBox.Location = New-Object System.Drawing.Point(30, 532)
-$resultBox.Size = New-Object System.Drawing.Size(660, 64)
+$resultBox.Location = New-Object System.Drawing.Point(16, 80)
+$resultBox.Size = New-Object System.Drawing.Size(716, 64)
 $resultBox.Anchor = "Top, Left, Right"
 $resultBox.Multiline = $true
 $resultBox.ReadOnly = $true
 $resultBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
 $resultBox.BorderStyle = [System.Windows.Forms.BorderStyle]::None
 $resultBox.BackColor = $surfaceColor
-$resultBox.TabStop = $false
+# Bewusst fokussierbar: Tastatur- und Screenreader-Nutzer erreichen die
+# Ergebnisuebersicht damit direkt (plan.md Arbeitspaket 6).
+$resultBox.TabStop = $true
+$resultBox.TabIndex = 0
+$resultBox.AccessibleName = L 'Ergebnisübersicht' 'Summary'
 $script:resultSummary = L "Noch keine Sicherung ausgeführt." "No backup has been run yet."
 $resultBox.Text = $script:resultSummary
-$form.Controls.Add($resultBox)
+$activitySurface.Controls.Add($resultBox)
 
 $resultContextMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $copyResultMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem
@@ -1382,84 +1605,49 @@ $copyResultMenuItem.Add_Click({
 [void]$resultContextMenu.Items.Add($copyResultMenuItem)
 $resultBox.ContextMenuStrip = $resultContextMenu
 
-$footerSurface = New-SurfacePanel -Location (New-Object System.Drawing.Point(0, 616)) -Size (New-Object System.Drawing.Size(720, 82)) -Anchor 'Top, Left, Right'
+$footerSurface = New-Object System.Windows.Forms.Panel
+$footerSurface.BackColor = $surfaceColor
+$footerSurface.Size = New-Object System.Drawing.Size(780, 72)
+$footerSurface.Margin = New-Object System.Windows.Forms.Padding(0, 8, 0, 0)
+$footerSurface.Anchor = 'Top, Left, Right'
+$footerSurface.TabIndex = 5
+$layoutRoot.Controls.Add($footerSurface, 0, 5)
 
-$startButton = New-Object System.Windows.Forms.Button
-$startButton.Text = L "Sicherung starten" "Start backup"
-$startButton.Location = New-Object System.Drawing.Point(30, 636)
-$startButton.Size = New-Object System.Drawing.Size(175, 40)
-$startButton.BackColor = $accentColor
-$startButton.ForeColor = $accentTextColor
-$startButton.FlatStyle = "Flat"
-$startButton.FlatAppearance.BorderSize = 0
-$startButton.FlatAppearance.MouseOverBackColor = $accentHoverColor
-$startButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
+$startButton = New-M24Button -Text (L "Sicherung starten" "Start backup") -Width 200 -Height 40 -Kind 'Primary' -Font $footerButtonFont
+$startButton.Location = New-Object System.Drawing.Point(24, 16)
 $startButton.Anchor = "Top, Left"
-$startButton.TabIndex = 17
-$form.Controls.Add($startButton)
+$startButton.TabIndex = 0
+$footerSurface.Controls.Add($startButton)
 $form.AcceptButton = $startButton
 
-$logButton = New-Object System.Windows.Forms.Button
-$logButton.Text = L "Protokoll öffnen" "Open log"
-$logButton.Location = New-Object System.Drawing.Point(213, 636)
-$logButton.Size = New-Object System.Drawing.Size(145, 40)
-$logButton.BackColor = [System.Drawing.Color]::White
-$logButton.FlatStyle = "Flat"
-$logButton.FlatAppearance.BorderSize = 1
-$logButton.FlatAppearance.BorderColor = $buttonBorderColor
-$logButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
-$logButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
+$logButton = New-M24Button -Text (L "Protokoll öffnen" "Open log") -Width 150 -Height 40 -Font $footerButtonFont
+$logButton.Location = New-Object System.Drawing.Point(232, 16)
 $logButton.Enabled = $false
 $logButton.Anchor = "Top, Left"
-$logButton.TabIndex = 18
-$form.Controls.Add($logButton)
+$logButton.TabIndex = 1
+$footerSurface.Controls.Add($logButton)
 
-$closeButton = New-Object System.Windows.Forms.Button
-$destinationButton = New-Object System.Windows.Forms.Button
-$destinationButton.Text = L "Sicherungsordner öffnen" "Open backup folder"
-$destinationButton.Location = New-Object System.Drawing.Point(366, 636)
-$destinationButton.Size = New-Object System.Drawing.Size(181, 40)
-$destinationButton.BackColor = [System.Drawing.Color]::White
-$destinationButton.FlatStyle = "Flat"
-$destinationButton.FlatAppearance.BorderSize = 1
-$destinationButton.FlatAppearance.BorderColor = $buttonBorderColor
-$destinationButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
-$destinationButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
+$destinationButton = New-M24Button -Text (L "Sicherungsordner öffnen" "Open backup folder") -Width 190 -Height 40 -Font $footerButtonFont
+$destinationButton.Location = New-Object System.Drawing.Point(390, 16)
 $destinationButton.Enabled = $false
 $destinationButton.Anchor = "Top, Left"
-$destinationButton.TabIndex = 19
-$form.Controls.Add($destinationButton)
+$destinationButton.TabIndex = 2
+$footerSurface.Controls.Add($destinationButton)
 
-$closeButton.Text = L "Schließen" "Close"
-$closeButton.Location = New-Object System.Drawing.Point(555, 636)
-$closeButton.Size = New-Object System.Drawing.Size(135, 40)
-$closeButton.BackColor = [System.Drawing.Color]::White
-$closeButton.FlatStyle = "Flat"
-$closeButton.FlatAppearance.BorderSize = 1
-$closeButton.FlatAppearance.BorderColor = $buttonBorderColor
-$closeButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(242, 244, 247)
-$closeButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
-$closeButton.TabIndex = 20
+$closeButton = New-M24Button -Text (L "Schließen" "Close") -Width 135 -Height 40 -Font $footerButtonFont
+$closeButton.Location = New-Object System.Drawing.Point(621, 16)
 $closeButton.Anchor = "Top, Right"
-$form.Controls.Add($closeButton)
+$closeButton.TabIndex = 3
+$footerSurface.Controls.Add($closeButton)
 
-$cancelButton = New-Object System.Windows.Forms.Button
-$cancelButton.Text = L "Sicherung abbrechen" "Cancel backup"
-$cancelButton.Location = New-Object System.Drawing.Point(30, 636)
-$cancelButton.Size = New-Object System.Drawing.Size(175, 40)
-$cancelButton.BackColor = [System.Drawing.Color]::White
-$cancelButton.ForeColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
-$cancelButton.FlatStyle = "Flat"
-$cancelButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
-$cancelButton.FlatAppearance.BorderSize = 1
-$cancelButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(253, 239, 240)
-$cancelButton.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
+$cancelButton = New-M24Button -Text (L "Sicherung abbrechen" "Cancel backup") -Width 200 -Height 40 -Kind 'Danger' -Font $footerButtonFont
 # Der Abbrechen-Button ersetzt den Start-Button an derselben Position und
 # muss deshalb auch gleich verankert sein.
+$cancelButton.Location = New-Object System.Drawing.Point(24, 16)
 $cancelButton.Anchor = "Top, Left"
-$cancelButton.TabIndex = 17
+$cancelButton.TabIndex = 0
 $cancelButton.Visible = $false
-$form.Controls.Add($cancelButton)
+$footerSurface.Controls.Add($cancelButton)
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 500
@@ -2252,7 +2440,7 @@ $startButton.Add_Click({
     $verifyButton.Enabled = $false
     $deleteBackupButton.Enabled = $false
     $resultBox.Text = if ($script:activeSuperFast) {
-        L "Superschnelle Sicherung ohne Vorprüfung wird gestartet ..." "Starting super fast backup without preflight checks ..."
+        L "Sicherung im Schnellmodus ohne Vorprüfung wird gestartet ..." "Starting fast-mode backup without preflight checks ..."
     } else {
         L "Vorprüfung wird gestartet ..." "Starting preflight checks ..."
     }
@@ -2262,7 +2450,7 @@ $startButton.Add_Click({
     } elseif ($script:activeDryRun) {
         L "Simulation wird gestartet ..." "Starting simulation ..."
     } elseif ($script:activeSuperFast) {
-        L "Superschnelle Sicherung wird gestartet ..." "Starting super fast backup ..."
+        L "Sicherung im Schnellmodus wird gestartet ..." "Starting fast-mode backup ..."
     } else {
         L "Sicherung wird gestartet ..." "Starting backup ..."
     }
@@ -2369,7 +2557,7 @@ $startButton.Add_Click({
         $startButton.Visible = $true
         $cancelButton.Visible = $false
         $form.AcceptButton = $startButton
-        $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
+        $statusLabel.ForeColor = $errorTextColor
         $statusLabel.Text = L "Start fehlgeschlagen." "Failed to start."
         if ($workerExitConfirmed) {
             foreach ($temporaryFile in @($script:statusFile, $script:resultFile, $script:cancelFile, $script:previewFile, $script:approvalFile, $script:selectedFoldersFile)) {
@@ -2592,7 +2780,7 @@ $timer.Add_Tick({
     if ($script:backupProcess) {
         $script:backupProcess.Refresh()
         if ($script:backupCancelled -and -not $script:backupProcess.HasExited) {
-            $statusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
+            $statusLabel.ForeColor = $warningTextColor
             $statusLabel.Text = L "Abbruch läuft – bitte warten ..." "Cancellation in progress - please wait ..."
             Set-CancellationPendingOverview
         }
@@ -2633,7 +2821,7 @@ $timer.Add_Tick({
             $resultCancellationReason = if ($result -and $result.PSObject.Properties['CancellationReason']) { [string]$result.CancellationReason } else { $null }
             $operationWasCancelled = $script:backupCancelled -or ($result -and $result.PSObject.Properties['Cancelled'] -and [bool]$result.Cancelled)
             if ($operationWasCancelled) {
-                $statusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
+                $statusLabel.ForeColor = $warningTextColor
                 $statusLabel.Text = L "Vorgang wurde abgebrochen." "Operation was cancelled."
                 $interruptedFolder = if ($result -and $result.PSObject.Properties['InterruptedFolder'] -and $result.InterruptedFolder) { Get-M24FolderDisplayName ([string]$result.InterruptedFolder) $script:isGerman } else { $null }
                 $partialWarning = if ($result -and $result.PSObject.Properties['PartialFilesMayRemain'] -and [bool]$result.PartialFilesMayRemain) {
@@ -2647,13 +2835,13 @@ $timer.Add_Tick({
                     (L "Vom Benutzer abgebrochen." "Cancelled by the user.") + $partialWarning
                 }
             } elseif ($exitCode -eq 0 -and -not $result) {
-                $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
+                $statusLabel.ForeColor = $errorTextColor
                 $statusLabel.Text = L "Worker ohne Ergebnis beendet." "Worker exited without a result."
                 $resultBox.Text = L "Der Hintergrundprozess wurde beendet, hat aber keine Ergebnisdatei geschrieben. Bitte prüfen Sie das Protokoll und starten Sie den Vorgang erneut." "The background process exited but did not write a result file. Review the log and run the operation again."
             } elseif ($exitCode -eq 0) {
                 $elapsed = (Get-Date) - $script:backupStartedAt
                 $duration = Format-ElapsedDuration $elapsed
-                $statusLabel.ForeColor = [System.Drawing.Color]::DarkGreen
+                $statusLabel.ForeColor = $successTextColor
                 $isRestore = $result -and $result.Mode -eq 'Restore'
                 $isDryRun = $result -and $result.DryRun
                 $statusLabel.Text = if ($isRestore) {
@@ -2721,7 +2909,7 @@ $timer.Add_Tick({
                     Request-DelayedAutoEject -Drive $script:activeDrive.DeviceID
                 }
             } else {
-                $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
+                $statusLabel.ForeColor = $errorTextColor
                 $partialCopy = $result -and $result.PSObject.Properties['PartialCopy'] -and [bool]$result.PartialCopy
                 $statusLabel.Text = if (-not $result) {
                     (L "Worker unerwartet beendet (Exit-Code {0})." "Worker exited unexpectedly (exit code {0}).") -f $exitCode
@@ -2838,7 +3026,9 @@ function Show-BackupDeletionTextConfirmation {
     $dialog = New-Object System.Windows.Forms.Form
     $dialog.Text = L 'Backup endgültig löschen' 'Permanently delete backup'
     $dialog.StartPosition = 'CenterParent'
-    $dialog.ClientSize = New-Object System.Drawing.Size(560, 190)
+    $dialog.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
+    $dialog.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
+    $dialog.ClientSize = New-Object System.Drawing.Size(560, 198)
     $dialog.FormBorderStyle = 'FixedDialog'
     $dialog.MaximizeBox = $false
     $dialog.MinimizeBox = $false
@@ -2856,23 +3046,26 @@ function Show-BackupDeletionTextConfirmation {
     $confirmationInput = New-Object System.Windows.Forms.TextBox
     $confirmationInput.Location = New-Object System.Drawing.Point(18, 101)
     $confirmationInput.Size = New-Object System.Drawing.Size(524, 27)
+    $confirmationInput.AccessibleName = L 'Backup-Name zur Bestätigung' 'Backup name confirmation'
     $dialog.Controls.Add($confirmationInput)
 
     $cancel = New-Object System.Windows.Forms.Button
     $cancel.Text = L 'Abbrechen' 'Cancel'
-    $cancel.Location = New-Object System.Drawing.Point(311, 143)
-    $cancel.Size = New-Object System.Drawing.Size(95, 31)
+    $cancel.Location = New-Object System.Drawing.Point(295, 146)
+    $cancel.Size = New-Object System.Drawing.Size(100, 36)
     $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $dialog.Controls.Add($cancel)
     $dialog.CancelButton = $cancel
 
+    # Der destruktive Befehl erhaelt bewusst nie den Standardfokus; erst der
+    # exakt eingegebene Backup-Name aktiviert ihn.
     $confirm = New-Object System.Windows.Forms.Button
     $confirm.Text = L 'Endgültig löschen' 'Delete permanently'
-    $confirm.Location = New-Object System.Drawing.Point(412, 143)
-    $confirm.Size = New-Object System.Drawing.Size(130, 31)
+    $confirm.Location = New-Object System.Drawing.Point(403, 146)
+    $confirm.Size = New-Object System.Drawing.Size(139, 36)
     $confirm.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $confirm.Enabled = $false
-    $confirm.ForeColor = [System.Drawing.Color]::FromArgb(164, 38, 44)
+    $confirm.ForeColor = $dangerTextColor
     $dialog.Controls.Add($confirm)
 
     $confirmationInput.Add_TextChanged({
@@ -2884,6 +3077,10 @@ function Show-BackupDeletionTextConfirmation {
     })
 
     try {
+        # Explizite DPI-Skalierung wie beim Hauptfenster (siehe Kommentar
+        # vor ShowDialog des Hauptfensters).
+        $dialog.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
+        $dialog.PerformAutoScale()
         $confirmationInput.Select()
         return $dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK -and $confirm.Enabled
     } finally {
@@ -3041,7 +3238,7 @@ $cancelButton.Add_Click({
     $script:preCancelStatusText = $statusLabel.Text
     $script:preCancelResultText = $resultBox.Text
     $cancelButton.Enabled = $false
-    $statusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
+    $statusLabel.ForeColor = $warningTextColor
     $statusLabel.Text = L "Abbruch angefordert - der aktuelle Ordner wird noch sicher beendet ..." "Cancellation requested - the current folder will finish safely ..."
     Set-CancellationPendingOverview
     try {
@@ -3100,19 +3297,30 @@ $form.Add_FormClosed({
 })
 
 # Beim Start liegt der Fokus auf "Sicherung starten", damit die Sicherung
-# direkt mit Enter beginnen kann.
+# direkt mit Enter beginnen kann. Mindest- und Startgroesse werden erst hier
+# festgelegt: Nach der automatischen DPI-Skalierung sind die Fenstermasse
+# physisch, sodass sie direkt gegen die Arbeitsflaeche des Monitors geprueft
+# werden koennen. Auf kleinen Bildschirmen schrumpft primaer der flexible
+# Ordnerbereich (Liste erhaelt dann einen Scrollbalken).
 $form.Add_Shown({
     $script:mainWindowShown = $true
+    $scaleFactor = $form.CurrentAutoScaleDimensions.Width / 96
+    if ($scaleFactor -le 0) { $scaleFactor = 1 }
+    $workingArea = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+    $form.MinimumSize = New-Object System.Drawing.Size(
+        [math]::Min([int](760 * $scaleFactor), $workingArea.Width),
+        [math]::Min([int](700 * $scaleFactor), $workingArea.Height))
+    if ($form.Width -gt $workingArea.Width -or $form.Height -gt $workingArea.Height) {
+        $form.Size = New-Object System.Drawing.Size(
+            [math]::Min($form.Width, $workingArea.Width),
+            [math]::Min($form.Height, $workingArea.Height))
+        $form.Location = New-Object System.Drawing.Point(
+            ($workingArea.Left + [int](($workingArea.Width - $form.Width) / 2)),
+            ($workingArea.Top + [int](($workingArea.Height - $form.Height) / 2)))
+    }
     $driveWatchTimer.Start()
     if ($startButton.Enabled) { $startButton.Select() }
 })
-
-# WinForms kann die Z-Reihenfolge von Panels bei der ersten echten Anzeige
-# anders behandeln als DrawToBitmap. Die dekorativen Flächen muessen deshalb
-# ausdruecklich hinter allen interaktiven Steuerelementen liegen.
-foreach ($surface in @($targetSurface, $folderSurface, $optionsSurface, $activitySurface, $footerSurface)) {
-    $surface.SendToBack()
-}
 
 # Verwaiste Kommunikationsdateien frueherer Sitzungen (aelter als sieben
 # Tage) still entfernen, bevor diese Instanz eigene Dateien anlegt. Frische
@@ -3167,17 +3375,18 @@ Update-DriveList -Force
 Update-BackupOptionState
 Update-SelectionState
 
-# Auf Bildschirmen mit wenig Arbeitshoehe startet das Fenster verkleinert;
-# der Inhalt ist dann ueber die Bildlaufleiste erreichbar.
-$workingArea = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
-if ($form.Height -gt $workingArea.Height) {
-    $form.Height = $workingArea.Height
-}
+# WinForms unter Windows PowerShell fuehrt die DPI-Autoskalierung nicht
+# implizit beim Handle-Aufbau aus (empirisch mit PowerShell 5.1 verifiziert:
+# ohne diesen Aufruf bleiben alle Masse 96-dpi-Pixel, waehrend Schriften
+# bereits DPI-skaliert rendern). Deshalb wird das fertig aufgebaute Layout
+# hier einmalig explizit auf die System-DPI skaliert.
+$form.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
+$form.PerformAutoScale()
 
 # Der Splash muss vor ShowDialog vollstaendig geschlossen sein. Andernfalls
 # kann WinForms das modale Hauptfenster implizit dem noch aktiven Splash als
 # Owner zuordnen; dessen Schliessen wuerde dann auch die Haupt-GUI schliessen.
-Complete-StartupSplash
+# Ein kuenstliches Verweilen im "Bereit."-Zustand gibt es bewusst nicht mehr.
 Close-StartupSplash
 [void]$form.ShowDialog()
 } catch {
@@ -3206,7 +3415,6 @@ Close-StartupSplash
     }
 } finally {
     Close-StartupSplash
-    if ($logoBox -and $logoBox.Image) { try { $logoBox.Image.Dispose() } catch {} }
     if ($notifyIcon) { try { $notifyIcon.Visible = $false; $notifyIcon.Dispose() } catch {} }
     foreach ($resource in @($appIcon, $healthToolTip, $driveToolTip, $optionsToolTip, $resultContextMenu, $timer, $driveWatchTimer, $ejectTimer, $notificationTimer, $verificationTimer, $deletionTimer)) {
         if ($resource) { try { $resource.Dispose() } catch {} }

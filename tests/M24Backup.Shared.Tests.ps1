@@ -1326,12 +1326,15 @@ Describe 'GUI worker launch and drive discovery contract' {
         $fontProbeIndex | Should -BeGreaterThan $silentBranch.Extent.EndOffset
     }
 
-    It 'completes the startup progress at 100 percent before closing the splash' {
-        $script:guiText | Should -Match 'Complete-StartupSplash\s+Close-StartupSplash\s+\[void\]\$form\.ShowDialog'
-        $script:guiText | Should -Match ([regex]::Escape('$script:splashProgress.Value = 100'))
-        $script:guiText | Should -Match ([regex]::Escape('$script:splashProgress.Value = 99'))
-        $script:guiText | Should -Match ([regex]::Escape('$script:splashProgress.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous'))
-        $script:guiText | Should -Match 'Start-Sleep -Milliseconds 300'
+    It 'shows the splash only for measurably slow starts and closes it before ShowDialog' {
+        # Der Splash entsteht verzoegert in Set-StartupSplashStatus, ist nie
+        # TopMost und wird ohne kuenstliche Wartezeit vor ShowDialog
+        # geschlossen (plan.md Arbeitspaket 7).
+        $script:guiText | Should -Match ([regex]::Escape('$script:startupStopwatch.ElapsedMilliseconds -lt $script:splashDelayMilliseconds'))
+        $script:guiText | Should -Match 'Close-StartupSplash\s+\[void\]\$form\.ShowDialog'
+        $script:guiText | Should -Not -Match 'Complete-StartupSplash'
+        $script:guiText | Should -Not -Match 'Start-Sleep -Milliseconds 300'
+        $script:guiText | Should -Not -Match '\$splash\w*\.TopMost\s*=\s*\$true'
     }
 
     It 'persists reminder settings and successful GUI backup time' {
@@ -1342,11 +1345,14 @@ Describe 'GUI worker launch and drive discovery contract' {
         $script:guiText | Should -Match 'GUI\.ReminderSelfHeal'
     }
 
-    It 'places the short reminder checkbox in the shared options row' {
-        $script:guiText | Should -Not -Match '\$reminderSurface = New-SurfacePanel'
-        $script:guiText | Should -Match '\$reminderCheckBox = New-Object System\.Windows\.Forms\.CheckBox'
-        $script:guiText | Should -Match ([regex]::Escape("`$reminderCheckBox.Text = L 'Erinnern' 'Reminder'"))
-        $script:guiText | Should -Match ([regex]::Escape('$reminderCheckBox.Location = New-Object System.Drawing.Point(570, 426)'))
+    It 'presents the reminder as a persistent setting separate from operation options' {
+        # Die Erinnerung ist eine dauerhafte Anwendungs-Einstellung und steht
+        # in einer eigenen beschrifteten Zeile unterhalb der Vorgangsoptionen
+        # (plan.md Arbeitspaket 5).
+        $script:guiText | Should -Match '\$reminderCheckBox = New-M24OptionCheckBox'
+        $script:guiText | Should -Match ([regex]::Escape("L 'Beim Windows-Login an fällige Sicherungen erinnern' 'Remind me at Windows sign-in when a backup is due'"))
+        $script:guiText | Should -Match ([regex]::Escape("L 'Einstellung:' 'Setting:'"))
+        $script:guiText | Should -Match ([regex]::Escape('$optionsSurface.Controls.Add($reminderCheckBox)'))
     }
 
     It 'enables reminders by default and migrates the original seven-day default to fourteen days' {
