@@ -1340,6 +1340,7 @@ Describe 'GUI worker launch and drive discovery contract' {
         $script:guiText | Should -Not -Match 'Complete-StartupSplash'
         $script:guiText | Should -Not -Match 'Start-Sleep -Milliseconds 300'
         $script:guiText | Should -Not -Match '\$splash\w*\.TopMost\s*=\s*\$true'
+        $script:guiText | Should -Match ([regex]::Escape('$splashLogoBox.Size = New-Object System.Drawing.Size(112, 112)'))
     }
 
     It 'persists reminder settings and successful GUI backup time' {
@@ -1361,12 +1362,20 @@ Describe 'GUI worker launch and drive discovery contract' {
     }
 
     It 'uses wrapping layouts for options and footer commands' {
-        $script:guiText | Should -Match ([regex]::Escape('$contentHost.AutoScroll = $true'))
-        $script:guiText | Should -Match ([regex]::Escape('$layoutRoot.MinimumSize = New-Object System.Drawing.Size(0, $contentHost.ClientSize.Height)'))
+        $script:guiText | Should -Match ([regex]::Escape('$contentHost.AutoScroll = $false'))
+        $script:guiText | Should -Match ([regex]::Escape('$layoutRoot.AutoSize = $false'))
+        $script:guiText | Should -Match 'function Update-ContentLayoutHeight'
+        $script:guiText | Should -Match ([regex]::Escape('$rowHeights = @($layoutRoot.GetRowHeights())'))
+        $script:guiText | Should -Match ([regex]::Escape('$minimumContentHeight = [int]($currentTotalHeight - $rowHeights[2] + $folderMinimumRowHeight)'))
+        $script:guiText | Should -Match ([regex]::Escape('$folderMinimumHeight = [int][math]::Round(156 * $scaleFactor)'))
+        $script:guiText | Should -Not -Match '\$headerPanel\.GetPreferredSize'
+        $script:guiText | Should -Not -Match '\$targetSurface\.GetPreferredSize'
+        $script:guiText | Should -Match ([regex]::Escape('$contentHost.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)'))
         $script:guiText | Should -Match ([regex]::Escape('$targetSurface = New-Object System.Windows.Forms.TableLayoutPanel'))
         $script:guiText | Should -Match ([regex]::Escape('$operationOptionsFlow.WrapContents = $true'))
         $script:guiText | Should -Match ([regex]::Escape('$optionsSurface.AutoSize = $false'))
-        $script:guiText | Should -Match ([regex]::Escape('$folderSurface.MinimumSize = New-Object System.Drawing.Size(0, 176)'))
+        $script:guiText | Should -Match ([regex]::Escape('$folderSurface.MinimumSize = New-Object System.Drawing.Size(0, 156)'))
+        $script:guiText | Should -Match ([regex]::Escape("`$deleteBackupButton = New-M24Button -Text (L 'Backup löschen' 'Delete backup') -Width 184"))
         $script:guiText | Should -Match 'function Update-OptionsSurfaceHeight'
         $script:guiText | Should -Match ([regex]::Escape('$optionsSurface.Add_Resize({ Update-OptionsSurfaceHeight })'))
         $script:guiText | Should -Match ([regex]::Escape('$footerSurface = New-Object System.Windows.Forms.FlowLayoutPanel'))
@@ -1375,6 +1384,8 @@ Describe 'GUI worker launch and drive discovery contract' {
         # Das Fill-gedockte Inhalts-Panel muss zuletzt gedockt werden, damit
         # der Footer den Inhalt nicht verdeckt.
         $script:guiText | Should -Match ([regex]::Escape('$contentHost.BringToFront()'))
+        $script:guiText | Should -Match 'function Update-ActivitySurfaceLayout'
+        $script:guiText | Should -Match ([regex]::Escape('$activitySurface.Add_Resize({ Update-ActivitySurfaceLayout })'))
         $script:guiText | Should -Not -Match ([regex]::Escape('$footerSurface.BringToFront()'))
         $script:guiText | Should -Not -Match ([regex]::Escape('$closeButton.Location = New-Object System.Drawing.Point(621, 16)'))
     }

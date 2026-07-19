@@ -107,6 +107,8 @@ $script:fatalGuiError = $false
 $script:startupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $script:splashDelayMilliseconds = 400
 $script:driveDiscoveryActive = $false
+$script:dpiLayoutReady = $false
+$script:contentLayoutUpdating = $false
 
 function New-StartupSplashForm {
     # Ein optionaler Splashscreen darf den eigentlichen Programmstart nie
@@ -116,15 +118,17 @@ function New-StartupSplashForm {
         $splash.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
         $splash.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
         $splash.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
-        $splash.ClientSize = New-Object System.Drawing.Size(380, 96)
+        $splash.ClientSize = New-Object System.Drawing.Size(430, 144)
         $splash.BackColor = [System.Drawing.Color]::White
         $splash.ShowInTaskbar = $false
         # Kein TopMost: Der Splash soll andere Anwendungen nicht verdecken.
         $splash.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
 
         $splashLogoBox = New-Object System.Windows.Forms.PictureBox
-        $splashLogoBox.Location = New-Object System.Drawing.Point(16, 20)
-        $splashLogoBox.Size = New-Object System.Drawing.Size(56, 56)
+        # Das Logo ist im Hauptfenster bewusst nicht mehr Teil des Workflows.
+        # Im selten sichtbaren Splash darf die Marke deshalb prominent sein.
+        $splashLogoBox.Location = New-Object System.Drawing.Point(16, 16)
+        $splashLogoBox.Size = New-Object System.Drawing.Size(112, 112)
         $splashLogoBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
         $splashLogoBox.BackColor = [System.Drawing.Color]::White
         if (Test-Path -LiteralPath $logoFile -PathType Leaf) {
@@ -140,8 +144,8 @@ function New-StartupSplashForm {
         $script:splashStatusLabel = New-Object System.Windows.Forms.Label
         $script:splashStatusLabel.Text = L 'Bibliothekssicherung wird gestartet ...' 'Library Backup is starting ...'
         $script:splashStatusLabel.AccessibleName = L 'Startstatus' 'Startup status'
-        $script:splashStatusLabel.Location = New-Object System.Drawing.Point(84, 24)
-        $script:splashStatusLabel.Size = New-Object System.Drawing.Size(280, 24)
+        $script:splashStatusLabel.Location = New-Object System.Drawing.Point(148, 42)
+        $script:splashStatusLabel.Size = New-Object System.Drawing.Size(266, 28)
         $script:splashStatusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
         $script:splashStatusLabel.AutoEllipsis = $true
         $script:splashStatusLabel.Font = New-Object System.Drawing.Font($semiboldFontName, 10)
@@ -149,8 +153,8 @@ function New-StartupSplashForm {
         $splash.Controls.Add($script:splashStatusLabel)
 
         $script:splashProgress = New-Object System.Windows.Forms.ProgressBar
-        $script:splashProgress.Location = New-Object System.Drawing.Point(84, 56)
-        $script:splashProgress.Size = New-Object System.Drawing.Size(280, 8)
+        $script:splashProgress.Location = New-Object System.Drawing.Point(148, 84)
+        $script:splashProgress.Size = New-Object System.Drawing.Size(266, 8)
         $script:splashProgress.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
         $script:splashProgress.MarqueeAnimationSpeed = 24
         $script:splashProgress.AccessibleName = L 'Startfortschritt' 'Startup progress'
@@ -1088,14 +1092,14 @@ dekorative Panels samt SendToBack-Reparatur entfallen.
 $layoutRoot = New-Object System.Windows.Forms.TableLayoutPanel
 $contentHost = New-Object System.Windows.Forms.Panel
 $contentHost.Dock = [System.Windows.Forms.DockStyle]::Fill
-$contentHost.AutoScroll = $true
+$contentHost.AutoScroll = $false
 $contentHost.BackColor = [System.Drawing.Color]::Transparent
 $contentHost.TabIndex = 0
 $form.Controls.Add($contentHost)
 
 $layoutRoot.Dock = [System.Windows.Forms.DockStyle]::Top
-$layoutRoot.AutoSize = $true
-$layoutRoot.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+$layoutRoot.AutoSize = $false
+$layoutRoot.Margin = New-Object System.Windows.Forms.Padding(0)
 $layoutRoot.BackColor = [System.Drawing.Color]::Transparent
 $layoutRoot.ColumnCount = 1
 [void]$layoutRoot.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
@@ -1106,14 +1110,6 @@ $layoutRoot.RowCount = 5
 [void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$layoutRoot.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 $contentHost.Controls.Add($layoutRoot)
-
-# Fill the available content height at normal DPI so the folder list receives
-# spare space. If the preferred height is larger (for example at 175% with
-# enlarged controls), the host supplies a vertical scrollbar instead of
-# allowing later rows to disappear.
-$contentHost.Add_SizeChanged({
-    $layoutRoot.MinimumSize = New-Object System.Drawing.Size(0, $contentHost.ClientSize.Height)
-})
 
 $headerPanel = New-Object System.Windows.Forms.TableLayoutPanel
 $headerPanel.AutoSize = $true
@@ -1353,14 +1349,14 @@ $folderSurface.RowCount = 3
 [void]$folderSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$folderSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
 [void]$folderSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
-$folderSurface.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 10)
+$folderSurface.Padding = New-Object System.Windows.Forms.Padding(12, 4, 12, 6)
 $folderSurface.Margin = New-Object System.Windows.Forms.Padding(16, 4, 16, 4)
 $folderSurface.Dock = [System.Windows.Forms.DockStyle]::Fill
 # Die flexible Listenzeile darf nie niedriger als das danebenliegende
-# 2x2-Raster der Auswahlbefehle werden. 176 Logikpixel fuer den gesamten
+# 2x2-Raster der Auswahlbefehle werden. 156 Logikpixel fuer den gesamten
 # Abschnitt lassen nach Ueberschrift, Innenabstaenden und Backupverwaltung
 # mindestens die benoetigten 72 Pixel fuer Alle/Keine/Hinzufuegen/Entfernen.
-$folderSurface.MinimumSize = New-Object System.Drawing.Size(0, 176)
+$folderSurface.MinimumSize = New-Object System.Drawing.Size(0, 156)
 $folderSurface.TabIndex = 2
 $layoutRoot.Controls.Add($folderSurface, 0, 2)
 
@@ -1369,7 +1365,7 @@ $libraryLabel.Text = L "Diese Ordner werden gesichert:" "These folders will be b
 $libraryLabel.AutoSize = $true
 $libraryLabel.Font = $captionFont
 $libraryLabel.BackColor = $surfaceColor
-$libraryLabel.Margin = New-Object System.Windows.Forms.Padding(4, 6, 4, 6)
+$libraryLabel.Margin = New-Object System.Windows.Forms.Padding(4, 2, 4, 2)
 $libraryLabel.Anchor = 'Top, Left'
 $folderSurface.Controls.Add($libraryLabel, 0, 0)
 $folderSurface.SetColumnSpan($libraryLabel, 2)
@@ -1442,7 +1438,7 @@ $manageRow.ColumnCount = 5
 [void]$manageRow.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
 [void]$manageRow.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
 $manageRow.RowCount = 1
-$manageRow.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
+$manageRow.Margin = New-Object System.Windows.Forms.Padding(0, 6, 0, 0)
 $manageRow.Anchor = 'Top, Left, Right'
 $manageRow.TabIndex = 2
 $folderSurface.Controls.Add($manageRow, 0, 2)
@@ -1469,7 +1465,9 @@ $verifyButton.Enabled = $false
 $verifyButton.TabIndex = 1
 $manageRow.Controls.Add($verifyButton, 2, 0)
 
-$deleteBackupButton = New-M24Button -Text (L 'Backup löschen' 'Delete backup') -Width 150 -Kind 'Danger'
+# Exakt so breit wie die beiden 88-Pixel-Spalten der Listenbefehle plus
+# deren 8-Pixel-Zwischenraum: Dadurch entsteht rechts eine klare Fluchtlinie.
+$deleteBackupButton = New-M24Button -Text (L 'Backup löschen' 'Delete backup') -Width 184 -Kind 'Danger'
 $deleteBackupButton.Margin = New-Object System.Windows.Forms.Padding(24, 0, 0, 0)
 $deleteBackupButton.Enabled = $false
 $deleteBackupButton.TabIndex = 2
@@ -1598,12 +1596,13 @@ function Update-OptionsSurfaceHeight {
     if ([int]$optionsSurface.RowStyles[1].Height -ne $settingRowHeight) { $optionsSurface.RowStyles[1].Height = $settingRowHeight }
     $surfaceHeight = $optionsRowHeight + $settingRowHeight + $optionsSurface.Padding.Vertical
     if ($optionsSurface.Height -ne $surfaceHeight) { $optionsSurface.Height = $surfaceHeight }
+    if (Test-Path Function:\Update-ContentLayoutHeight) { Update-ContentLayoutHeight }
 }
 $optionsSurface.Add_Resize({ Update-OptionsSurfaceHeight })
 
 $activitySurface = New-Object System.Windows.Forms.Panel
 $activitySurface.BackColor = $surfaceColor
-$activitySurface.Size = New-Object System.Drawing.Size(748, 158)
+$activitySurface.Size = New-Object System.Drawing.Size(748, 142)
 $activitySurface.Margin = New-Object System.Windows.Forms.Padding(16, 4, 16, 4)
 $activitySurface.Anchor = 'Top, Left, Right'
 $activitySurface.TabIndex = 4
@@ -1665,7 +1664,7 @@ $activitySurface.Controls.Add($resultLabel)
 
 $resultBox = New-Object System.Windows.Forms.TextBox
 $resultBox.Location = New-Object System.Drawing.Point(16, 80)
-$resultBox.Size = New-Object System.Drawing.Size(716, 64)
+$resultBox.Size = New-Object System.Drawing.Size(716, 48)
 $resultBox.Anchor = "Top, Left, Right"
 $resultBox.Multiline = $true
 $resultBox.ReadOnly = $true
@@ -1680,6 +1679,78 @@ $resultBox.AccessibleName = L 'Ergebnisübersicht' 'Summary'
 $script:resultSummary = L "Noch keine Sicherung ausgeführt." "No backup has been run yet."
 $resultBox.Text = $script:resultSummary
 $activitySurface.Controls.Add($resultBox)
+
+# Scrollen wird erst nach dem expliziten DPI-Durchlauf bewertet. Die benoetigte
+# Mindesthoehe stammt ausschliesslich aus den real gelayouteten Tabellenzeilen;
+# GetPreferredSize ist bei verschachtelten AutoSize-/Prozent-Layouts in
+# .NET-Framework-WinForms nicht stabil genug fuer diese Entscheidung.
+function Update-ContentLayoutHeight {
+    if (-not $script:dpiLayoutReady -or $script:contentLayoutUpdating -or
+        -not $contentHost -or -not $layoutRoot -or $contentHost.ClientSize.Height -le 0) { return }
+
+    $script:contentLayoutUpdating = $true
+    try {
+        $scaleFactor = $form.CurrentAutoScaleDimensions.Width / 96
+        if ($scaleFactor -le 0) { $scaleFactor = 1 }
+        # MinimumSize wird unter dem PowerShell/.NET-Framework-Host nicht
+        # verlaesslich von PerformAutoScale erfasst; deshalb explizit setzen.
+        $folderMinimumHeight = [int][math]::Round(156 * $scaleFactor)
+        $folderSurface.MinimumSize = New-Object System.Drawing.Size(0, $folderMinimumHeight)
+
+        # Erst den virtuellen Scrollzustand vollstaendig beseitigen, dann bei
+        # der echten Viewportgroesse layouten und reale Row-Heights abfragen.
+        $contentHost.AutoScroll = $false
+        $contentHost.AutoScrollMinSize = [System.Drawing.Size]::Empty
+        $contentHost.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)
+        $layoutRoot.Height = $contentHost.ClientSize.Height
+        $contentHost.PerformLayout()
+        $layoutRoot.PerformLayout()
+
+        $rowHeights = @($layoutRoot.GetRowHeights())
+        if ($rowHeights.Count -lt 5) { return }
+        $currentTotalHeight = ($rowHeights | Measure-Object -Sum).Sum
+        $folderMinimumRowHeight = $folderMinimumHeight + $folderSurface.Margin.Vertical
+        $minimumContentHeight = [int]($currentTotalHeight - $rowHeights[2] + $folderMinimumRowHeight)
+
+        if ($minimumContentHeight -le $contentHost.ClientSize.Height) {
+            # Passt-Fall: hart ohne Scrollen. Die Prozentzeile bekommt exakt
+            # den Rest, und ein frueheres DisplayRectangle kann nicht bleiben.
+            $layoutRoot.Height = $contentHost.ClientSize.Height
+            $contentHost.AutoScroll = $false
+        } else {
+            $layoutRoot.Height = $minimumContentHeight
+            $contentHost.AutoScrollMinSize = New-Object System.Drawing.Size(0, $minimumContentHeight)
+            $contentHost.AutoScroll = $true
+        }
+        $contentHost.PerformLayout()
+        $layoutRoot.PerformLayout()
+    } finally {
+        $script:contentLayoutUpdating = $false
+    }
+}
+$contentHost.Add_SizeChanged({ Update-ContentLayoutHeight })
+
+# Die rechten Kanten von Dauer, Fortschritt und Ergebnis folgen derselben
+# 12-Pixel-Innenkante wie Aktualisieren, Keine/Entfernen und Backup loeschen.
+# Eine explizite Nachberechnung ist hier verlaesslicher als Anchor, weil das
+# Panel erst nach dem Aufbau durch TableLayout und DPI-Skalierung verbreitert
+# wird und WinForms sonst die urspruengliche Designbreite beibehalten kann.
+function Update-ActivitySurfaceLayout {
+    $scaleFactor = $form.CurrentAutoScaleDimensions.Width / 96
+    if ($scaleFactor -le 0) { $scaleFactor = 1 }
+    $leftInset = [int](16 * $scaleFactor)
+    $rightInset = [int](12 * $scaleFactor)
+    $gap = [int](12 * $scaleFactor)
+    $rightEdge = $activitySurface.ClientSize.Width - $rightInset
+    if ($rightEdge -le $leftInset) { return }
+
+    $durationLabel.Left = $rightEdge - $durationLabel.Width
+    $durationCaption.Left = $durationLabel.Left - $gap - $durationCaption.Width
+    $statusLabel.Width = [math]::Max(40, $durationCaption.Left - $gap - $statusLabel.Left)
+    $progressBar.Width = [math]::Max(40, $rightEdge - $progressBar.Left)
+    $resultBox.Width = [math]::Max(40, $rightEdge - $resultBox.Left)
+}
+$activitySurface.Add_Resize({ Update-ActivitySurfaceLayout })
 
 $resultContextMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $copyResultMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem
@@ -3458,6 +3529,9 @@ $form.Add_Shown({
             ($workingArea.Left + [int](($workingArea.Width - $form.Width) / 2)),
             ($workingArea.Top + [int](($workingArea.Height - $form.Height) / 2)))
     }
+    Update-OptionsSurfaceHeight
+    Update-ActivitySurfaceLayout
+    Update-ContentLayoutHeight
     $driveWatchTimer.Start()
     if ($startButton.Enabled) { $startButton.Select() }
 })
@@ -3522,9 +3596,12 @@ Update-SelectionState
 # hier einmalig explizit auf die System-DPI skaliert.
 $form.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
 $form.PerformAutoScale()
+$script:dpiLayoutReady = $true
 # Nach der Skalierung einmal initial nachrechnen, damit die Absolute-Zeilen
 # des Optionsbereichs bereits vor der ersten Anzeige DPI-korrekt sind.
 Update-OptionsSurfaceHeight
+Update-ActivitySurfaceLayout
+Update-ContentLayoutHeight
 
 # Der Splash muss vor ShowDialog vollstaendig geschlossen sein. Andernfalls
 # kann WinForms das modale Hauptfenster implizit dem noch aktiven Splash als
