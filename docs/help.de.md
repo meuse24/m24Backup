@@ -64,6 +64,13 @@ bleiben während der Sitzung im Cache. Untergeordnete Junctions werden wie bei
 Robocopy `/XJ` ausgelassen, Verzeichnis-Symlinks verfolgt und unzugängliche
 Unterordner übersprungen; die Anzeige ist deshalb eine Näherung.
 
+Jeder Messauftrag endet mit einem Ergebnis oder dem Hinweis **nicht
+ermittelbar**. Ein unerwartet abgebrochener Auftrag wird einmal automatisch
+wiederholt und kann die Gesamtsumme nicht dauerhaft bei **Gesamtgröße wird
+ermittelt …** festhalten. Sind einzelne Werte nicht messbar, zeigt die
+Ergebnisübersicht eine gekennzeichnete unvollständige Summe. Technische Details
+stehen im lokalen GUI-Diagnoseprotokoll.
+
 Sicherungsordner und vorhandene technische Protokolle können direkt nach der
 Laufwerkswahl aus der App geöffnet werden. Die Ergebnisübersicht lässt sich
 über ihr Kontextmenü kopieren. Die Laufwerksliste aktualisiert sich automatisch;
@@ -165,6 +172,13 @@ sein; über die Kommandozeile lässt sich die Anzahl mit `-Threads` anpassen.
 Mit **Hinzufügen** können Sie Arbeitsordner außerhalb der
 Windows-Standardordner in die Sicherung aufnehmen. Die App verhindert
 überlappende Ordner und reservierte interne Namen.
+
+Vor dem Sicherungsstart vergleicht die App außerdem alle aktuell markierten
+Standard- und Zusatzordner. Identische Pfade oder ein Ordner innerhalb einer
+anderen ausgewählten Quelle werden abgelehnt, damit Dateien nicht doppelt
+gesichert werden. In der Konfliktmeldung muss einer der genannten Einträge
+abgewählt werden. Diese Quellenprüfung gilt nur für Sicherungen und blockiert
+keine Wiederherstellung.
 
 Zusatzordner werden im Sicherungsziel unter einem eindeutigen Namen abgelegt.
 Die Datei `_Ordner.json` speichert den Originalpfad, damit diese Ordner bei

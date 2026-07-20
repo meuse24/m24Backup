@@ -17,6 +17,8 @@ Windows systems and in English on all other systems.
   requiring administrator rights.
 - Backs up Desktop, Documents, Downloads, Pictures, Music, Videos, Favorites,
   Saved Games, and other detected user folders.
+- Prevents duplicate backups from identical or nested source folders selected
+  at the same time and identifies the conflicting entries.
 - Uses Robocopy and never deletes files from the backup destination.
 - Checks the destination, available disk space, and FAT32 limitations before
   starting.
@@ -29,7 +31,8 @@ Windows systems and in English on all other systems.
 - Can safely eject a successfully used USB backup drive after completion.
 - Shows progress and a clear result directly in the application window.
 - Shows file count and occupied space for every folder plus a total for the
-  selected folders; measurement runs in the background.
+  selected folders; measurement runs fault-tolerantly in the background.
+  Unavailable folders are identified without leaving other results pending.
 - Opens existing logs and backup folders immediately after drive selection and
   can copy the result summary.
 - Remembers folder selections, shows recent operations, and verifies complete

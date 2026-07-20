@@ -736,8 +736,7 @@ function Assert-SafeRestoreTargetPath {
         $env:ProgramData
     ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { Get-NormalizedFullPath $_ }
 
-    $pathRoot = [System.IO.Path]::GetPathRoot($normalized).TrimEnd('\')
-    if ($normalized.Equals($pathRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    if (Test-M24IsPathRoot $normalized) {
         throw ((M "Das Laufwerk '{0}' darf nicht als Wiederherstellungsziel verwendet werden." "Drive '{0}' cannot be used as a restore target.") -f $normalized)
     }
     $profileRoot = Get-NormalizedFullPath $env:USERPROFILE
@@ -892,6 +891,19 @@ if ($selectedFolderSpecs.Count -gt 0) {
 }
 if (-not $backupFolders) {
     throw (M "Es wurden keine passenden ausgewaehlten Ordner gefunden." "No matching selected folders were found.")
+}
+
+if ($Mode -eq 'Backup') {
+    $folderConflicts = @(Get-M24FolderPathConflicts -Folders $backupFolders)
+    if ($folderConflicts.Count -gt 0) {
+        $conflict = $folderConflicts[0]
+        $parentName = [string]$conflict.Parent.Name
+        $childName = [string]$conflict.Child.Name
+        if ($conflict.Relationship -eq 'Same') {
+            throw ((M "Die ausgewaehlten Sicherungsordner '{0}' und '{1}' verwenden denselben Quellpfad '{2}'. Bitte waehlen Sie einen Eintrag ab." "The selected backup folders '{0}' and '{1}' use the same source path '{2}'. Please clear one entry.") -f $parentName, $childName, $conflict.FirstPath)
+        }
+        throw ((M "Der ausgewaehlte Sicherungsordner '{0}' ({1}) liegt innerhalb von '{2}' ({3}) und wuerde doppelt gesichert. Bitte waehlen Sie einen Eintrag ab." "The selected backup folder '{0}' ({1}) is inside '{2}' ({3}) and would be backed up twice. Please clear one entry.") -f $childName, $conflict.Child.Path, $parentName, $conflict.Parent.Path)
+    }
 }
 
 # Verhindert, dass das Sicherungsziel innerhalb einer Quelle liegt und Robocopy

@@ -90,6 +90,120 @@ Describe 'Path overlap validation' {
     It 'does not confuse sibling path prefixes' {
         Test-IsSameOrNestedPath 'C:\Data' 'C:\Database' | Should -Be $false
     }
+
+    It 'reports the directed relationship for equal, nested, and separate paths' {
+        Get-M24PathRelationship 'C:\Data' 'c:\data' | Should -Be 'Same'
+        Get-M24PathRelationship 'C:\Data' 'C:\Data\Downloads' | Should -Be 'FirstContainsSecond'
+        Get-M24PathRelationship 'C:\Data\Downloads' 'C:\Data' | Should -Be 'SecondContainsFirst'
+        Get-M24PathRelationship 'C:\Data' 'C:\Database' | Should -Be 'None'
+    }
+
+    It 'handles drive roots without turning them into drive-relative paths' {
+        Get-NormalizedFullPath 'C:\' | Should -Be 'C:\'
+        Get-M24PathRelationship 'C:\' 'C:\Data' | Should -Be 'FirstContainsSecond'
+        Test-M24IsPathRoot 'C:\' | Should -Be $true
+        Test-M24IsPathRoot 'C:\Data' | Should -Be $false
+    }
+
+    It 'handles UNC share roots and descendants' {
+        Test-M24IsPathRoot '\\server\share\' | Should -Be $true
+        Test-M24IsPathRoot '\\server\share\folder' | Should -Be $false
+        Get-M24PathRelationship '\\server\share\' '\\server\share\folder' | Should -Be 'FirstContainsSecond'
+    }
+
+    It 'finds each conflict pair once and identifies parent and child folders' {
+        $folders = @(
+            [pscustomobject]@{ Name = 'Dokumente'; Path = 'E:\Users\test\Documents' },
+            [pscustomobject]@{ Name = 'Downloads'; Path = 'E:\Users\test\Documents\Downloads' },
+            [pscustomobject]@{ Name = 'Separat'; Path = 'E:\Data' }
+        )
+        $conflicts = @(Get-M24FolderPathConflicts -Folders $folders)
+        $conflicts.Count | Should -Be 1
+        $conflicts[0].Parent.Name | Should -Be 'Dokumente'
+        $conflicts[0].Child.Name | Should -Be 'Downloads'
+    }
+
+    It 'detects equal system-folder sources and ignores empty paths' {
+        $folders = @(
+            [pscustomobject]@{ Name = 'Dokumente'; Path = 'E:\Shared' },
+            [pscustomobject]@{ Name = 'Downloads'; Path = 'e:\shared\' },
+            [pscustomobject]@{ Name = 'Leer'; Path = '' }
+        )
+        $conflicts = @(Get-M24FolderPathConflicts -Folders $folders)
+        $conflicts.Count | Should -Be 1
+        $conflicts[0].Relationship | Should -Be 'Same'
+    }
+
+    It 'rejects an invalid non-empty folder path with folder context' {
+        $invalidPath = 'C:\Invalid' + [char]0 + 'Path'
+        $folders = @([pscustomobject]@{ Name = 'Defekt'; Path = $invalidPath })
+        { Get-M24FolderPathConflicts -Folders $folders } | Should -Throw "*Defekt*"
+    }
+
+    It 'returns all unique pairs for three nested folders' {
+        $folders = @(
+            [pscustomobject]@{ Name = 'A'; Path = 'C:\A' },
+            [pscustomobject]@{ Name = 'B'; Path = 'C:\A\B' },
+            [pscustomobject]@{ Name = 'C'; Path = 'C:\A\B\C' }
+        )
+        @(Get-M24FolderPathConflicts -Folders $folders).Count | Should -Be 3
+    }
+}
+
+Describe 'Folder-overlap integration contract' {
+    BeforeAll {
+        $repoRoot = Split-Path $PSScriptRoot -Parent
+        $guiPath = Join-Path $repoRoot 'Bibliothekssicherung-GUI.ps1'
+        $workerPath = Join-Path $repoRoot 'Bibliothekssicherung.ps1'
+        $tokens = $null; $errors = $null
+        $script:guiAst = [System.Management.Automation.Language.Parser]::ParseFile($guiPath, [ref]$tokens, [ref]$errors)
+        @($errors).Count | Should -Be 0
+        $tokens = $null; $errors = $null
+        $script:workerAst = [System.Management.Automation.Language.Parser]::ParseFile($workerPath, [ref]$tokens, [ref]$errors)
+        @($errors).Count | Should -Be 0
+        $script:guiSource = $script:guiAst.Extent.Text
+        $script:workerSource = $script:workerAst.Extent.Text
+        $script:guiOverlapCommand = $script:guiAst.Find({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Get-M24FolderPathConflicts' }, $true)
+        $script:workerOverlapCommand = $script:workerAst.Find({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Get-M24FolderPathConflicts' }, $true)
+    }
+
+    It 'guards the GUI overlap check with backup mode and checked items' {
+        $script:guiOverlapCommand | Should -Not -BeNullOrEmpty
+        $script:guiOverlapCommand.Extent.Text | Should -Match 'Get-CheckedFolderItems'
+        $ancestor = $script:guiOverlapCommand.Parent
+        while ($ancestor -and $ancestor -isnot [System.Management.Automation.Language.IfStatementAst]) { $ancestor = $ancestor.Parent }
+        $ancestor | Should -Not -BeNullOrEmpty
+        $ancestor.Clauses[0].Item1.Extent.Text | Should -Be '$backupRadio.Checked'
+    }
+
+    It 'returns from the GUI before drive warnings and worker setup on conflict' {
+        $conflictIndex = $script:guiSource.IndexOf('$folderConflicts = @(Get-M24FolderPathConflicts')
+        $conflictIndex | Should -BeGreaterThan -1
+        $driveIndex = $script:guiSource.IndexOf('$disk = $script:driveMap', $conflictIndex)
+        $tempFileIndex = $script:guiSource.IndexOf('$script:statusFile = Join-Path', $conflictIndex)
+        $conflictIndex | Should -BeLessThan $driveIndex
+        $conflictIndex | Should -BeLessThan $tempFileIndex
+    }
+
+    It 'guards the worker overlap check with backup mode after selection filtering' {
+        $filterAssignment = $script:workerAst.Find({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$backupFolders' -and $node.Right.Extent.Text -match '\$selectedNames -contains' }, $true)
+        $filterAssignment | Should -Not -BeNullOrEmpty
+        $script:workerOverlapCommand.Extent.StartOffset | Should -BeGreaterThan $filterAssignment.Extent.StartOffset
+        $ancestor = $script:workerOverlapCommand.Parent
+        while ($ancestor -and $ancestor -isnot [System.Management.Automation.Language.IfStatementAst]) { $ancestor = $ancestor.Parent }
+        $ancestor | Should -Not -BeNullOrEmpty
+        $ancestor.Clauses[0].Item1.Extent.Text | Should -Be "`$Mode -eq 'Backup'"
+    }
+
+    It 'does not run the worker source-overlap check in restore mode' {
+        @($script:workerAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Get-M24FolderPathConflicts' }, $true)).Count | Should -Be 1
+    }
+
+    It 'uses the normalized root guard for restore targets' {
+        $restoreGuard = $script:workerAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-SafeRestoreTargetPath' }, $true)
+        $restoreGuard | Should -Not -BeNullOrEmpty
+        $restoreGuard.Extent.Text | Should -Match 'Test-M24IsPathRoot \$normalized'
+    }
 }
 
 Describe 'Checksum manifest lifecycle' {
@@ -1341,6 +1455,33 @@ Describe 'GUI worker launch and drive discovery contract' {
         $script:guiText | Should -Not -Match 'Start-Sleep -Milliseconds 300'
         $script:guiText | Should -Not -Match '\$splash\w*\.TopMost\s*=\s*\$true'
         $script:guiText | Should -Match ([regex]::Escape('$splashLogoBox.Size = New-Object System.Drawing.Size(112, 112)'))
+    }
+
+    It 'refreshes the result overview after finalizing the folder-size scanner' {
+        $timerStart = $script:guiText.IndexOf('$folderSizeTimer.Add_Tick({')
+        $timerEnd = $script:guiText.IndexOf('$ejectTimer = New-Object', $timerStart)
+        $timerStart | Should -BeGreaterThan -1
+        $timerEnd | Should -BeGreaterThan $timerStart
+        $timerBody = $script:guiText.Substring($timerStart, $timerEnd - $timerStart)
+        $endInvokeIndex = $timerBody.IndexOf('EndInvoke(')
+        $overviewIndex = $timerBody.LastIndexOf('Update-ResultOverview')
+        $endInvokeIndex | Should -BeGreaterThan -1
+        $overviewIndex | Should -BeGreaterThan $endInvokeIndex
+        $timerBody | Should -Match '\$stalePendingKeys\s*='
+        $timerBody | Should -Match 'Request-FolderSizeScan -Items @\(\$libraryList\.Items\)'
+        $timerBody | Should -Match "Write-M24DiagnosticLog -EventId 'GUI\.FolderSizeScan'"
+        $timerBody | Should -Match "Write-M24DiagnosticLog -EventId 'GUI\.FolderSizeScanCompleted'"
+    }
+
+    It 'guarantees a terminal cache state for every dequeued folder-size entry' {
+        $scannerStart = $script:guiText.IndexOf('$scanScript = {')
+        $scannerEnd = $script:guiText.IndexOf('$script:folderSizePowerShell = [System.Management.Automation.PowerShell]::Create()', $scannerStart)
+        $scannerStart | Should -BeGreaterThan -1
+        $scannerEnd | Should -BeGreaterThan $scannerStart
+        $scannerBody = $script:guiText.Substring($scannerStart, $scannerEnd - $scannerStart)
+        $scannerBody | Should -Match "State = 'Complete'"
+        $scannerBody | Should -Match "State = 'Failed'"
+        $scannerBody | Should -Match 'finally\s*\{[\s\S]*\$cache\[\[string\]\$entry\.Key\]\s*=\s*\$result'
     }
 
     It 'persists reminder settings and successful GUI backup time' {

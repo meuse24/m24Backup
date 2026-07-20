@@ -6,6 +6,22 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ## [Unreleased]
 
+## [1.9.1] – 2026-07-20
+
+### Geändert
+
+- Vor dem Sichern werden alle angehakten System- und Zusatzordner auf identische
+  oder verschachtelte Quellpfade geprüft. Dadurch wird etwa ein nach
+  `Dokumente\Downloads` umgeleiteter Download-Ordner nicht zusätzlich zu
+  `Dokumente` doppelt gesichert. GUI und Worker brechen mit einer verständlichen
+  Konfliktmeldung ab; Wiederherstellungen bleiben davon unberührt.
+- Die Ergebnisübersicht übernimmt nach Abschluss der Ordnergrößenmessung
+  zuverlässig den finalen Gesamtwert und bleibt nicht mehr dauerhaft bei
+  „Gesamtgröße wird ermittelt …“ stehen. Jeder Messauftrag erhält garantiert
+  einen Abschlusszustand; verwaiste Cachemarker werden einmal wiederholt und
+  anschließend gegebenenfalls als „nicht ermittelbar“ ausgewiesen. Scanner-
+  und Cachezustände werden im lokalen GUI-Diagnoseprotokoll festgehalten.
+
 ## [1.9.0] – 2026-07-19
 
 ### Hinzugefügt

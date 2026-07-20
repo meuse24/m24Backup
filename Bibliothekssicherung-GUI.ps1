@@ -390,6 +390,7 @@ $script:suppressArtifactRetarget = $false
 # synchronisiert, weil GUI-Thread und Scanner gleichzeitig darauf zugreifen.
 $script:folderSizeCache = [hashtable]::Synchronized(@{})
 $script:folderSizeQueue = [System.Collections.Queue]::Synchronized((New-Object System.Collections.Queue))
+$script:folderSizeRetriedKeys = [hashtable]::Synchronized(@{})
 $script:folderSizePowerShell = $null
 $script:folderSizeAsyncResult = $null
 $settingsDirectory = Join-Path $env:LOCALAPPDATA 'M24Backup'
@@ -437,6 +438,7 @@ function Get-FolderSizeCaption {
     $entry = $script:folderSizeCache[(Get-FolderSizeKey $SizePath)]
     if ($null -eq $entry) { return '' }
     if ($entry -is [string]) { return L 'wird ermittelt …' 'calculating …' }
+    if ($entry.PSObject.Properties['State'] -and [string]$entry.State -eq 'Failed') { return L 'nicht ermittelbar' 'unavailable' }
     if ([int64]$entry.Files -eq 0) { return L 'leer' 'empty' }
     return '{0}, {1}' -f (Format-FolderFileCountText -Files ([int64]$entry.Files)), (Format-FolderSizeText -Bytes ([int64]$entry.Bytes))
 }
@@ -448,6 +450,7 @@ function Get-CheckedFolderSizeTotal {
     $files = [int64]0
     $bytes = [int64]0
     $pending = $false
+    $failed = $false
     $known = $false
     foreach ($item in $libraryList.CheckedItems) {
         if (-not $item -or -not $item.PSObject.Properties['SizePath']) { continue }
@@ -456,11 +459,12 @@ function Get-CheckedFolderSizeTotal {
         $entry = $script:folderSizeCache[(Get-FolderSizeKey $sizePath)]
         if ($null -eq $entry) { continue }
         if ($entry -is [string]) { $pending = $true; continue }
+        if ($entry.PSObject.Properties['State'] -and [string]$entry.State -eq 'Failed') { $failed = $true; continue }
         $files += [int64]$entry.Files
         $bytes += [int64]$entry.Bytes
         $known = $true
     }
-    return [pscustomobject]@{ Files = $files; Bytes = $bytes; Pending = $pending; Known = $known }
+    return [pscustomobject]@{ Files = $files; Bytes = $bytes; Pending = $pending; Failed = $failed; Known = $known }
 }
 
 function New-FolderListItem {
@@ -538,37 +542,50 @@ function Start-FolderSizeScanner {
             $entry = $null
             # Dequeue wirft bei leerer Warteschlange; das beendet den Scanner.
             try { $entry = $queue.Dequeue() } catch { break }
-            $files = [int64]0
-            $bytes = [int64]0
-            $stack = New-Object System.Collections.Generic.Stack[object]
-            # Der Stammordner wird immer vermessen, auch wenn er selbst eine
-            # Junction oder ein Symlink ist: Robocopy kopiert den Inhalt des
-            # gewaehlten Quellordners unabhaengig von dessen Link-Typ.
-            $stack.Push([pscustomobject]@{ Path = [string]$entry.Path; Depth = 0 })
-            while ($stack.Count -gt 0) {
-                $current = $stack.Pop()
-                # Tiefenbegrenzung als Schutz vor Symlink-Zyklen: Der Anzeige-
-                # Scan darf niemals endlos laufen; echte Ordnerbaeume bleiben
-                # weit unterhalb dieser Grenze.
-                if ([int]$current.Depth -ge 64) { continue }
-                # Get-ChildItem wie in der Vorpruefung des Workers: LinkType
-                # unterscheidet Junction und Symlink, Lesefehler einzelner
-                # Ordner brechen die Aufzaehlung nicht ab.
-                foreach ($child in @(Get-ChildItem -LiteralPath ([string]$current.Path) -Force -ErrorAction SilentlyContinue)) {
-                    if ($child.PSIsContainer) {
-                        # Wie Robocopy /XJ und die Vorpruefung: Junctions nicht
-                        # verfolgen (Schleifengefahr), Verzeichnis-Symlinks
-                        # dagegen schon - sie werden auch gesichert.
-                        if ([string]$child.LinkType -ne 'Junction') {
-                            $stack.Push([pscustomobject]@{ Path = $child.FullName; Depth = ([int]$current.Depth + 1) })
+            $result = $null
+            try {
+                $files = [int64]0
+                $bytes = [int64]0
+                $stack = New-Object System.Collections.Generic.Stack[object]
+                # Der Stammordner wird immer vermessen, auch wenn er selbst eine
+                # Junction oder ein Symlink ist: Robocopy kopiert den Inhalt des
+                # gewaehlten Quellordners unabhaengig von dessen Link-Typ.
+                $stack.Push([pscustomobject]@{ Path = [string]$entry.Path; Depth = 0 })
+                while ($stack.Count -gt 0) {
+                    $current = $stack.Pop()
+                    # Tiefenbegrenzung als Schutz vor Symlink-Zyklen: Der Anzeige-
+                    # Scan darf niemals endlos laufen; echte Ordnerbaeume bleiben
+                    # weit unterhalb dieser Grenze.
+                    if ([int]$current.Depth -ge 64) { continue }
+                    # Get-ChildItem wie in der Vorpruefung des Workers: LinkType
+                    # unterscheidet Junction und Symlink, Lesefehler einzelner
+                    # Ordner brechen die Aufzaehlung nicht ab.
+                    foreach ($child in @(Get-ChildItem -LiteralPath ([string]$current.Path) -Force -ErrorAction SilentlyContinue)) {
+                        if ($child.PSIsContainer) {
+                            # Wie Robocopy /XJ und die Vorpruefung: Junctions nicht
+                            # verfolgen (Schleifengefahr), Verzeichnis-Symlinks
+                            # dagegen schon - sie werden auch gesichert.
+                            if ([string]$child.LinkType -ne 'Junction') {
+                                $stack.Push([pscustomobject]@{ Path = $child.FullName; Depth = ([int]$current.Depth + 1) })
+                            }
+                        } else {
+                            $files++
+                            $bytes += [int64]$child.Length
                         }
-                    } else {
-                        $files++
-                        $bytes += [int64]$child.Length
                     }
                 }
+                $result = [pscustomobject]@{ State = 'Complete'; Files = $files; Bytes = $bytes; Error = '' }
+            } catch {
+                $result = [pscustomobject]@{ State = 'Failed'; Files = [int64]0; Bytes = [int64]0; Error = $_.Exception.Message }
+            } finally {
+                # Jeder dequeuete Marker erhaelt garantiert einen Endzustand.
+                # Dadurch kann ein einzelner problematischer Ordner den Cache
+                # nicht dauerhaft als 'pending' vergiften.
+                if ($null -eq $result) {
+                    $result = [pscustomobject]@{ State = 'Failed'; Files = [int64]0; Bytes = [int64]0; Error = 'Folder size scan ended without a result.' }
+                }
+                $cache[[string]$entry.Key] = $result
             }
-            $cache[[string]$entry.Key] = [pscustomobject]@{ Files = $files; Bytes = $bytes }
         }
     }
     $script:folderSizePowerShell = [System.Management.Automation.PowerShell]::Create()
@@ -614,7 +631,9 @@ function Get-ExistingCustomFolderMetadataForSelectedDrive {
 function Get-SafeCustomFolderName {
     param([string]$Path)
 
-    $baseName = Split-Path -LiteralPath $Path -Leaf
+    # Split-Path -LiteralPath kann unter Windows PowerShell 5.1 nicht mit
+    # -Leaf kombiniert werden (mehrdeutiger Parametersatz); .NET-API nutzen.
+    $baseName = [System.IO.Path]::GetFileName($Path.TrimEnd('\'))
     if ([string]::IsNullOrWhiteSpace($baseName)) { $baseName = ($Path -replace '[:\\\/]+', '').Trim() }
     foreach ($invalidChar in [System.IO.Path]::GetInvalidFileNameChars()) {
         $baseName = $baseName.Replace([string]$invalidChar, '_')
@@ -1979,19 +1998,60 @@ $folderSizeTimer = New-Object System.Windows.Forms.Timer
 $folderSizeTimer.Interval = 400
 $folderSizeTimer.Add_Tick({
     if ($form.IsDisposed -or -not $form.IsHandleCreated) { $folderSizeTimer.Stop(); return }
-    $libraryList.Invalidate()
-    Update-ResultOverview
     if ($script:folderSizeAsyncResult -and $script:folderSizeAsyncResult.IsCompleted) {
-        try { [void]$script:folderSizePowerShell.EndInvoke($script:folderSizeAsyncResult) } catch {}
+        try {
+            [void]$script:folderSizePowerShell.EndInvoke($script:folderSizeAsyncResult)
+        } catch {
+            Write-M24DiagnosticLog -EventId 'GUI.FolderSizeScan' -Message 'Folder-size scanner runspace failed during completion.' -Exception $_
+        }
+        foreach ($scanError in @($script:folderSizePowerShell.Streams.Error)) {
+            Write-M24DiagnosticLog -EventId 'GUI.FolderSizeScan' -Severity 'Warning' -Message 'Folder-size scanner reported an error.' -Exception $scanError
+        }
         try { $script:folderSizePowerShell.Dispose() } catch {}
         $script:folderSizePowerShell = $null
         $script:folderSizeAsyncResult = $null
-        if ($script:folderSizeQueue.Count -gt 0) {
-            Start-FolderSizeScanner
-        } else {
-            $folderSizeTimer.Stop()
-            $libraryList.Invalidate()
+
+        # Erfolgreiche Abschlusslaeufe ebenfalls mit dem konkreten Cachezustand
+        # dokumentieren. Das erlaubt die Unterscheidung zwischen einem realen
+        # Pending-Marker und einer lediglich veralteten Ergebniszeile, ohne den
+        # GUI-Runspace interaktiv debuggen zu muessen.
+        $folderSizeStates = @()
+        for ($itemIndex = 0; $itemIndex -lt $libraryList.Items.Count; $itemIndex++) {
+            $sizeItem = $libraryList.Items[$itemIndex]
+            $sizeKey = Get-FolderSizeKey ([string]$sizeItem.SizePath)
+            $sizeEntry = $script:folderSizeCache[$sizeKey]
+            $sizeState = if ($null -eq $sizeEntry) { 'Missing' } elseif ($sizeEntry -is [string]) { [string]$sizeEntry } elseif ($sizeEntry.PSObject.Properties['State']) { [string]$sizeEntry.State } else { 'CompleteLegacy' }
+            $folderSizeStates += ('{0}|Checked={1}|State={2}|Path={3}' -f $sizeItem.Name, $libraryList.GetItemChecked($itemIndex), $sizeState, $sizeItem.SizePath)
         }
+        Write-M24DiagnosticLog -EventId 'GUI.FolderSizeScanCompleted' -Severity 'Info' -Message 'Folder-size scanner completed.' -Context (('Queue={0}; Items={1}' -f $script:folderSizeQueue.Count, ($folderSizeStates -join '; ')))
+
+        # Nach einem unerwarteten Runspace-Abbruch koennen Marker uebrig sein,
+        # deren Queue-Eintrag bereits entnommen wurde. Verwaist ist ein
+        # String-Marker aber nur, wenn er nicht mehr in der Queue steht:
+        # Eintraege, die waehrend des Scanner-Endes regulaer eingereiht wurden,
+        # verarbeitet der Neustart unten unveraendert und ohne Retry-Verbrauch.
+        $queuedKeys = @{}
+        foreach ($queuedEntry in @($script:folderSizeQueue.ToArray())) { $queuedKeys[[string]$queuedEntry.Key] = $true }
+        $stalePendingKeys = @($script:folderSizeCache.Keys | Where-Object { $script:folderSizeCache[$_] -is [string] -and -not $queuedKeys.ContainsKey([string]$_) })
+        if ($stalePendingKeys.Count -gt 0) {
+            foreach ($staleKey in $stalePendingKeys) {
+                if ($script:folderSizeRetriedKeys.ContainsKey($staleKey)) {
+                    $script:folderSizeCache[$staleKey] = [pscustomobject]@{ State = 'Failed'; Files = [int64]0; Bytes = [int64]0; Error = 'Folder size scanner aborted repeatedly.' }
+                } else {
+                    $script:folderSizeRetriedKeys[$staleKey] = $true
+                    $script:folderSizeCache.Remove($staleKey)
+                }
+            }
+            # Entfernte Marker werden ueber den normalen Anforderungsweg neu
+            # eingereiht; noch wartende Queue-Eintraege bleiben unberuehrt.
+            Request-FolderSizeScan -Items @($libraryList.Items)
+        }
+        if ($script:folderSizeQueue.Count -gt 0) { Start-FolderSizeScanner }
+    }
+    $libraryList.Invalidate()
+    Update-ResultOverview
+    if (-not $script:folderSizeAsyncResult -and $script:folderSizeQueue.Count -eq 0) {
+        $folderSizeTimer.Stop()
     }
 })
 
@@ -2158,6 +2218,12 @@ function Update-ResultOverview {
         $total = Get-CheckedFolderSizeTotal
         if ($total.Pending) {
             $sizeSuffix = L ' (Gesamtgröße wird ermittelt …)' ' (calculating total size …)'
+        } elseif ($total.Failed) {
+            $sizeSuffix = if ($total.Known) {
+                (L ' (Gesamtgröße unvollständig: {0}, {1})' ' (partial total: {0}, {1})') -f (Format-FolderFileCountText -Files $total.Files), (Format-FolderSizeText -Bytes $total.Bytes)
+            } else {
+                L ' (Gesamtgröße nicht ermittelbar)' ' (total size unavailable)'
+            }
         } elseif ($total.Known) {
             $sizeSuffix = ' ({0}, {1})' -f (Format-FolderFileCountText -Files $total.Files), (Format-FolderSizeText -Bytes $total.Bytes)
         }
@@ -2780,6 +2846,37 @@ $startButton.Add_Click({
     if (-not (Test-Path -LiteralPath $coreScript)) {
         [System.Windows.Forms.MessageBox]::Show(((L "Das Sicherungsskript wurde nicht gefunden:`r`n{0}" "The backup script was not found:`r`n{0}") -f $coreScript), (L "Fehler" "Error"), "OK", "Error") | Out-Null
         return
+    }
+
+    if ($backupRadio.Checked) {
+        try {
+            $folderConflicts = @(Get-M24FolderPathConflicts -Folders @(Get-CheckedFolderItems))
+        } catch {
+            $invalidPathMessage = (L "Mindestens ein ausgewählter Ordnerpfad ist ungültig und kann nicht geprüft werden:`r`n`r`n{0}" "At least one selected folder path is invalid and cannot be checked:`r`n`r`n{0}") -f $_.Exception.Message
+            [System.Windows.Forms.MessageBox]::Show($invalidPathMessage, $form.Text, "OK", "Warning") | Out-Null
+            return
+        }
+        if ($folderConflicts.Count -gt 0) {
+            $conflictLines = @()
+            $shownConflictCount = [Math]::Min($folderConflicts.Count, 5)
+            for ($conflictIndex = 0; $conflictIndex -lt $shownConflictCount; $conflictIndex++) {
+                $conflict = $folderConflicts[$conflictIndex]
+                $parentName = if ($conflict.Parent.PSObject.Properties['DisplayName']) { [string]$conflict.Parent.DisplayName } else { [string]$conflict.Parent.Name }
+                $childName = if ($conflict.Child.PSObject.Properties['DisplayName']) { [string]$conflict.Child.DisplayName } else { [string]$conflict.Child.Name }
+                if ($conflict.Relationship -eq 'Same') {
+                    $conflictLines += (L ("• {0} und {1} verwenden denselben Pfad:`r`n  {2}" -f $parentName, $childName, $conflict.FirstPath) ("• {0} and {1} use the same path:`r`n  {2}" -f $parentName, $childName, $conflict.FirstPath))
+                } else {
+                    $conflictLines += (L ("• {0}:`r`n  {1}`r`n  liegt innerhalb von {2}:`r`n  {3}" -f $childName, $conflict.Child.Path, $parentName, $conflict.Parent.Path) ("• {0}:`r`n  {1}`r`n  is inside {2}:`r`n  {3}" -f $childName, $conflict.Child.Path, $parentName, $conflict.Parent.Path))
+                }
+            }
+            if ($folderConflicts.Count -gt $shownConflictCount) {
+                $conflictLines += (L ("… und {0} weitere Überschneidung(en)." -f ($folderConflicts.Count - $shownConflictCount)) ("… and {0} more overlap(s)." -f ($folderConflicts.Count - $shownConflictCount)))
+            }
+            $conflictMessage = (L "Einige ausgewählte Ordner werden bereits durch einen anderen ausgewählten Ordner erfasst:`r`n`r`n{0}`r`n`r`nBitte wählen Sie einen der jeweils überschneidenden Einträge ab." "Some selected folders are already covered by another selected folder:`r`n`r`n{0}`r`n`r`nPlease clear one of each pair of overlapping entries.") -f ($conflictLines -join "`r`n")
+            $libraryList.SelectedItem = $folderConflicts[0].Child
+            [System.Windows.Forms.MessageBox]::Show($conflictMessage, $form.Text, "OK", "Warning") | Out-Null
+            return
+        }
     }
 
     $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]

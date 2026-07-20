@@ -197,7 +197,9 @@ function Write-M24DiagnosticLog {
         # ErrorRecord (typisch: $_ im catch-Block) oder Exception. Nur aus
         # einem ErrorRecord laesst sich der PowerShell-Skript-Stack gewinnen.
         $Exception,
-        [ValidateSet('Info', 'Warning', 'Error')]
+        # Bewusst kein ValidateSet: Die Parameterbindung laeuft vor dem try
+        # und wuerde bei einem unbekannten Wert werfen. Unbekannte Werte
+        # werden stattdessen im Funktionskoerper auf 'Info' abgebildet.
         [string]$Severity = 'Error',
         [string]$Context,
         [string]$LogDirectory,
@@ -206,6 +208,7 @@ function Write-M24DiagnosticLog {
     )
 
     try {
+        if (@('Info', 'Warning', 'Error') -notcontains $Severity) { $Severity = 'Info' }
         # Der Standardpfad wird erst hier innerhalb des try aufgeloest. Ein
         # Default-Ausdruck im param-Block wuerde bei fehlendem Profilpfad
         # schon waehrend der Parameterbindung werfen und damit die
@@ -1010,16 +1013,84 @@ function Set-M24ChecksumVerifiedMetadata {
 
 function Get-NormalizedFullPath {
     param([string]$Path)
-    return [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetPathRoot($fullPath)
+    if ($root -and $fullPath.Equals($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $root
+    }
+    return $fullPath.TrimEnd('\')
+}
+
+function Test-M24IsPathRoot {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Path]::IsPathRooted($Path)) { return $false }
+    $normalized = Get-NormalizedFullPath $Path
+    $root = [System.IO.Path]::GetPathRoot($normalized)
+    if ([string]::IsNullOrWhiteSpace($root)) { return $false }
+    $normalizedRoot = Get-NormalizedFullPath $root
+    return $normalized.Equals($normalizedRoot, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-M24PathRelationship {
+    param([string]$FirstPath, [string]$SecondPath)
+
+    $first = Get-NormalizedFullPath $FirstPath
+    $second = Get-NormalizedFullPath $SecondPath
+    if ($first.Equals($second, [System.StringComparison]::OrdinalIgnoreCase)) { return 'Same' }
+
+    $firstPrefix = if ($first.EndsWith('\')) { $first } else { "$first\" }
+    $secondPrefix = if ($second.EndsWith('\')) { $second } else { "$second\" }
+    if ($second.StartsWith($firstPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { return 'FirstContainsSecond' }
+    if ($first.StartsWith($secondPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { return 'SecondContainsFirst' }
+    return 'None'
 }
 
 function Test-IsSameOrNestedPath {
     param([string]$FirstPath, [string]$SecondPath)
-    $first = Get-NormalizedFullPath $FirstPath
-    $second = Get-NormalizedFullPath $SecondPath
-    return $first.Equals($second, [System.StringComparison]::OrdinalIgnoreCase) -or
-        $first.StartsWith("$second\", [System.StringComparison]::OrdinalIgnoreCase) -or
-        $second.StartsWith("$first\", [System.StringComparison]::OrdinalIgnoreCase)
+    return (Get-M24PathRelationship -FirstPath $FirstPath -SecondPath $SecondPath) -ne 'None'
+}
+
+function Get-M24FolderPathConflicts {
+    param([object[]]$Folders)
+
+    $validFolders = @()
+    foreach ($folder in @($Folders)) {
+        if (-not $folder -or -not $folder.PSObject.Properties['Path'] -or [string]::IsNullOrWhiteSpace([string]$folder.Path)) { continue }
+        try {
+            [void](Get-NormalizedFullPath ([string]$folder.Path))
+        } catch {
+            $folderName = if ($folder.PSObject.Properties['Name'] -and $folder.Name) { [string]$folder.Name } else { '<unknown>' }
+            throw (New-Object System.ArgumentException(("Folder path for '{0}' is invalid: {1}" -f $folderName, $folder.Path), $_.Exception))
+        }
+        $validFolders += $folder
+    }
+    $conflicts = @()
+    for ($firstIndex = 0; $firstIndex -lt $validFolders.Count; $firstIndex++) {
+        for ($secondIndex = $firstIndex + 1; $secondIndex -lt $validFolders.Count; $secondIndex++) {
+            $firstFolder = $validFolders[$firstIndex]
+            $secondFolder = $validFolders[$secondIndex]
+            $relationship = Get-M24PathRelationship -FirstPath ([string]$firstFolder.Path) -SecondPath ([string]$secondFolder.Path)
+            if ($relationship -eq 'None') { continue }
+
+            $parent = $firstFolder
+            $child = $secondFolder
+            if ($relationship -eq 'SecondContainsFirst') {
+                $parent = $secondFolder
+                $child = $firstFolder
+            }
+            $conflicts += [pscustomobject]@{
+                Relationship = $relationship
+                First = $firstFolder
+                Second = $secondFolder
+                Parent = $parent
+                Child = $child
+                FirstPath = Get-NormalizedFullPath ([string]$firstFolder.Path)
+                SecondPath = Get-NormalizedFullPath ([string]$secondFolder.Path)
+            }
+        }
+    }
+    return @($conflicts)
 }
 
 function Get-M24BackupRoot {

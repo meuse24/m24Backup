@@ -18,6 +18,8 @@ auf Englisch.
   Dienst und ohne Administratorrechte.
 - Sichert Desktop, Dokumente, Downloads, Bilder, Musik, Videos, Favoriten,
   gespeicherte Spiele und weitere erkannte Benutzerordner.
+- Verhindert Doppelsicherungen durch identische oder ineinander liegende,
+  gleichzeitig ausgewählte Quellordner und nennt die betroffenen Einträge.
 - Nutzt Robocopy und löscht keine Dateien aus dem Sicherungsziel.
 - Prüft Ziel, freien Speicherplatz und FAT32-Einschränkungen vor dem Start.
 - Kann eine Sicherung per Dry-Run simulieren und die geplanten Änderungen im
@@ -31,7 +33,9 @@ auf Englisch.
   auswerfen.
 - Zeigt Fortschritt und ein verständliches Ergebnis direkt im Fenster an.
 - Zeigt für jeden Ordner Dateianzahl und Platzbedarf sowie für die markierte
-  Auswahl eine Gesamtsumme an; die Ermittlung läuft im Hintergrund.
+  Auswahl eine Gesamtsumme an; die Ermittlung läuft fehlertolerant im
+  Hintergrund. Nicht messbare Ordner werden kenntlich gemacht und blockieren
+  die übrigen Ergebnisse nicht dauerhaft.
 - Öffnet vorhandene Protokolle und Sicherungsordner direkt nach der
   Laufwerkswahl und kann die Ergebnisübersicht kopieren.
 - Merkt sich die Ordnerauswahl, zeigt einen Verlauf und prüft gesicherte Dateien

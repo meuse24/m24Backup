@@ -60,6 +60,12 @@ folder. Results remain cached for the session. Child junctions are skipped like
 Robocopy `/XJ`, directory symlinks are followed, and inaccessible subfolders
 are ignored, so the figures are estimates.
 
+Every measurement ends with a result or an **unavailable** marker. An
+unexpectedly interrupted job is retried once and cannot leave the total stuck
+at **calculating total size …** indefinitely. If individual values remain
+unavailable, the summary displays a clearly marked partial total. Technical
+details are written to the local GUI diagnostic log.
+
 The backup folder and existing technical logs can be opened directly after
 selecting a drive. The summary can be copied from its context menu. The drive
 list updates automatically; a drive with an existing backup for this profile is
@@ -151,6 +157,12 @@ the count can be adjusted with `-Threads` on the command line.
 
 Use **Add folder** to include work folders outside the Windows standard
 folders. The app rejects overlapping folders and reserved internal names.
+
+Before a backup starts, the app also compares all currently selected standard
+and custom source folders. Identical paths or a folder nested inside another
+selected folder are rejected to prevent duplicate backups. Clear either entry
+shown in the conflict message. This source-overlap check applies to backup only
+and does not block restore.
 
 Additional folders are stored under unique names in the backup destination.
 The `_Ordner.json` file records their original paths so they can be offered
