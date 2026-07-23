@@ -73,6 +73,12 @@ Describe 'Get-M24BackupRunPolicy' {
 }
 
 Describe 'Worker parameter invariants' {
+    It 'contains no obsolete profile-bound restore assertion functions' {
+        $workerText = Get-Content -LiteralPath $script:workerScript -Raw
+        $workerText | Should -Not -Match 'function Assert-BackupIdentity'
+        $workerText | Should -Not -Match 'function Assert-BackupCompletedSuccessfully'
+    }
+
     It 'declares the SuperFast switch parameter' {
         $command = Get-Command $script:workerScript
         $command.Parameters.ContainsKey('SuperFast') | Should -Be $true
@@ -84,6 +90,10 @@ Describe 'Worker parameter invariants' {
         $command.Parameters['ParentProcessStartTimeUtcTicks'].ParameterType | Should -Be ([int64])
         $command.Parameters['RestoreIntegrityPolicy'].ParameterType | Should -Be ([string])
         @($command.Parameters['RestoreIntegrityPolicy'].Attributes.ValidValues) | Should -Be @('Verify', 'RequireVerified', 'Warn')
+        $command.Parameters['BackupSource'].ParameterType | Should -Be ([string])
+        $command.Parameters['RestoreTargetMode'].ParameterType | Should -Be ([string])
+        @($command.Parameters['RestoreTargetMode'].Attributes.ValidValues) | Should -Be @('Profile', 'Folder')
+        $command.Parameters['RestoreTargetRoot'].ParameterType | Should -Be ([string])
     }
 
     It 'rejects -SuperFast for restore before resolving any drive' {
@@ -146,5 +156,19 @@ Describe 'Worker result contract' {
             $firstElement = $pipeline.PipelineElements[0]
             $firstElement.GetCommandName() | Should -Be 'New-BackupResultRecord' -Because "every result write must use the shared contract (line $($write.Extent.StartLineNumber))"
         }
+    }
+
+    It 'records restore source identity, target mode, and migration state' {
+        $workerText = Get-Content -LiteralPath $script:workerScript -Raw
+        foreach ($property in @('SourceComputer', 'SourceUser', 'SourcePath', 'RestoreTargetMode', 'RestoreTargetRoot', 'IsMigration')) {
+            $workerText | Should -Match ([regex]::Escape($property))
+        }
+    }
+
+    It 'preserves own custom targets and collects foreign custom folders safely' {
+        $workerText = Get-Content -LiteralPath $script:workerScript -Raw
+        $workerText | Should -Match '\-not \$restoreIsMigration[\s\S]+OriginalPath'
+        $workerText | Should -Match 'Wiederhergestellte Ordner'
+        $workerText | Should -Match '\$RestoreTargetMode -eq ''Folder'''
     }
 }

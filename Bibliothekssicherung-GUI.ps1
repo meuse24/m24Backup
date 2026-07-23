@@ -385,6 +385,10 @@ $script:folderCheckStates = @{}
 $script:backupSelectionSnapshot = $null
 $script:artifactCache = @{}
 $script:suppressArtifactRetarget = $false
+$script:backupInventory = @()
+$script:backupInventoryMap = @{}
+$script:selectedBackup = $null
+$script:restoreTargetFolder = $null
 # Ordnergroessen (Dateianzahl und Bytes) werden je Pfad einmal pro Sitzung in
 # einem Hintergrund-Runspace ermittelt. Cache und Warteschlange sind
 # synchronisiert, weil GUI-Thread und Scanner gleichzeitig darauf zugreifen.
@@ -793,9 +797,7 @@ function Test-BackupMetadataMatchesCurrentProfile {
 
 function Test-BackupMetadataHasSuccessfulResult {
     param([string[]]$Lines)
-
-    $resultLine = $Lines | Where-Object { $_ -like 'Ergebnis:*' } | Select-Object -Last 1
-    return $resultLine -and $resultLine -match '^Ergebnis:\s*Erfolgreich abgeschlossen\s+am\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.?$'
+    return [bool](Get-M24BackupResultInfo -Lines $Lines).IsComplete
 }
 
 function Test-DriveHasCurrentProfileBackup {
@@ -815,6 +817,108 @@ function Test-DriveHasCurrentProfileBackup {
     }
 }
 
+function Get-SelectedBackupInventoryItem {
+    if (-not $backupSourceCombo.SelectedItem) { return $null }
+    $key = [string]$backupSourceCombo.SelectedItem
+    if (-not $script:backupInventoryMap.ContainsKey($key)) { return $null }
+    return $script:backupInventoryMap[$key]
+}
+
+function Update-RestoreTargetState {
+    $isRestore = $restoreRadio.Checked
+    $selectedBackup = Get-SelectedBackupInventoryItem
+    $backupSourceLabel.Visible = $isRestore
+    $backupSourceCombo.Visible = $isRestore
+    $backupSourceInfoLabel.Visible = $isRestore
+    $restoreTargetPanel.Visible = $isRestore
+    if (-not $isRestore) { return }
+
+    $isIdle = -not $script:backupProcess -and -not $script:pendingEjectDrive -and
+        -not $script:verificationAsyncResult -and -not $script:deletionAsyncResult
+    $hasInventoryEntries = $backupSourceCombo.Items.Count -gt 0
+    $hasCopyableSelection = [bool]($selectedBackup -and $selectedBackup.CanCopyToFolder)
+    $backupSourceCombo.Enabled = $isIdle -and $hasInventoryEntries
+    $profileAllowed = $isIdle -and $hasCopyableSelection -and [bool]$selectedBackup.IsUsable
+    $folderAllowed = $isIdle -and $hasCopyableSelection
+    $backupSourceInfoLabel.Text = if (-not $selectedBackup) {
+        L 'Auf diesem Laufwerk wurde keine Sicherung gefunden.' 'No backup was found on this drive.'
+    } else {
+        $origin = if ($selectedBackup.MetadataReadable) { "{0}\{1}" -f $selectedBackup.Computer, $selectedBackup.User } else { L 'Herkunft unbekannt' 'Origin unknown' }
+        $state = if ($selectedBackup.IsComplete) {
+            L 'vollständig' 'complete'
+        } elseif ($selectedBackup.MetadataReadable) {
+            L 'unvollständig – nur Kopieren in einen anderen Ordner möglich' 'incomplete — only copying to another folder is available'
+        } else {
+            L 'Metadaten nicht lesbar – nur Kopieren in einen anderen Ordner möglich' 'metadata unreadable — only copying to another folder is available'
+        }
+        (L 'Herkunft: {0} · Zustand: {1}' 'Origin: {0} · Status: {1}') -f $origin, $state
+    }
+    $restoreProfileRadio.Enabled = $profileAllowed
+    $restoreFolderRadio.Enabled = $folderAllowed
+    if ($hasCopyableSelection -and -not $profileAllowed) { $restoreFolderRadio.Checked = $true }
+    $needsFolder = $hasCopyableSelection -and $restoreFolderRadio.Checked
+    $restoreFolderButton.Enabled = $folderAllowed
+    $restoreFolderButton.Visible = $needsFolder
+    $restoreFolderLabel.Visible = $needsFolder
+    $restoreFolderLabel.Text = if ($script:restoreTargetFolder) {
+        $script:restoreTargetFolder
+    } else {
+        L 'Noch kein Zielordner gewählt' 'No destination folder selected'
+    }
+}
+
+function Update-RestoreSourceList {
+    $previousRoot = if ($script:selectedBackup) { [string]$script:selectedBackup.RootPath } else { '' }
+    $script:backupInventory = @()
+    $script:backupInventoryMap = @{}
+    $script:selectedBackup = $null
+    $backupSourceCombo.Items.Clear()
+
+    if (-not $restoreRadio.Checked -or -not $driveCombo.SelectedItem) {
+        Update-RestoreTargetState
+        return
+    }
+
+    $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+    $script:backupInventory = @(Get-M24BackupInventory -Drive $disk.DeviceID)
+    $currentUsableIndex = -1
+    $singleUsableIndex = -1
+    $usableCount = 0
+    $previousIndex = -1
+    for ($inventoryIndex = 0; $inventoryIndex -lt $script:backupInventory.Count; $inventoryIndex++) {
+        $item = $script:backupInventory[$inventoryIndex]
+        $identityText = if ($item.MetadataReadable) { "{0}\{1}" -f $item.Computer, $item.User } else { L 'Identität unbekannt' 'Identity unknown' }
+        $dateText = if ($item.LastCompletedAt) { ([datetime]$item.LastCompletedAt).ToString('dd.MM.yyyy HH:mm') } else { L 'kein Abschlussdatum' 'no completion date' }
+        $stateText = if ($item.IsComplete) { L 'vollständig' 'complete' } elseif ($item.MetadataReadable) { L 'unvollständig' 'incomplete' } else { L 'Metadaten nicht lesbar' 'metadata unreadable' }
+        $display = "{0} — {1} — {2} — {3}" -f $item.DisplayName, $identityText, $dateText, $stateText
+        # DisplayName ist der direkte und damit innerhalb des Inventarstamms
+        # eindeutige Ordnername. Die Anzeige benoetigt keinen technischen Index.
+        $key = $display
+        $script:backupInventoryMap[$key] = $item
+        [void]$backupSourceCombo.Items.Add($key)
+        if ($item.IsUsable) {
+            $usableCount++
+            $singleUsableIndex = $inventoryIndex
+            if ($item.IsCurrentProfile) { $currentUsableIndex = $inventoryIndex }
+        }
+        if ($previousRoot -and [string]$item.RootPath -eq $previousRoot) { $previousIndex = $inventoryIndex }
+    }
+
+    $selectedIndex = if ($currentUsableIndex -ge 0) {
+        $currentUsableIndex
+    } elseif ($usableCount -eq 1) {
+        $singleUsableIndex
+    } elseif ($previousIndex -ge 0) {
+        $previousIndex
+    } elseif ($backupSourceCombo.Items.Count -gt 0) {
+        0
+    } else {
+        -1
+    }
+    if ($selectedIndex -ge 0) { $backupSourceCombo.SelectedIndex = $selectedIndex }
+    Update-RestoreTargetState
+}
+
 function Update-BackupArtifactActions {
     if (-not $driveCombo.SelectedItem) {
         $script:lastDestination = $null
@@ -830,11 +934,26 @@ function Update-BackupArtifactActions {
     }
 
     $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
-    $script:lastDestination = Get-BackupRoot -Drive $disk.DeviceID
+    $selectedBackup = if ($restoreRadio.Checked) { Get-SelectedBackupInventoryItem } else { $null }
+    $script:lastDestination = if ($restoreRadio.Checked) {
+        if ($selectedBackup) { [string]$selectedBackup.RootPath } else { $null }
+    } else {
+        Get-BackupRoot -Drive $disk.DeviceID
+    }
+    if (-not $script:lastDestination) {
+        $script:lastLogDir = $null
+        $script:lastLogFile = $null
+        $logButton.Enabled = $false
+        $destinationButton.Enabled = $false
+        $historyButton.Enabled = $false
+        $verifyButton.Enabled = $false
+        $deleteBackupButton.Enabled = $false
+        return
+    }
     $script:lastLogDir = Join-Path $script:lastDestination '_logs'
     $script:lastLogFile = $null
     $script:backupStartedAt = $null
-    $cacheKey = "{0}|{1}" -f $disk.DeviceID, (Get-NormalizedVolumeSerial -Disk $disk)
+    $cacheKey = "{0}|{1}|{2}" -f $disk.DeviceID, (Get-NormalizedVolumeSerial -Disk $disk), $script:lastDestination
     if (-not $script:artifactCache.ContainsKey($cacheKey)) {
         $destinationExists = Test-Path -LiteralPath $script:lastDestination -PathType Container
         $newestLog = if ($destinationExists) { Get-NewestLogFile } else { $null }
@@ -846,7 +965,8 @@ function Update-BackupArtifactActions {
     $logButton.Enabled = -not [string]::IsNullOrWhiteSpace([string]$artifactState.LogFile)
     $historyButton.Enabled = $logButton.Enabled
     $verifyButton.Enabled = $destinationButton.Enabled
-    $deleteBackupButton.Enabled = $destinationButton.Enabled
+    $deleteBackupButton.Enabled = $destinationButton.Enabled -and
+        (-not $restoreRadio.Checked -or ($selectedBackup -and $selectedBackup.IsCurrentProfile))
 }
 
 function Get-NormalizedVolumeSerial {
@@ -1009,9 +1129,12 @@ function Dismount-BackupDriveSafely {
 }
 
 function Get-BackupHealth {
-    param([string]$Drive)
+    param(
+        [string]$Drive,
+        [string]$BackupRoot
+    )
 
-    $backupDirectory = Get-BackupRoot -Drive $Drive
+    $backupDirectory = if ($BackupRoot) { $BackupRoot } else { Get-BackupRoot -Drive $Drive }
     $metadataFile = Join-Path $backupDirectory '_Sicherungsinfo.txt'
     if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) {
         return [pscustomobject]@{
@@ -1023,7 +1146,7 @@ function Get-BackupHealth {
 
     try {
         $lines = @(Get-Content -LiteralPath $metadataFile -ErrorAction Stop)
-        if (-not (Test-BackupMetadataMatchesCurrentProfile -Lines $lines)) {
+        if (-not $BackupRoot -and -not (Test-BackupMetadataMatchesCurrentProfile -Lines $lines)) {
             throw (L 'Die Sicherungsmetadaten gehören zu einem anderen Profil.' 'The backup metadata belongs to a different profile.')
         }
 
@@ -1370,9 +1493,10 @@ $targetSurface.ColumnCount = 3
 [void]$targetSurface.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$targetSurface.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
 [void]$targetSurface.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
-$targetSurface.RowCount = 2
-[void]$targetSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
-[void]$targetSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$targetSurface.RowCount = 5
+for ($targetRowIndex = 0; $targetRowIndex -lt 5; $targetRowIndex++) {
+    [void]$targetSurface.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+}
 $targetSurface.Padding = New-Object System.Windows.Forms.Padding(12, 10, 12, 8)
 $targetSurface.Margin = New-Object System.Windows.Forms.Padding(16, 4, 16, 4)
 $targetSurface.Dock = [System.Windows.Forms.DockStyle]::Top
@@ -1404,6 +1528,67 @@ $refreshButton.Anchor = 'Right'
 $refreshButton.TabIndex = 1
 $targetSurface.Controls.Add($refreshButton, 2, 0)
 
+$backupSourceLabel = New-Object System.Windows.Forms.Label
+$backupSourceLabel.Text = L 'Gefundene Sicherung:' 'Backup:'
+$backupSourceLabel.AutoSize = $true
+$backupSourceLabel.Font = $captionFont
+$backupSourceLabel.Margin = New-Object System.Windows.Forms.Padding(4, 8, 12, 0)
+$backupSourceLabel.Anchor = 'Left'
+$backupSourceLabel.Visible = $false
+$targetSurface.Controls.Add($backupSourceLabel, 0, 1)
+
+$backupSourceCombo = New-Object System.Windows.Forms.ComboBox
+$backupSourceCombo.DropDownStyle = 'DropDownList'
+$backupSourceCombo.Dock = [System.Windows.Forms.DockStyle]::Fill
+$backupSourceCombo.Margin = New-Object System.Windows.Forms.Padding(0, 4, 8, 4)
+$backupSourceCombo.AccessibleName = L 'Gefundene Sicherung' 'Backup'
+$backupSourceCombo.Visible = $false
+$targetSurface.Controls.Add($backupSourceCombo, 1, 1)
+$targetSurface.SetColumnSpan($backupSourceCombo, 2)
+
+$backupSourceInfoLabel = New-Object System.Windows.Forms.Label
+$backupSourceInfoLabel.AutoSize = $true
+$backupSourceInfoLabel.ForeColor = $secondaryTextColor
+$backupSourceInfoLabel.Margin = New-Object System.Windows.Forms.Padding(4, 0, 4, 4)
+$backupSourceInfoLabel.Visible = $false
+$targetSurface.Controls.Add($backupSourceInfoLabel, 0, 2)
+$targetSurface.SetColumnSpan($backupSourceInfoLabel, 3)
+
+$restoreTargetPanel = New-Object System.Windows.Forms.FlowLayoutPanel
+$restoreTargetPanel.AutoSize = $true
+$restoreTargetPanel.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+$restoreTargetPanel.WrapContents = $true
+$restoreTargetPanel.Margin = New-Object System.Windows.Forms.Padding(4, 0, 4, 4)
+$restoreTargetPanel.Visible = $false
+$targetSurface.Controls.Add($restoreTargetPanel, 0, 3)
+$targetSurface.SetColumnSpan($restoreTargetPanel, 3)
+
+$restoreProfileRadio = New-Object System.Windows.Forms.RadioButton
+$restoreProfileRadio.Text = L 'In mein Benutzerprofil' 'Restore to my user profile'
+$restoreProfileRadio.AutoSize = $true
+$restoreProfileRadio.Checked = $true
+$restoreProfileRadio.Margin = New-Object System.Windows.Forms.Padding(0, 6, 16, 0)
+$restoreTargetPanel.Controls.Add($restoreProfileRadio)
+
+$restoreFolderRadio = New-Object System.Windows.Forms.RadioButton
+$restoreFolderRadio.Text = L 'In einen anderen Ordner kopieren' 'Copy to another folder'
+$restoreFolderRadio.AutoSize = $true
+$restoreFolderRadio.Margin = New-Object System.Windows.Forms.Padding(0, 6, 8, 0)
+$restoreTargetPanel.Controls.Add($restoreFolderRadio)
+
+$restoreFolderButton = New-M24Button -Text (L 'Ordner wählen …' 'Choose folder…') -Width 126 -Height 30
+$restoreFolderButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
+$restoreFolderButton.Visible = $false
+$restoreTargetPanel.Controls.Add($restoreFolderButton)
+
+$restoreFolderLabel = New-Object System.Windows.Forms.Label
+$restoreFolderLabel.AutoSize = $true
+$restoreFolderLabel.AutoEllipsis = $true
+$restoreFolderLabel.ForeColor = $secondaryTextColor
+$restoreFolderLabel.Margin = New-Object System.Windows.Forms.Padding(0, 7, 0, 0)
+$restoreFolderLabel.Visible = $false
+$restoreTargetPanel.Controls.Add($restoreFolderLabel)
+
 $driveStatusPanel = New-Object System.Windows.Forms.Panel
 $driveStatusPanel.BackColor = $surfaceColor
 # Breite vor dem Hinzufuegen der verankerten Kinder setzen: Die Anker-Deltas
@@ -1411,7 +1596,7 @@ $driveStatusPanel.BackColor = $surfaceColor
 $driveStatusPanel.Size = New-Object System.Drawing.Size(716, 28)
 $driveStatusPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
 $driveStatusPanel.Margin = New-Object System.Windows.Forms.Padding(4, 0, 4, 0)
-$targetSurface.Controls.Add($driveStatusPanel, 0, 1)
+$targetSurface.Controls.Add($driveStatusPanel, 0, 4)
 $targetSurface.SetColumnSpan($driveStatusPanel, 3)
 
 $driveInfoLabel = New-Object System.Windows.Forms.Label
@@ -1467,7 +1652,16 @@ function Update-BackupHealth {
         $healthPanel.Visible = $false
         return
     }
-    $health = Get-BackupHealth -Drive $disk.DeviceID
+    $selectedBackup = if ($restoreRadio.Checked) { Get-SelectedBackupInventoryItem } else { $null }
+    $health = if ($restoreRadio.Checked -and -not $selectedBackup) {
+        [pscustomobject]@{
+            Level = 'Red'
+            Text = L 'Keine Sicherung auf diesem Laufwerk' 'No backup on this drive'
+            Details = L 'Für eine Wiederherstellung wurde auf diesem Laufwerk keine verwendbare Sicherung gefunden.' 'No usable backup was found on this drive for restore.'
+        }
+    } else {
+        Get-BackupHealth -Drive $disk.DeviceID -BackupRoot $(if ($selectedBackup) { [string]$selectedBackup.RootPath } else { $null })
+    }
     $healthDot.Tag = switch ($health.Level) {
         'Green' { [System.Drawing.Color]::FromArgb(16, 124, 16) }
         'Yellow' { [System.Drawing.Color]::FromArgb(202, 143, 0) }
@@ -2186,7 +2380,7 @@ $deletionTimer.Add_Tick({
 
 function Set-VerificationControlsEnabled {
     param([bool]$Enabled)
-    foreach ($control in @($startButton, $driveCombo, $refreshButton, $backupRadio, $restoreRadio, $libraryList, $allButton, $noneButton, $historyButton, $logButton, $destinationButton, $deleteBackupButton, $closeButton)) {
+    foreach ($control in @($startButton, $driveCombo, $backupSourceCombo, $restoreProfileRadio, $restoreFolderRadio, $restoreFolderButton, $refreshButton, $backupRadio, $restoreRadio, $libraryList, $allButton, $noneButton, $historyButton, $logButton, $destinationButton, $deleteBackupButton, $closeButton)) {
         $control.Enabled = $Enabled
     }
     if ($Enabled) {
@@ -2260,6 +2454,10 @@ function Request-DelayedAutoEject {
     $startButton.Enabled = $false
     $refreshButton.Enabled = $false
     $driveCombo.Enabled = $false
+    $backupSourceCombo.Enabled = $false
+    $restoreProfileRadio.Enabled = $false
+    $restoreFolderRadio.Enabled = $false
+    $restoreFolderButton.Enabled = $false
     $backupRadio.Enabled = $false
     $restoreRadio.Enabled = $false
     $libraryList.Enabled = $false
@@ -2320,6 +2518,9 @@ function Complete-DelayedAutoEject {
     }
     $refreshButton.Enabled = $true
     $driveCombo.Enabled = $true
+    $backupSourceCombo.Enabled = $true
+    $restoreFolderRadio.Enabled = $true
+    $restoreFolderButton.Enabled = $true
     $backupRadio.Enabled = $true
     $restoreRadio.Enabled = $true
     $libraryList.Enabled = $true
@@ -2331,7 +2532,11 @@ function Complete-DelayedAutoEject {
 
 function Update-SelectionState {
     $count = $libraryList.CheckedItems.Count
-    $startButton.Enabled = ($count -gt 0 -and $null -ne $driveCombo.SelectedItem -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult)
+    $restoreReady = -not $restoreRadio.Checked -or (
+        $null -ne (Get-SelectedBackupInventoryItem) -and
+        ($restoreProfileRadio.Checked -or ($restoreFolderRadio.Checked -and -not [string]::IsNullOrWhiteSpace($script:restoreTargetFolder)))
+    )
+    $startButton.Enabled = ($count -gt 0 -and $null -ne $driveCombo.SelectedItem -and $restoreReady -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult)
     $selectedItem = $libraryList.SelectedItem
     $removeFolderButton.Enabled = $backupRadio.Checked -and $selectedItem -and
         $selectedItem.PSObject.Properties['IsCustom'] -and $selectedItem.IsCustom -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
@@ -2396,6 +2601,7 @@ function Update-BackupOptionState {
     } finally {
         $script:optionStateUpdating = $false
     }
+    Update-RestoreTargetState
     Update-SelectionState
 }
 
@@ -2403,14 +2609,26 @@ function Update-LibraryList {
     $libraryList.Items.Clear()
     $items = @()
     if ($restoreRadio.Checked) {
-        if ($driveCombo.SelectedItem) {
-            $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
-            $backupRoot = Get-BackupRoot -Drive $disk.DeviceID
+        $selectedBackup = Get-SelectedBackupInventoryItem
+        if ($selectedBackup) {
+            $backupRoot = [string]$selectedBackup.RootPath
             $items += @(Get-LibraryDefinitions -IncludeMissing | Where-Object { Test-Path -LiteralPath (Join-Path $backupRoot $_.Name) -PathType Container } | ForEach-Object {
                 $checked = if ($script:folderCheckStates.ContainsKey([string]$_.Name)) { [bool]$script:folderCheckStates[[string]$_.Name] } else { $true }
                 New-FolderListItem -Name $_.Name -DisplayName (Get-M24FolderDisplayName $_.Name $script:isGerman) -Path $_.Path -IsCustom $false -Checked $checked -SizePath (Join-Path $backupRoot ([string]$_.Name))
             })
             $items += @(Get-RestoreCustomFolders -BackupRoot $backupRoot)
+            # Auch ohne lesbare _Ordner.json muessen vorhandene fremde
+            # Datenordner beim sicheren Kopieren auswählbar bleiben.
+            $knownNames = @($items | ForEach-Object { [string]$_.Name })
+            $items += @(Get-ChildItem -LiteralPath $backupRoot -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object {
+                    -not $_.Name.StartsWith('_') -and
+                    $knownNames -notcontains $_.Name -and
+                    ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0
+                } |
+                ForEach-Object {
+                    New-FolderListItem -Name $_.Name -DisplayName $_.Name -Path $null -IsCustom $true -Checked $true -SizePath $_.FullName
+                })
         }
         $titleLabel.Text = L "Dateien wiederherstellen" "Restore files"
         $descriptionLabel.Text = L "Neuere lokale Dateien bleiben erhalten; es wird nichts gelöscht." "Newer local files are kept; nothing is deleted."
@@ -2434,6 +2652,7 @@ function Update-LibraryList {
     }
     Request-FolderSizeScan -Items $items
     Update-BackupOptionState
+    Update-RestoreTargetState
     Update-SelectionState
 }
 
@@ -2771,6 +2990,7 @@ $driveCombo.Add_SelectedIndexChanged({
         } else {
             L 'Dieses Laufwerk ist noch nicht als Sicherungslaufwerk gespeichert.' 'This drive is not currently remembered as the backup drive.'
         }))
+        Update-RestoreSourceList
         if (-not $script:suppressArtifactRetarget) { Update-BackupArtifactActions }
         Update-BackupHealth
         Update-LibraryList
@@ -2786,10 +3006,37 @@ $refreshButton.Add_Click({
 })
 
 $backupRadio.Add_CheckedChanged({
-    if ($backupRadio.Checked) { Update-LibraryList; Update-BackupOptionState; Update-BackupHealth }
+    if ($backupRadio.Checked) { Update-RestoreSourceList; Update-LibraryList; Update-BackupArtifactActions; Update-BackupOptionState; Update-BackupHealth }
 })
 $restoreRadio.Add_CheckedChanged({
-    if ($restoreRadio.Checked) { Update-BackupSelectionSnapshot -CaptureCurrentList; Update-LibraryList; Update-BackupOptionState; Update-BackupHealth }
+    if ($restoreRadio.Checked) { Update-BackupSelectionSnapshot -CaptureCurrentList; Update-RestoreSourceList; Update-LibraryList; Update-BackupArtifactActions; Update-BackupOptionState; Update-BackupHealth }
+})
+$backupSourceCombo.Add_SelectedIndexChanged({
+    $script:selectedBackup = Get-SelectedBackupInventoryItem
+    if ($script:selectedBackup -and -not $script:selectedBackup.IsUsable) {
+        $restoreFolderRadio.Checked = $true
+    }
+    Update-RestoreTargetState
+    Update-BackupArtifactActions
+    Update-BackupHealth
+    Update-LibraryList
+    Update-SelectionState
+})
+$restoreProfileRadio.Add_CheckedChanged({ if ($restoreProfileRadio.Checked) { Update-RestoreTargetState; Update-SelectionState } })
+$restoreFolderRadio.Add_CheckedChanged({ if ($restoreFolderRadio.Checked) { Update-RestoreTargetState; Update-SelectionState } })
+$restoreFolderButton.Add_Click({
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = L 'Zielordner für die wiederhergestellten Daten auswählen' 'Choose a destination folder for the restored data'
+    $dialog.ShowNewFolderButton = $true
+    try {
+        if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $script:restoreTargetFolder = [string]$dialog.SelectedPath
+            Update-RestoreTargetState
+            Update-SelectionState
+        }
+    } finally {
+        $dialog.Dispose()
+    }
 })
 $dryRunCheckBox.Add_CheckedChanged({ Update-BackupOptionState })
 $superFastCheckBox.Add_CheckedChanged({ Update-BackupOptionState })
@@ -2839,6 +3086,21 @@ $startButton.Add_Click({
         [System.Windows.Forms.MessageBox]::Show((L "Bitte wählen Sie ein Ziellaufwerk." "Please select a drive."), $form.Text, "OK", "Warning") | Out-Null
         return
     }
+    if ($restoreRadio.Checked) {
+        $selectedRestoreBackup = Get-SelectedBackupInventoryItem
+        if (-not $selectedRestoreBackup -or -not $selectedRestoreBackup.CanCopyToFolder) {
+            [System.Windows.Forms.MessageBox]::Show((L 'Bitte wählen Sie eine verwendbare Sicherung aus.' 'Select a usable backup.'), $form.Text, 'OK', 'Warning') | Out-Null
+            return
+        }
+        if ($restoreProfileRadio.Checked -and -not $selectedRestoreBackup.IsUsable) {
+            [System.Windows.Forms.MessageBox]::Show((L 'Diese Sicherung kann nur in einen separaten Ordner kopiert werden.' 'This backup can only be copied to a separate folder.'), $form.Text, 'OK', 'Warning') | Out-Null
+            return
+        }
+        if ($restoreFolderRadio.Checked -and [string]::IsNullOrWhiteSpace($script:restoreTargetFolder)) {
+            [System.Windows.Forms.MessageBox]::Show((L 'Bitte wählen Sie einen Zielordner aus.' 'Choose a destination folder.'), $form.Text, 'OK', 'Warning') | Out-Null
+            return
+        }
+    }
     if ($libraryList.CheckedItems.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show((L "Bitte wählen Sie mindestens einen Ordner aus." "Please select at least one folder."), $form.Text, "OK", "Warning") | Out-Null
         return
@@ -2886,8 +3148,7 @@ $startButton.Add_Click({
             (L 'Laufwerk nicht eindeutig' 'Ambiguous drive identity'), 'YesNo', 'Warning')
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     }
-    $artifactCacheKey = "{0}|{1}" -f $disk.DeviceID, (Get-NormalizedVolumeSerial -Disk $disk)
-    [void]$script:artifactCache.Remove($artifactCacheKey)
+    $script:artifactCache.Clear()
     if ($backupRadio.Checked -and $script:knownDrive -and -not $disk.M24KnownMatchAmbiguous -and -not (Test-IsKnownBackupDrive -Disk $disk)) {
         $knownName = if ($script:knownDrive.VolumeName) { $script:knownDrive.VolumeName } else { $script:knownDrive.LastDeviceId }
         $answer = [System.Windows.Forms.MessageBox]::Show(
@@ -2921,9 +3182,11 @@ $startButton.Add_Click({
     $script:previewFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.preview.json" -f [guid]::NewGuid().ToString("N"))
     $script:approvalFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.approve" -f [guid]::NewGuid().ToString("N"))
     $script:selectedFoldersFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.folders.json" -f [guid]::NewGuid().ToString("N"))
-    $script:lastLogDir = Join-Path (Get-BackupRoot -Drive $drive) '_logs'
+    $selectedRestoreBackup = if ($restoreRadio.Checked) { Get-SelectedBackupInventoryItem } else { $null }
+    $operationBackupRoot = if ($selectedRestoreBackup) { [string]$selectedRestoreBackup.RootPath } else { Get-BackupRoot -Drive $drive }
+    $script:lastLogDir = Join-Path $operationBackupRoot '_logs'
     $script:lastLogFile = $null
-    $script:lastDestination = Get-BackupRoot -Drive $drive
+    $script:lastDestination = $operationBackupRoot
     $script:backupStartedAt = Get-Date
     $script:backupCancelled = $false
     $script:preCancelStatusText = $null
@@ -2963,6 +3226,10 @@ $startButton.Add_Click({
     $backupRadio.Enabled = $false
     $restoreRadio.Enabled = $false
     $driveCombo.Enabled = $false
+    $backupSourceCombo.Enabled = $false
+    $restoreProfileRadio.Enabled = $false
+    $restoreFolderRadio.Enabled = $false
+    $restoreFolderButton.Enabled = $false
     $libraryList.Enabled = $false
     $allButton.Enabled = $false
     $noneButton.Enabled = $false
@@ -3000,7 +3267,17 @@ $startButton.Add_Click({
             '-ApprovalFile', $script:approvalFile,
             '-SelectedFoldersFile', $script:selectedFoldersFile
         )
-        if ($mode -eq 'Restore') { $argumentList += @('-RestoreIntegrityPolicy', 'Verify') }
+        if ($mode -eq 'Restore') {
+            $restoreTargetMode = if ($restoreFolderRadio.Checked) { 'Folder' } else { 'Profile' }
+            $argumentList += @(
+                '-RestoreIntegrityPolicy', 'Verify',
+                '-BackupSource', ([string]$selectedRestoreBackup.RootPath),
+                '-RestoreTargetMode', $restoreTargetMode
+            )
+            if ($restoreTargetMode -eq 'Folder') {
+                $argumentList += @('-RestoreTargetRoot', $script:restoreTargetFolder)
+            }
+        }
         if ($script:activeDryRun) { $argumentList += '-DryRun' }
         if ($script:activeSuperFast) {
             # Der Worker erzwingt uebersprungene Pruefsummen selbst; ein
@@ -3051,6 +3328,9 @@ $startButton.Add_Click({
         $backupRadio.Enabled = $true
         $restoreRadio.Enabled = $true
         $driveCombo.Enabled = $true
+        $backupSourceCombo.Enabled = $true
+        $restoreFolderRadio.Enabled = $true
+        $restoreFolderButton.Enabled = $true
         $libraryList.Enabled = $true
         $allButton.Enabled = $true
         $noneButton.Enabled = $true
@@ -3116,14 +3396,25 @@ $timer.Add_Tick({
                                 } else {
                                     L "Integrität: Prüfsummen seit der letzten Sicherung nicht geprüft – Empfehlung: zuerst „Backup prüfen“ ausführen." "Integrity: checksums not verified since the last backup – recommendation: run “Verify backup” first."
                                 }
-                                $message = if ($script:isGerman) {
-                                    "Konfliktvorschau:`r`n`r`nFehlende Dateien: $($preview.MissingFiles)`r`nLokale Dateien, die ersetzt werden: $($preview.OverwriteFiles)`r`nNeuere lokale Dateien, die geschützt bleiben: $($preview.ProtectedNewerFiles)`r`nZu kopieren: $($preview.PlannedFiles) Dateien / $previewGb GB`r`n`r`n$integrityText$exampleText`r`n`r`nWiederherstellung jetzt starten?"
+                                $sourceIdentity = if ($preview.SourceComputer -or $preview.SourceUser) { "$($preview.SourceComputer)\$($preview.SourceUser)" } else { L 'unbekannt' 'unknown' }
+                                $targetDescription = if ([string]$preview.TargetMode -eq 'Folder') {
+                                    (L 'Separater Ordner: {0}' 'Separate folder: {0}') -f $preview.TargetRoot
                                 } else {
-                                    "Conflict preview:`r`n`r`nMissing files: $($preview.MissingFiles)`r`nLocal files to be replaced: $($preview.OverwriteFiles)`r`nNewer local files that remain protected: $($preview.ProtectedNewerFiles)`r`nTo be copied: $($preview.PlannedFiles) files / $previewGb GB`r`n`r`n$integrityText$exampleText`r`n`r`nStart the restore now?"
+                                    L 'Aktuelles Benutzerprofil' 'Current user profile'
+                                }
+                                $migrationNotice = if ([bool]$preview.IsMigration -and [string]$preview.TargetMode -eq 'Profile') {
+                                    (L "`r`n`r`nDiese Sicherung stammt von „{0}“. Die ausgewählten Daten werden in das aktuelle Benutzerprofil übernommen." "`r`n`r`nThis backup originates from “{0}”. The selected data will be restored to the current user profile.") -f $sourceIdentity
+                                } else { '' }
+                                $message = if ($script:isGerman) {
+                                    "Wiederherstellungsvorschau:`r`n`r`nHerkunft: $sourceIdentity`r`nZiel: $targetDescription`r`nFehlende Dateien: $($preview.MissingFiles)`r`nLokale Dateien, die ersetzt werden: $($preview.OverwriteFiles)`r`nNeuere lokale Dateien, die geschützt bleiben: $($preview.ProtectedNewerFiles)`r`nZu kopieren: $($preview.PlannedFiles) Dateien / $previewGb GB`r`n`r`n$integrityText$migrationNotice$exampleText`r`n`r`nWiederherstellung jetzt starten?"
+                                } else {
+                                    "Restore preview:`r`n`r`nOrigin: $sourceIdentity`r`nDestination: $targetDescription`r`nMissing files: $($preview.MissingFiles)`r`nLocal files to be replaced: $($preview.OverwriteFiles)`r`nNewer local files that remain protected: $($preview.ProtectedNewerFiles)`r`nTo be copied: $($preview.PlannedFiles) files / $previewGb GB`r`n`r`n$integrityText$migrationNotice$exampleText`r`n`r`nStart the restore now?"
                                 }
                                 $answer = [System.Windows.Forms.MessageBox]::Show($message, (L "Wiederherstellung prüfen" "Review restore"), "YesNo", "Warning")
                                 if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
-                                    $approvalValue = if (-not $manifestExists) {
+                                    $approvalValue = if ([string]$preview.TargetMode -eq 'Folder') {
+                                        'continue'
+                                    } elseif (-not $manifestExists) {
                                         $overrideAnswer = [System.Windows.Forms.MessageBox]::Show(
                                             (L "Ohne Prüfsummenmanifest kann die Integrität des Backups nicht bestätigt werden. Beschädigte oder manipulierte Dateien könnten wiederhergestellt werden.`r`n`r`nTrotzdem ausdrücklich unbestätigt wiederherstellen?" "Without a checksum manifest, backup integrity cannot be confirmed. Corrupted or modified files could be restored.`r`n`r`nExplicitly continue with an unverified restore?"),
                                             (L 'Unbestätigte Wiederherstellung' 'Unverified restore'),
@@ -3296,6 +3587,9 @@ $timer.Add_Tick({
             $backupRadio.Enabled = $true
             $restoreRadio.Enabled = $true
             $driveCombo.Enabled = $true
+            $backupSourceCombo.Enabled = $true
+            $restoreFolderRadio.Enabled = $true
+            $restoreFolderButton.Enabled = $true
             $libraryList.Enabled = $true
             $allButton.Enabled = $true
             $noneButton.Enabled = $true
@@ -3318,7 +3612,9 @@ $timer.Add_Tick({
             $destinationButton.Enabled = $script:lastDestination -and (Test-Path -LiteralPath $script:lastDestination)
             $historyButton.Enabled = $logButton.Enabled
             $verifyButton.Enabled = $destinationButton.Enabled
-            $deleteBackupButton.Enabled = $destinationButton.Enabled
+            $completedSelectedBackup = if ($restoreRadio.Checked) { Get-SelectedBackupInventoryItem } else { $null }
+            $deleteBackupButton.Enabled = $destinationButton.Enabled -and
+                (-not $restoreRadio.Checked -or ($completedSelectedBackup -and $completedSelectedBackup.IsCurrentProfile))
 
             $resultCancellationReason = if ($result -and $result.PSObject.Properties['CancellationReason']) { [string]$result.CancellationReason } else { $null }
             $operationWasCancelled = $script:backupCancelled -or ($result -and $result.PSObject.Properties['Cancelled'] -and [bool]$result.Cancelled)
@@ -3648,10 +3944,10 @@ $verifyButton.Add_Click({
     if ($script:backupProcess -or $script:verificationAsyncResult) { return }
     if (-not $script:lastDestination -or -not (Test-Path -LiteralPath $script:lastDestination -PathType Container)) { return }
     $metadataFile = Join-Path $script:lastDestination '_Sicherungsinfo.txt'
-    $resultLine = if (Test-Path -LiteralPath $metadataFile -PathType Leaf) {
-        Get-Content -LiteralPath $metadataFile -ErrorAction SilentlyContinue | Where-Object { $_ -like 'Ergebnis:*' } | Select-Object -Last 1
-    }
-    if (-not $resultLine -or $resultLine -notmatch '^Ergebnis:\s*Erfolgreich abgeschlossen') {
+    $metadataLines = if (Test-Path -LiteralPath $metadataFile -PathType Leaf) {
+        @(Get-Content -LiteralPath $metadataFile -ErrorAction SilentlyContinue)
+    } else { @() }
+    if (-not (Get-M24BackupResultInfo -Lines $metadataLines).IsComplete) {
         [System.Windows.Forms.MessageBox]::Show((L 'Nur eine erfolgreich abgeschlossene Sicherung kann geprüft werden.' 'Only a successfully completed backup can be verified.'), $form.Text, 'OK', 'Warning') | Out-Null
         return
     }
@@ -3746,7 +4042,18 @@ $verifyButton.Add_Click({
 
 $destinationButton.Add_Click({
     if ($script:lastDestination -and (Test-Path -LiteralPath $script:lastDestination)) {
-        Start-Process -FilePath "explorer.exe" -ArgumentList $script:lastDestination
+        try {
+            $pathToOpen = $script:lastDestination
+            if ($restoreRadio.Checked -and $driveCombo.SelectedItem) {
+                $selectedDisk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
+                $pathToOpen = Resolve-M24RestoreSource -Drive $selectedDisk.DeviceID -BackupSource $script:lastDestination
+            }
+            Start-Process -FilePath "explorer.exe" -ArgumentList $pathToOpen
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show(
+                ((L "Der ausgewählte Sicherungsordner ist nicht mehr sicher verfügbar:`r`n{0}" "The selected backup folder is no longer safely available:`r`n{0}") -f $_.Exception.Message),
+                $form.Text, 'OK', 'Warning') | Out-Null
+        }
     }
 })
 

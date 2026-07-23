@@ -51,6 +51,9 @@ Windows systems and in English on all other systems.
 - Supports cooperative cancellation between folders.
 - Provides defensive restore with metadata validation, conflict preview, and
   explicit user confirmation.
+- Discovers every backup on a drive. Backups from another computer or user can
+  be selected, opened, and restored either to the current user profile or to a
+  separate folder.
 - Runs without administrator privileges or additional runtime installation.
 
 > [!IMPORTANT]
@@ -94,9 +97,10 @@ directly on a backup drive.
 5. Click **Start backup**, check the final status, and open the log if
    necessary.
 
-To restore files, select **Restore** mode. The application only accepts a
-backup whose computer and user metadata match the current profile. A conflict
-preview is shown before any changes are made.
+To restore files, select **Restore**, choose a discovered backup, and select
+either **Restore to my user profile** or **Copy to another folder**. Complete
+backups from another profile are automatically mapped to the current Windows
+libraries. A conflict preview is shown before any changes are made.
 
 Detailed instructions are included in the repository and every distribution:
 
@@ -115,8 +119,9 @@ These components are already included with supported Windows versions.
 ## Privacy and safety model
 
 The application operates locally. It does not upload files, telemetry, or usage
-data. Backups are separated by computer and user. During restore, backup
-metadata is validated before local files are changed. Robocopy return codes are
+data. Backups are separated by computer and user. During restore, the selected
+backup source and its metadata are validated before local files are changed.
+Robocopy return codes are
 evaluated so that actual copy failures cannot be reported as success.
 
 The scripts are launched with `ExecutionPolicy Bypass` in a separate PowerShell

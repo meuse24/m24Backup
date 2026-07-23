@@ -54,6 +54,10 @@ auf Englisch.
 - Unterstützt kooperatives Abbrechen zwischen den Ordnern.
 - Bietet eine defensive Rücksicherung mit Metadatenprüfung, Vorschau und
   ausdrücklicher Bestätigung.
+- Erkennt alle Sicherungen auf einem Laufwerk. Auch Sicherungen eines anderen
+  Computers oder Benutzers können ausgewählt, geöffnet und entweder in das
+  aktuelle Benutzerprofil oder in einen separaten Ordner wiederhergestellt
+  werden.
 - Läuft ohne Administratorrechte und ohne zusätzliche Laufzeitinstallation.
 
 > [!IMPORTANT]
@@ -98,9 +102,11 @@ direkt auf einem Sicherungslaufwerk liegen.
 5. **Sicherung starten** wählen, den Abschlussstatus prüfen und bei Bedarf das
    Protokoll öffnen.
 
-Für eine Rücksicherung den Modus **Wiederherstellen** wählen. Die Anwendung
-akzeptiert nur eine Sicherung, deren Computer- und Benutzerinformationen zum
-aktuellen Profil passen. Vor Änderungen erscheint eine Konfliktvorschau.
+Für eine Rücksicherung den Modus **Wiederherstellen** wählen, eine gefundene
+Sicherung auswählen und entweder **In mein Benutzerprofil** oder **In einen
+anderen Ordner kopieren** verwenden. Fremde vollständige Sicherungen werden
+automatisch den aktuellen Windows-Bibliotheken zugeordnet. Vor Änderungen
+erscheint eine Konfliktvorschau.
 
 Die ausführliche Anleitung ist im Projekt und in jeder Distribution enthalten:
 

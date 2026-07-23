@@ -279,10 +279,23 @@ dessen vorhandene Daten gelöscht.
 1. Laufwerk mit der Sicherung anschließen.
 2. Modus **Wiederherstellen** wählen.
 3. Sicherungslaufwerk auswählen.
-4. Gewünschte Backup-Ordner markieren.
-5. **Wiederherstellung prüfen** klicken.
-6. Konfliktvorschau lesen.
-7. Wiederherstellung nur bestätigen, wenn die Angaben plausibel sind.
+4. Unter **Gefundene Sicherung** die gewünschte Sicherung auswählen.
+5. **In mein Benutzerprofil** oder **In einen anderen Ordner kopieren**
+   auswählen. Bei der zweiten Variante einen Zielordner angeben.
+6. Gewünschte Backup-Ordner markieren.
+7. **Wiederherstellung prüfen** klicken und die Vorschau bestätigen.
+
+Eine vollständige Sicherung eines anderen Computers oder Benutzers kann direkt
+in das aktuelle Benutzerprofil übernommen werden. Bekannte Windows-Ordner
+werden automatisch den aktuellen Bibliothekspfaden zugeordnet. Zusätzliche
+Ordner einer fremden Sicherung landen gesammelt unter
+`Dokumente\Wiederhergestellte Ordner\<Sicherungsname>`. Bei einer Sicherung des
+aktuellen Profils bleiben die gespeicherten Originalpfade zusätzlicher Ordner
+wie bisher erhalten.
+
+Unvollständige Sicherungen oder Sicherungen mit nicht lesbaren Metadaten können
+nur in einen separaten Ordner kopiert werden. Der Button
+**Sicherungsordner öffnen** steht auch für solche Sicherungen zur Verfügung.
 
 Die Konfliktvorschau zeigt lokal fehlende Dateien, mögliche
 Überschreibungen, geschützte neuere lokale Dateien, Datenmenge und
@@ -299,8 +312,9 @@ ausdrückliche Bestätigung werden keine Dateien wiederhergestellt.
 - Neuere lokale Dateien bleiben durch Robocopy `/XO` geschützt.
 - Lokal vorhandene Dateien werden nicht gelöscht.
 - Die Rücksicherung verwendet weder `/MIR` noch `/PURGE`.
-- Das Backup muss anhand seiner Metadaten zum aktuellen Computer und Benutzer
-  passen.
+- Die Sicherungsquelle muss ein sicher validierter, direkter Unterordner des
+  Sicherungsstamms sein. Eine abweichende Computer- oder Benutzeridentität wird
+  bei der Übernahme ins aktuelle Profil deutlich angezeigt.
 - Der freie Platz wird für jedes betroffene lokale Laufwerk separat geprüft.
 
 ## Sicherung oder Wiederherstellung abbrechen
@@ -367,7 +381,7 @@ enthalten; sie dienen ausschließlich der Fehlerdiagnose im Supportfall.
 | Nicht genügend Speicherplatz | Daten auf dem Zielmedium entfernen oder größeres Laufwerk verwenden. |
 | FAT32-Warnung | NTFS oder exFAT für das Sicherungslaufwerk verwenden. |
 | Datei kann nicht gelesen werden | Prüfen, ob sie in einem anderen Programm geöffnet ist. |
-| Ordner fehlt im Restore-Modus | Prüfen, ob `_Ordner.json` vorhanden ist und ob das Backup zum Profil passt. |
+| Ordner fehlt im Restore-Modus | Prüfen, ob der Ordner in der ausgewählten Sicherung vorhanden ist. Zusatzordner ohne lesbare Metadaten können in einen separaten Ordner kopiert werden. |
 
 ## Empfehlungen
 
@@ -417,6 +431,9 @@ Beispiele:
 | `-Silent` | Laufwerksauswahl und normale Rückfragen unterdrücken. Bei Scanwarnungen benötigt ein stilles Backup die GUI-Freigabedateien; ein stiller Restore benötigt immer einen Freigabekanal. Für direkte manuelle Restores daher nicht verwenden. |
 | `-SelectedFolders <Liste>` | Nur die mit einem Pipe-Zeichen getrennten kanonischen Ordnernamen verarbeiten. Standardnamen sind `Desktop`, `Dokumente`, `Downloads`, `Bilder`, `Musik`, `Videos`, `Favoriten`, `Gespeicherte Spiele` und `Kontakte`. |
 | `-SelectedFoldersFile <Datei>` | JSON-Auswahldatei verwenden; unterstützt auch die von der GUI übergebenen benutzerdefinierten Ordner. Dieses Format ist hauptsächlich für Automatisierung und die GUI vorgesehen. |
+| `-BackupSource <Pfad>` | Explizite Sicherungsquelle für einen Restore. Der Pfad muss ein direkter Unterordner von `<Laufwerk>:\Bibliothekssicherung` sein. Ohne Angabe wird aus Kompatibilitätsgründen die Sicherung des aktuellen Profils verwendet. |
+| `-RestoreTargetMode <Profile oder Folder>` | `Profile` ordnet Standardordner dem aktuellen Benutzerprofil zu. `Folder` kopiert die Sicherungsstruktur unter einen separaten Zielordner. |
+| `-RestoreTargetRoot <Pfad>` | Gewählter Zielordner für `-RestoreTargetMode Folder`. Darunter wird automatisch ein Unterordner mit dem Sicherungsnamen angelegt. |
 | `-DryRun` | Backup mit Robocopy `/L` simulieren, ohne Nutzdaten oder erfolgreiche Backup-Metadaten zu schreiben. Nur mit `-Mode Backup`; nicht mit `-SuperFast`. |
 | `-SkipChecksums` | Nach einem erfolgreichen Backup `_Pruefsummen.tsv` nicht aktualisieren. Das vorhandene Manifest kann dadurch veralten. |
 | `-SuperFast` | Preflight, dateibasierte Speicherplatz-/4-GB-Prüfung, Prüfsummenaktualisierung und BitLocker-Abfrage auslassen; Robocopy ohne Wiederholung und standardmäßig mit 32 Threads starten. Nur für Backups und nicht mit `-DryRun`. |

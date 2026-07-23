@@ -6,6 +6,23 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ## [Unreleased]
 
+### Geändert
+
+- Der Wiederherstellungsmodus erkennt nun alle Sicherungen auf dem gewählten
+  Laufwerk. Vollständige Sicherungen anderer Computer oder Benutzer können in
+  das aktuelle Profil übernommen oder in einen frei gewählten Ordner kopiert
+  werden. Windows-Bibliotheken werden automatisch den aktuellen Pfaden
+  zugeordnet; zusätzliche Ordner fremder Sicherungen landen sicher gesammelt
+  unter „Wiederhergestellte Ordner“. Unvollständige oder metadatenlose
+  Sicherungen lassen sich nur separat kopieren, aber jederzeit im Explorer
+  öffnen. Der bestehende Restore der eigenen Profilsicherung und die streng
+  profilgebundene Löschfunktion bleiben erhalten.
+- Erwartete Zugriffsfehler geschützter Windows-Kompatibilitätsjunctions wie
+  „Eigene Bilder“, „Eigene Musik“ und „Eigene Videos“ lösen in der Vorprüfung
+  keinen Bestätigungsdialog mehr aus. Da Robocopy diese Verknüpfungen mit `/XJ`
+  ohnehin auslässt, werden sie stattdessen mit einer erklärenden Anmerkung im
+  Sicherungsprotokoll festgehalten. Andere Lesefehler bleiben Warnungen.
+
 ## [1.9.1] – 2026-07-20
 
 ### Geändert

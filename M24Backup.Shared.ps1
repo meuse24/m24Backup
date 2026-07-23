@@ -103,6 +103,49 @@ function Test-M24ReservedDeviceFileName {
     return [bool]($Name -match '^(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$')
 }
 
+function Test-M24SkippedJunctionAccessError {
+    # Get-ChildItem kann beim Auflisten alter, absichtlich gesperrter
+    # Windows-Kompatibilitaetsjunctions (z. B. "Eigene Bilder" unter
+    # "Dokumente") einen Zugriffsfehler melden. Robocopy folgt wegen /XJ
+    # ohnehin keinen Junctions. Nur wenn das Fehlerziel tatsaechlich als
+    # Junction identifiziert werden kann, darf der Fehler daher zu einem
+    # reinen Protokollhinweis herabgestuft werden.
+    param([AllowNull()]$ErrorRecord)
+
+    if (-not $ErrorRecord) { return $false }
+
+    $candidates = @()
+    if ($ErrorRecord.PSObject.Properties['TargetObject'] -and $null -ne $ErrorRecord.TargetObject) {
+        $targetObject = $ErrorRecord.TargetObject
+        if ($targetObject.PSObject.Properties['FullName'] -and $targetObject.FullName) {
+            $candidates += [string]$targetObject.FullName
+        } else {
+            $candidates += [string]$targetObject
+        }
+    }
+    if ($ErrorRecord.PSObject.Properties['CategoryInfo'] -and $ErrorRecord.CategoryInfo) {
+        $targetName = [string]$ErrorRecord.CategoryInfo.TargetName
+        if (-not [string]::IsNullOrWhiteSpace($targetName)) { $candidates += $targetName }
+    }
+    if ($ErrorRecord.PSObject.Properties['Exception'] -and $ErrorRecord.Exception -and
+        $ErrorRecord.Exception.PSObject.Properties['ItemName']) {
+        $itemName = [string]$ErrorRecord.Exception.ItemName
+        if (-not [string]::IsNullOrWhiteSpace($itemName)) { $candidates += $itemName }
+    }
+
+    foreach ($candidate in @($candidates | Select-Object -Unique)) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        try {
+            $item = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+            if ([string]$item.LinkType -eq 'Junction') { return $true }
+        } catch {
+            # Kann selbst die Link-Metainfo nicht sicher gelesen werden, bleibt
+            # der urspruengliche Fehler eine echte Vorpruefungswarnung.
+        }
+    }
+    return $false
+}
+
 function Get-M24UserShellFolder {
     param(
         [string]$Name,
@@ -1119,6 +1162,149 @@ function Test-M24BackupMetadataIdentity {
     $identity = Get-M24BackupMetadataIdentity -Lines $Lines
     return $identity.Computer.Equals($Computer, [System.StringComparison]::OrdinalIgnoreCase) -and
         $identity.User.Equals($User, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-M24BackupResultInfo {
+    param([string[]]$Lines)
+
+    $resultLine = [string]($Lines | Where-Object { $_ -like 'Ergebnis:*' } | Select-Object -Last 1)
+    $lastResult = ''
+    $completedAt = $null
+    if ($resultLine -match '^Ergebnis:\s*(.+?)\s+am\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.?$') {
+        $lastResult = $matches[1].Trim()
+        $parsedDate = [datetime]::MinValue
+        if ([datetime]::TryParseExact($matches[2], 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsedDate)) {
+            $completedAt = $parsedDate
+        }
+    } elseif ($resultLine -match '^Ergebnis:\s*(.+?)\.?$') {
+        $lastResult = $matches[1].Trim().TrimEnd('.')
+    }
+
+    return [pscustomobject]@{
+        Result = $lastResult
+        CompletedAt = $completedAt
+        IsComplete = [bool](
+            $completedAt -and
+            $lastResult.Equals('Erfolgreich abgeschlossen', [System.StringComparison]::OrdinalIgnoreCase)
+        )
+    }
+}
+
+function Resolve-M24RestoreSource {
+    param(
+        [string]$Drive,
+        [string]$BackupSource
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Drive)) { throw 'Backup drive is missing.' }
+    if ([string]::IsNullOrWhiteSpace($BackupSource)) { throw 'Backup source is missing.' }
+
+    $inventoryRoot = Get-NormalizedFullPath (Join-Path $Drive 'Bibliothekssicherung')
+    $sourceRoot = Get-NormalizedFullPath $BackupSource
+    if (-not (Test-Path -LiteralPath $inventoryRoot -PathType Container)) {
+        throw "Backup inventory directory was not found: $inventoryRoot"
+    }
+    $inventoryItem = Get-Item -LiteralPath $inventoryRoot -Force -ErrorAction Stop
+    if (($inventoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Backup inventory directory is a symbolic link or junction.'
+    }
+    $sourceParent = Get-NormalizedFullPath (Split-Path -Path $sourceRoot -Parent)
+    if (-not $sourceParent.Equals($inventoryRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Backup source is not a direct child of the expected backup directory.'
+    }
+    $sourceName = Split-Path -Path $sourceRoot -Leaf
+    if ([string]::IsNullOrWhiteSpace($sourceName) -or $sourceName.StartsWith('_') -or (Get-ReservedBackupNames) -contains $sourceName) {
+        throw 'Backup source has a reserved name.'
+    }
+    if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
+        throw "Backup source was not found: $sourceRoot"
+    }
+    $sourceItem = Get-Item -LiteralPath $sourceRoot -Force -ErrorAction Stop
+    if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Backup source is a symbolic link or junction.'
+    }
+    return $sourceRoot
+}
+
+function Get-M24BackupInventory {
+    param(
+        [string]$Drive,
+        [string]$Computer = $env:COMPUTERNAME,
+        [string]$User = $env:USERNAME
+    )
+
+    $inventoryRoot = Join-Path $Drive 'Bibliothekssicherung'
+    if (-not (Test-Path -LiteralPath $inventoryRoot -PathType Container)) { return @() }
+    try {
+        $inventoryItem = Get-Item -LiteralPath $inventoryRoot -Force -ErrorAction Stop
+        if (($inventoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return @() }
+    } catch {
+        return @()
+    }
+
+    $items = @()
+    foreach ($directory in @(Get-ChildItem -LiteralPath $inventoryRoot -Directory -Force -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        $metadataReadable = $false
+        $metadataLines = @()
+        $identity = [pscustomobject]@{ Computer = ''; User = '' }
+        $lastResult = ''
+        $lastCompletedAt = $null
+        $isComplete = $false
+        $rootPath = $null
+        $structurallySafe = $false
+        $availableFolders = @()
+        try {
+            $rootPath = Resolve-M24RestoreSource -Drive $Drive -BackupSource $directory.FullName
+            $structurallySafe = $true
+            $availableFolders = @(Get-ChildItem -LiteralPath $rootPath -Directory -Force -ErrorAction Stop |
+                Where-Object {
+                    -not $_.Name.StartsWith('_') -and
+                    ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0
+                } |
+                ForEach-Object { [string]$_.Name } |
+                Sort-Object -Unique)
+
+            $metadataFile = Join-Path $rootPath '_Sicherungsinfo.txt'
+            if (Test-Path -LiteralPath $metadataFile -PathType Leaf) {
+                $metadataLines = @(Get-Content -LiteralPath $metadataFile -ErrorAction Stop)
+                $identity = Get-M24BackupMetadataIdentity -Lines $metadataLines
+                $metadataReadable = -not [string]::IsNullOrWhiteSpace($identity.Computer) -and
+                    -not [string]::IsNullOrWhiteSpace($identity.User)
+                $resultInfo = Get-M24BackupResultInfo -Lines $metadataLines
+                $lastResult = [string]$resultInfo.Result
+                $lastCompletedAt = $resultInfo.CompletedAt
+                $isComplete = [bool]$resultInfo.IsComplete
+            }
+        } catch {
+            $structurallySafe = $false
+            $availableFolders = @()
+        }
+
+        $displayName = [string]$directory.Name
+        $isCurrentProfile = $metadataReadable -and
+            $identity.Computer.Equals($Computer, [System.StringComparison]::OrdinalIgnoreCase) -and
+            $identity.User.Equals($User, [System.StringComparison]::OrdinalIgnoreCase)
+        $manifestPath = if ($rootPath) { Join-Path $rootPath (Get-M24ChecksumManifestName) } else { $null }
+        $metadataPath = if ($rootPath) { Join-Path $rootPath '_Sicherungsinfo.txt' } else { $null }
+        $items += [pscustomobject]@{
+            RootPath = $(if ($rootPath) { $rootPath } else { [string]$directory.FullName })
+            Computer = [string]$identity.Computer
+            User = [string]$identity.User
+            DisplayName = $displayName
+            LastResult = $lastResult
+            LastCompletedAt = $lastCompletedAt
+            IsComplete = [bool]$isComplete
+            ChecksumManifestExists = [bool]($manifestPath -and (Test-Path -LiteralPath $manifestPath -PathType Leaf))
+            ChecksumsVerifiedAt = $(if ($metadataReadable) { Get-M24ChecksumVerifiedDate -MetadataFile $metadataPath } else { $null })
+            MetadataReadable = [bool]$metadataReadable
+            StructurallySafe = [bool]$structurallySafe
+            IsCurrentProfile = [bool]$isCurrentProfile
+            IsUsable = [bool]($structurallySafe -and $metadataReadable -and $isComplete -and $availableFolders.Count -gt 0)
+            CanCopyToFolder = [bool]($structurallySafe -and $availableFolders.Count -gt 0)
+            AvailableFolders = @($availableFolders)
+        }
+    }
+    return @($items)
 }
 
 function Assert-M24BackupDeletionTarget {

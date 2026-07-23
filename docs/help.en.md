@@ -256,10 +256,21 @@ recommended for backup drives. Formatting a drive deletes its existing data.
 1. Connect the drive containing the backup.
 2. Select **Restore**.
 3. Select the backup drive.
-4. Select the backup folders to restore.
-5. Click **Review restore**.
-6. Read the conflict preview.
-7. Confirm only if the displayed changes are correct.
+4. Under **Backup**, select the desired discovered backup.
+5. Select **Restore to my user profile** or **Copy to another folder**. For
+   the second option, choose a destination folder.
+6. Select the backup folders to restore.
+7. Click **Review restore** and confirm the preview.
+
+A complete backup from another computer or user can be restored directly to
+the current user profile. Known Windows folders are automatically mapped to
+the current library paths. Additional folders from a foreign backup are
+collected below `Documents\Restored folders\<backup name>`. For the current
+profile's own backup, the stored original paths of additional folders continue
+to be used.
+
+Incomplete backups or backups with unreadable metadata can only be copied to a
+separate folder. **Open backup folder** remains available for these backups.
 
 The preview shows missing local files, possible overwrites, protected newer
 local files, data volume, and example paths. It also shows the backup's
@@ -274,7 +285,9 @@ risk confirmation. No files are restored without explicit confirmation.
 - Newer local files remain protected by Robocopy `/XO`.
 - Local files are never deleted.
 - `/MIR` and `/PURGE` are not used.
-- Backup metadata must match the current computer and user.
+- The backup source must be a safely validated direct child of the backup
+  inventory root. A different computer or user identity is shown clearly when
+  restoring into the current profile.
 - Free space is checked separately for every affected local drive.
 
 ## Cancelling an operation
@@ -338,7 +351,7 @@ troubleshooting in support cases.
 | Not enough space | Remove data from the destination or use a larger drive. |
 | FAT32 warning | Use NTFS or exFAT for the backup drive. |
 | File cannot be read | Check whether it is open in another program. |
-| Folder missing in restore mode | Check `_Ordner.json` and whether the backup matches this profile. |
+| Folder missing in restore mode | Check whether the folder exists in the selected backup. Additional folders without readable metadata can be copied to a separate folder. |
 
 ## Recommendations
 
@@ -388,6 +401,9 @@ Examples:
 | `-Silent` | Suppress drive selection and normal prompts. A silent backup requires the GUI approval files if scan warnings occur; a silent restore always requires an approval channel. Do not use it for a normal direct restore. |
 | `-SelectedFolders <list>` | Process only canonical folder names separated by a pipe character. Standard names are `Desktop`, `Dokumente`, `Downloads`, `Bilder`, `Musik`, `Videos`, `Favoriten`, `Gespeicherte Spiele`, and `Kontakte`. Stored canonical names remain language-independent even though the GUI translates their display labels. |
 | `-SelectedFoldersFile <file>` | Use a JSON selection file, including custom folders passed by the GUI. This format is primarily intended for automation and the GUI. |
+| `-BackupSource <path>` | Explicit restore source. The path must be a direct child of `<Drive>:\Bibliothekssicherung`. When omitted, the current profile's backup is used for compatibility. |
+| `-RestoreTargetMode <Profile or Folder>` | `Profile` maps standard folders to the current user profile. `Folder` copies the backup structure below a separate destination folder. |
+| `-RestoreTargetRoot <path>` | Selected destination for `-RestoreTargetMode Folder`. A child folder named after the backup is created below it. |
 | `-DryRun` | Simulate a backup with Robocopy `/L` without writing user data or successful-backup metadata. Backup only; cannot be combined with `-SuperFast`. |
 | `-SkipChecksums` | Do not update `_Pruefsummen.tsv` after a successful backup. The existing manifest may become outdated. |
 | `-SuperFast` | Skip preflight, file-based disk-space/4 GB checks, checksum updates, and the BitLocker query; run Robocopy without retries and with 32 threads by default. Backup only; cannot be combined with `-DryRun`. |

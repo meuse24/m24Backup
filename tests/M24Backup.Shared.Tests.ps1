@@ -59,6 +59,45 @@ Describe 'Drive connection classification' {
     }
 }
 
+Describe 'Preflight junction access-error classification' {
+    It 'classifies an access error only when its target is a junction' {
+        Mock Get-Item {
+            [pscustomobject]@{ LinkType = 'Junction'; FullName = 'C:\Users\Test\Documents\Eigene Bilder' }
+        }
+        $errorRecord = [pscustomobject]@{
+            TargetObject = 'C:\Users\Test\Documents\Eigene Bilder'
+            CategoryInfo = $null
+            Exception = [System.UnauthorizedAccessException]::new('Access denied')
+        }
+
+        Test-M24SkippedJunctionAccessError -ErrorRecord $errorRecord | Should -Be $true
+    }
+
+    It 'keeps access errors for normal folders as warnings' {
+        Mock Get-Item {
+            [pscustomobject]@{ LinkType = $null; FullName = 'C:\Users\Test\Documents\Private' }
+        }
+        $errorRecord = [pscustomobject]@{
+            TargetObject = 'C:\Users\Test\Documents\Private'
+            CategoryInfo = $null
+            Exception = [System.UnauthorizedAccessException]::new('Access denied')
+        }
+
+        Test-M24SkippedJunctionAccessError -ErrorRecord $errorRecord | Should -Be $false
+    }
+
+    It 'keeps the error as a warning when link metadata cannot be read' {
+        Mock Get-Item { throw 'metadata access failed' }
+        $errorRecord = [pscustomobject]@{
+            TargetObject = 'C:\Users\Test\Documents\Unknown'
+            CategoryInfo = $null
+            Exception = [System.UnauthorizedAccessException]::new('Access denied')
+        }
+
+        Test-M24SkippedJunctionAccessError -ErrorRecord $errorRecord | Should -Be $false
+    }
+}
+
 Describe 'Shared folder metadata' {
     It 'translates canonical folder names without changing stored names' {
         Get-M24FolderDisplayName 'Dokumente' $false | Should -Be 'Documents'
@@ -77,6 +116,112 @@ Describe 'Shared folder metadata' {
         ($names -contains 'Downloads') | Should -Be $true
         ($names -contains 'Gespeicherte Spiele') | Should -Be $true
         ($names -contains 'Kontakte') | Should -Be $true
+    }
+}
+
+Describe 'Backup inventory' {
+    BeforeEach {
+        $script:inventoryDrive = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $script:inventoryRoot = Join-Path $script:inventoryDrive 'Bibliothekssicherung'
+        New-Item -ItemType Directory -Path $script:inventoryRoot -Force | Out-Null
+    }
+
+    It 'returns no entries for a drive without a backup directory' {
+        @(Get-M24BackupInventory -Drive (Join-Path $TestDrive 'empty-drive')).Count | Should -Be 0
+    }
+
+    It 'discovers current and foreign backups with their folders and status' {
+        $currentRoot = Join-Path $script:inventoryRoot 'PC1_user1'
+        $foreignRoot = Join-Path $script:inventoryRoot 'OLD_user2'
+        New-Item -ItemType Directory -Path (Join-Path $currentRoot 'Dokumente'), (Join-Path $foreignRoot 'Bilder') -Force | Out-Null
+        @(
+            'Computer: PC1'
+            'Benutzer: user1'
+            'Ergebnis: Erfolgreich abgeschlossen am 2026-07-20 12:30:00.'
+        ) | Set-Content -LiteralPath (Join-Path $currentRoot '_Sicherungsinfo.txt')
+        @(
+            'Computer: OLD'
+            'Benutzer: user2'
+            'Ergebnis: Erfolgreich abgeschlossen am 2026-07-19 11:00:00.'
+        ) | Set-Content -LiteralPath (Join-Path $foreignRoot '_Sicherungsinfo.txt')
+
+        $inventory = @(Get-M24BackupInventory -Drive $script:inventoryDrive -Computer PC1 -User user1)
+
+        $inventory.Count | Should -Be 2
+        $current = $inventory | Where-Object DisplayName -eq 'PC1_user1'
+        $current.IsCurrentProfile | Should -Be $true
+        $current.IsUsable | Should -Be $true
+        @($current.AvailableFolders) | Should -Be @('Dokumente')
+        $foreign = $inventory | Where-Object DisplayName -eq 'OLD_user2'
+        $foreign.IsCurrentProfile | Should -Be $false
+        $foreign.IsUsable | Should -Be $true
+        $foreign.Computer | Should -Be 'OLD'
+        $foreign.User | Should -Be 'user2'
+    }
+
+    It 'allows folder copying but not profile restore for incomplete or metadata-less backups' {
+        $incompleteRoot = Join-Path $script:inventoryRoot 'OLD_incomplete'
+        $unknownRoot = Join-Path $script:inventoryRoot 'unknown'
+        New-Item -ItemType Directory -Path (Join-Path $incompleteRoot 'Desktop'), (Join-Path $unknownRoot 'Dokumente') -Force | Out-Null
+        @(
+            'Computer: OLD'
+            'Benutzer: user'
+            'Ergebnis: Fehlgeschlagen am 2026-07-19 11:00:00.'
+        ) | Set-Content -LiteralPath (Join-Path $incompleteRoot '_Sicherungsinfo.txt')
+
+        $inventory = @(Get-M24BackupInventory -Drive $script:inventoryDrive)
+
+        foreach ($item in $inventory) {
+            $item.IsUsable | Should -Be $false
+            $item.CanCopyToFolder | Should -Be $true
+        }
+        ($inventory | Where-Object DisplayName -eq 'unknown').MetadataReadable | Should -Be $false
+    }
+
+    It 'validates that an explicit source is a direct physical child of the inventory root' {
+        $validRoot = Join-Path $script:inventoryRoot 'valid'
+        $nestedRoot = Join-Path $validRoot 'nested'
+        New-Item -ItemType Directory -Path $nestedRoot -Force | Out-Null
+
+        Resolve-M24RestoreSource -Drive $script:inventoryDrive -BackupSource $validRoot | Should -Be (Get-NormalizedFullPath $validRoot)
+        { Resolve-M24RestoreSource -Drive $script:inventoryDrive -BackupSource $nestedRoot } | Should -Throw '*direct child*'
+        { Resolve-M24RestoreSource -Drive $script:inventoryDrive -BackupSource $TestDrive } | Should -Throw '*direct child*'
+    }
+
+    It 'returns a reserved source entry as unsafe instead of using it' {
+        $reservedRoot = Join-Path $script:inventoryRoot '_logs'
+        New-Item -ItemType Directory -Path (Join-Path $reservedRoot 'Documents') -Force | Out-Null
+
+        $entry = @(Get-M24BackupInventory -Drive $script:inventoryDrive) | Select-Object -First 1
+
+        $entry.DisplayName | Should -Be '_logs'
+        $entry.StructurallySafe | Should -Be $false
+        $entry.CanCopyToFolder | Should -Be $false
+        { Resolve-M24RestoreSource -Drive $script:inventoryDrive -BackupSource $reservedRoot } | Should -Throw '*reserved name*'
+    }
+}
+
+Describe 'Backup result metadata' {
+    It 'recognizes only the exact successful completion record' {
+        $info = Get-M24BackupResultInfo -Lines @(
+            'Ergebnis: Fehlgeschlagen am 2026-07-20 12:00:00.'
+            'Ergebnis: Erfolgreich abgeschlossen am 2026-07-20 12:30:00.'
+        )
+
+        $info.IsComplete | Should -Be $true
+        $info.Result | Should -Be 'Erfolgreich abgeschlossen'
+        $info.CompletedAt.ToString('yyyy-MM-dd HH:mm:ss') | Should -Be '2026-07-20 12:30:00'
+    }
+
+    It 'does not accept missing, malformed, or incomplete result records' {
+        foreach ($lines in @(
+            @(),
+            @('Ergebnis: Erfolgreich abgeschlossen'),
+            @('Ergebnis: Erfolgreich abgeschlossen am ungültig.'),
+            @('Ergebnis: Fehlgeschlagen am 2026-07-20 12:30:00.')
+        )) {
+            (Get-M24BackupResultInfo -Lines $lines).IsComplete | Should -Be $false
+        }
     }
 }
 
@@ -1408,7 +1553,10 @@ Describe 'GUI worker launch and drive discovery contract' {
 
     It 'passes exact GUI ownership and the Verify policy to restore workers' {
         $script:launchTryText | Should -Match ([regex]::Escape("'-ParentProcessStartTimeUtcTicks'"))
-        $script:launchTryText | Should -Match ([regex]::Escape("@('-RestoreIntegrityPolicy', 'Verify')"))
+        $script:launchTryText | Should -Match "'-RestoreIntegrityPolicy'\s*,\s*'Verify'"
+        $script:launchTryText | Should -Match "'-BackupSource'"
+        $script:launchTryText | Should -Match "'-RestoreTargetMode'"
+        $script:launchTryText | Should -Match "'-RestoreTargetRoot'"
     }
 
     It 'uses distinct restore approval values while retaining scan-warning continue' {
@@ -1416,6 +1564,48 @@ Describe 'GUI worker launch and drive discovery contract' {
         $script:guiText | Should -Match 'verify-then-continue'
         $script:guiText | Should -Match 'continue-unverified'
         $script:guiText | Should -Match "SCANWARNUNG[\s\S]+-Value 'continue'"
+    }
+
+    It 'offers discovered backup sources and both simple restore target modes' {
+        $script:guiText | Should -Match 'Get-M24BackupInventory'
+        $script:guiText | Should -Match '\$backupSourceCombo'
+        $script:guiText | Should -Match 'In mein Benutzerprofil'
+        $script:guiText | Should -Match 'In einen anderen Ordner kopieren'
+        $script:guiText | Should -Match '\$selectedBackup\.IsUsable'
+    }
+
+    It 'disables restore target controls when no copyable backup is selected' {
+        $targetStateFunction = $script:guiAst.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Update-RestoreTargetState'
+            }, $true)
+        $targetStateFunction | Should -Not -BeNullOrEmpty
+        $targetStateFunction.Extent.Text | Should -Match '\$hasCopyableSelection'
+        $targetStateFunction.Extent.Text | Should -Match '\$restoreFolderRadio\.Enabled = \$folderAllowed'
+        $targetStateFunction.Extent.Text | Should -Match '\$restoreFolderButton\.Enabled = \$folderAllowed'
+        $targetStateFunction.Extent.Text | Should -Match '\$backupSourceCombo\.Enabled = \$isIdle -and \$hasInventoryEntries'
+    }
+
+    It 'keeps restore readiness popups out of automatic artifact refreshes' {
+        $artifactFunction = $script:guiAst.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Update-BackupArtifactActions'
+            }, $true)
+        $artifactFunction | Should -Not -BeNullOrEmpty
+        $artifactFunction.Extent.Text | Should -Not -Match 'MessageBox'
+        $script:guiText | Should -Match '\$startButton\.Add_Click\(\{[\s\S]+Bitte wählen Sie einen Zielordner aus'
+    }
+
+    It 'keeps deletion of a selected restore source limited to the current profile' {
+        $script:guiText | Should -Match '\$deleteBackupButton\.Enabled[\s\S]+IsCurrentProfile'
+        $script:guiText | Should -Match 'Get-M24BackupDeletionInfo[\s\S]+-Computer \$env:COMPUTERNAME -User \$env:USERNAME'
+    }
+
+    It 'shows migration identity only for profile restores and uses simple approval for folder copies' {
+        $script:guiText | Should -Match "IsMigration[\s\S]+TargetMode -eq 'Profile'"
+        $script:guiText | Should -Match "TargetMode -eq 'Folder'[\s\S]+?'continue'"
     }
 
     It 'acquires and releases the per-user GUI mutex' {
