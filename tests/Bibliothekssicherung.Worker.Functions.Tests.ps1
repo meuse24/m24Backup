@@ -11,6 +11,11 @@ BeforeAll {
     . (Join-Path $script:repoRoot 'M24Backup.Shared.ps1')
     # Der Worker verwendet den Kurznamen M fuer zweisprachige Texte.
     Set-Alias -Name M -Value Get-M24Text -Scope Script
+    # Sprache fest auf Deutsch setzen: Die Tests pruefen deutsche
+    # Meldungstexte. Ohne diese Festlegung haengt das Ergebnis von der
+    # UI-Kultur der Umgebung ab - ein CI-Runner laeuft typischerweise
+    # englisch und liesse jede Textpruefung fehlschlagen.
+    [void](Initialize-M24Localization -IsGerman $true)
 
     # Nur die Funktionsdefinitionen uebernehmen, nicht den Ablauf des Skripts.
     # Das Dot-Sourcing muss hier direkt stehen: Innerhalb einer Hilfsfunktion
