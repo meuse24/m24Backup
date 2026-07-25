@@ -149,6 +149,27 @@ Relative launchers are also included:
 - `Bibliothekssicherung starten.vbs` – normal launch without a console window
 - `Bibliothekssicherung starten.bat` – launch for diagnostic purposes
 
+### Tests
+
+The test suite requires [Pester 5](https://pester.dev/):
+
+```powershell
+Invoke-Pester -Path .\tests
+```
+
+| File | Scope |
+| --- | --- |
+| `M24Backup.Shared.Tests.ps1` | shared helpers, checksums, inventory, deletion |
+| `M24Backup.StatusProtocol.Tests.ps1` | status protocol contract, sender/receiver alignment |
+| `M24Backup.SourceIntegrity.Tests.ps1` | source invariants, including typographic quotes |
+| `Bibliothekssicherung.Worker.Tests.ps1` | worker parameter and result contract |
+| `Bibliothekssicherung.Worker.Functions.Tests.ps1` | worker flow functions in isolation |
+| `Bibliothekssicherung.Worker.Behavior.Tests.ps1` | complete backup and restore runs |
+
+The behavior tests launch the worker as a separate process and create a
+temporary drive via `subst` for it. They touch only their own test folders and
+do not require administrator rights. A full run takes about one minute.
+
 ### Building a release
 
 [Inno Setup 6](https://jrsoftware.org/isinfo.php) is required to build the

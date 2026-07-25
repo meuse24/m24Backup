@@ -1,10 +1,36 @@
-function Test-M24GermanUiCulture {
+﻿function Test-M24GermanUiCulture {
     try {
         $culture = [System.Globalization.CultureInfo]::CurrentUICulture
         return [bool]($culture -and $culture.TwoLetterISOLanguageName -eq 'de')
     } catch {
         return $false
     }
+}
+
+# Zweisprachige Oberflaechentexte. GUI und Worker verwendeten dafuer frueher je
+# eine eigene, identische Funktion (L bzw. M). Die Auswahl liegt jetzt einmal
+# hier; beide Skripte binden ihren gewohnten Kurznamen per Alias daran.
+$script:m24IsGerman = $null
+
+function Initialize-M24Localization {
+    # Legt die Sprache einmalig fest und gibt sie zurueck, damit der Aufrufer
+    # sie in einem Durchgang auch fuer eigene Abfragen uebernehmen kann.
+    param([Nullable[bool]]$IsGerman = $null)
+
+    $script:m24IsGerman = if ($null -eq $IsGerman) { Test-M24GermanUiCulture } else { [bool]$IsGerman }
+    return $script:m24IsGerman
+}
+
+function Get-M24Text {
+    param(
+        [Parameter(Position = 0)][string]$German,
+        [Parameter(Position = 1)][string]$English
+    )
+
+    # Ohne vorherige Initialisierung greift die Kultur des laufenden Prozesses.
+    if ($null -eq $script:m24IsGerman) { $script:m24IsGerman = Test-M24GermanUiCulture }
+    if ($script:m24IsGerman) { return $German }
+    return $English
 }
 
 function Get-ReservedBackupNames {
@@ -202,6 +228,145 @@ function ConvertTo-M24ProcessArgument {
     $escaped = $Argument -replace '(\\*)"', '$1$1\"'
     $escaped = $escaped -replace '(\\+)$', '$1$1'
     return '"' + $escaped + '"'
+}
+
+# --- Statusprotokoll zwischen Worker und Oberflaeche ------------------------
+#
+# Der Worker schreibt seinen Fortschritt als eine Zeile "<TYP>|<Feld>|<Feld>"
+# in die Statusdatei, die Oberflaeche liest sie per Timer. Frueher waren Typen
+# und Feldpositionen auf beiden Seiten als Literale hinterlegt; eine Aenderung
+# fiel erst zur Laufzeit auf. Der Vertrag steht deshalb jetzt einmal hier und
+# wird von beiden Seiten benutzt.
+
+function Get-M24StatusMessageContract {
+    # Zulaessige Feldformen je Nachrichtentyp, in Uebertragungsreihenfolge.
+    # Mehrere Formen bedeuten: Die Feldanzahl entscheidet, welche gilt.
+    return [ordered]@{
+        'VORSCHAU'        = @(, @('Text'))
+        'SCANWARNUNG'     = @(, @('Text'))
+        'STATUS'          = @(, @('Text'))
+        'FERTIG'          = @(, @('Text'))
+        'FEHLER'          = @(, @('Text'))
+        'ABGEBROCHEN'     = @(, @('Text'))
+        'PRUEFUNG'        = @(, @('Current', 'Total', 'FolderName'))
+        'PRUEFSUMME'      = @(, @('Current', 'Total', 'FolderName'))
+        'KOPIERVORGANG'   = @(, @('Current', 'Total', 'FolderName'))
+        'ABBRUCHLAEUFT'   = @(, @('Current', 'Total', 'FolderName'))
+        'FORTSCHRITT'     = @(, @('Current', 'Total', 'FolderName'))
+        'ABBRUCHWARTET'   = @(, @('Current', 'Total', 'FolderName', 'WaitedSeconds'))
+        'HASHFORTSCHRITT' = @(, @('Files', 'Bytes'))
+        # Die Integritaetspruefung meldet zuerst nur eine Ankuendigung und
+        # danach den Ordnerfortschritt.
+        'RESTOREPRUEFUNG' = @(@('Text'), @('Current', 'Total', 'FolderName'))
+    }
+}
+
+function Get-M24StatusMessageTypes {
+    return @((Get-M24StatusMessageContract).Keys)
+}
+
+function Test-M24StatusMessageType {
+    param([string]$Type)
+    return [bool]((Get-M24StatusMessageContract).Contains($Type))
+}
+
+function Format-M24StatusMessage {
+    # Baut eine Protokollzeile und prueft dabei Typ und Feldanzahl gegen den
+    # Vertrag. Ein unbekannter Typ oder eine falsche Feldzahl ist ein
+    # Programmierfehler und wird sofort gemeldet, nicht stillschweigend
+    # uebertragen.
+    param(
+        [Parameter(Mandatory = $true)][string]$Type,
+        [string[]]$Fields = @()
+    )
+
+    $contract = Get-M24StatusMessageContract
+    if (-not $contract.Contains($Type)) {
+        throw "Unknown status message type '$Type'."
+    }
+    $forms = @($contract[$Type])
+    $matchingForm = @($forms | Where-Object { $_.Count -eq $Fields.Count })
+    if ($matchingForm.Count -eq 0) {
+        $expected = ($forms | ForEach-Object { $_.Count }) -join ' or '
+        throw "Status message '$Type' expects $expected field(s), but $($Fields.Count) were supplied."
+    }
+    # Trennzeichen in Feldern wuerden die Empfaengerseite verschieben. Nur das
+    # letzte Textfeld darf sie enthalten, weil der Parser dort den Rest nimmt.
+    for ($index = 0; $index -lt $Fields.Count - 1; $index++) {
+        if ([string]$Fields[$index] -match '\|') {
+            throw "Status message '$Type' field $index must not contain '|'."
+        }
+    }
+    return (@($Type) + @($Fields)) -join '|'
+}
+
+function ConvertFrom-M24StatusMessage {
+    # Zerlegt eine Protokollzeile in benannte Felder. Das Ergebnis traegt
+    # immer alle bekannten Feldnamen, damit die Oberflaeche ohne
+    # Existenzpruefungen darauf zugreifen kann.
+    param([string]$Line)
+
+    $result = [pscustomobject]@{
+        Type          = ''
+        IsKnownType   = $false
+        Text          = ''
+        Current       = $null
+        Total         = $null
+        FolderName    = ''
+        Files         = $null
+        Bytes         = $null
+        WaitedSeconds = $null
+        Raw           = [string]$Line
+    }
+    if ([string]::IsNullOrWhiteSpace($Line)) { return $result }
+
+    $trimmed = ([string]$Line).Trim()
+    $separatorIndex = $trimmed.IndexOf('|')
+    $result.Type = if ($separatorIndex -lt 0) { $trimmed } else { $trimmed.Substring(0, $separatorIndex) }
+
+    $contract = Get-M24StatusMessageContract
+    if (-not $contract.Contains($result.Type)) { return $result }
+    $result.IsKnownType = $true
+
+    $payload = if ($separatorIndex -lt 0) { '' } else { $trimmed.Substring($separatorIndex + 1) }
+    $forms = @($contract[$result.Type])
+    $rawFields = @($payload -split '\|')
+
+    # Passende Form ueber die Feldanzahl waehlen; sonst die laengste, die
+    # vollstaendig belegt ist.
+    $form = @($forms | Where-Object { $_.Count -eq $rawFields.Count } | Select-Object -First 1)
+    if (-not $form) {
+        $form = @($forms | Where-Object { $_.Count -le $rawFields.Count } | Sort-Object { $_.Count } -Descending | Select-Object -First 1)
+    }
+    if (-not $form) { $form = @($forms | Sort-Object { $_.Count } | Select-Object -First 1) }
+    $fieldNames = @($form[0])
+
+    for ($index = 0; $index -lt $fieldNames.Count; $index++) {
+        $name = [string]$fieldNames[$index]
+        if ($index -ge $rawFields.Count) { break }
+        # Das letzte Textfeld nimmt den gesamten Rest auf, damit eine
+        # Fehlermeldung mit '|' nicht abgeschnitten wird.
+        $value = if ($name -eq 'Text' -and $index -eq $fieldNames.Count - 1) {
+            ($rawFields[$index..($rawFields.Count - 1)]) -join '|'
+        } else {
+            [string]$rawFields[$index]
+        }
+
+        switch ($name) {
+            { $_ -in @('Current', 'Total', 'WaitedSeconds') } {
+                $parsed = 0
+                if ([int]::TryParse($value, [ref]$parsed)) { $result.$name = $parsed }
+                break
+            }
+            { $_ -in @('Files', 'Bytes') } {
+                $parsed = [int64]0
+                if ([int64]::TryParse($value, [ref]$parsed)) { $result.$name = $parsed }
+                break
+            }
+            default { $result.$name = $value }
+        }
+    }
+    return $result
 }
 
 function Write-M24AtomicTextFile {
@@ -837,24 +1002,110 @@ function Get-M24DirectoryEntries {
     })
 }
 
+function New-M24HashBuffer {
+    # Ein Puffer je Scan statt je Datei. 1 MiB liegt oberhalb der Grenze von
+    # 85 KiB und landet damit im Large Object Heap, der nicht kompaktiert wird
+    # und Sammlungen der Generation 2 ausloest. Eine Allokation pro Datei war
+    # gemessen der groesste Einzelposten der Pruefsummenberechnung.
+    #
+    # Das fuehrende Komma ist zwingend: Ohne es entrollt PowerShell das Array
+    # beim Rueckgeben und der Aufrufer erhaelt ein object[] mit einzeln
+    # geboxten Bytes. Jeder Stream.Read() muesste dieses dann konvertieren,
+    # was die Pruefsummenberechnung um Groessenordnungen verlangsamt.
+    return , (New-Object byte[] (1MB))
+}
+
 function Get-M24FileSha256 {
-    param([string]$Path, [scriptblock]$CancelCallback)
+    param([string]$Path, [scriptblock]$CancelCallback, [byte[]]$Buffer)
     $stream = $null
     $sha = $null
     try {
         $stream = [System.IO.File]::Open((ConvertTo-M24ExtendedLengthPath $Path), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         $sha = [System.Security.Cryptography.SHA256]::Create()
-        $buffer = New-Object byte[] (1MB)
-        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        # Ohne uebergebenen Puffer verhaelt sich die Funktion wie bisher. Der
+        # Aufrufer kann denselben Puffer ueber einen ganzen Scan wiederverwenden;
+        # parallele Aufrufe muessen dann getrennte Puffer verwenden.
+        #
+        # Bewusst zwei Anweisungen statt einer if-Zuweisung: PowerShell entrollt
+        # ein Array, das als Wert eines if-Ausdrucks zurueckkommt, und sammelt es
+        # als object[] mit einzeln geboxten Bytes neu ein.
+        $workBuffer = $Buffer
+        if ($null -eq $workBuffer -or $workBuffer.Length -eq 0) { $workBuffer = New-M24HashBuffer }
+        # Read() darf jederzeit weniger Bytes liefern als angefordert, auch bei
+        # lokalen Dateien. Deshalb bleibt dies eine Schleife, und es werden
+        # ausschliesslich die tatsaechlich gelesenen Bytes gehasht. Wuerde hier
+        # $workBuffer.Length statt $read stehen, flossen bei einem geteilten
+        # Puffer Reste der vorherigen Datei in den Hash ein.
+        while (($read = $stream.Read($workBuffer, 0, $workBuffer.Length)) -gt 0) {
             if ($CancelCallback -and (& $CancelCallback)) { return $null }
-            [void]$sha.TransformBlock($buffer, 0, $read, $buffer, 0)
+            [void]$sha.TransformBlock($workBuffer, 0, $read, $null, 0)
         }
-        [void]$sha.TransformFinalBlock($buffer, 0, 0)
+        [void]$sha.TransformFinalBlock($workBuffer, 0, 0)
         return ([System.BitConverter]::ToString($sha.Hash)).Replace('-', '')
     } finally {
         if ($sha) { $sha.Dispose() }
         if ($stream) { $stream.Dispose() }
     }
+}
+
+function Test-M24Sha256HexValue {
+    # Ein beschaedigter Manifestwert wuerde bei jeder Folgesicherung erneut
+    # uebernommen und dadurch dauerhaft konserviert. Vor der Wiederverwendung
+    # wird deshalb das Format geprueft.
+    param([string]$Value)
+    if ($null -eq $Value -or $Value.Length -ne 64) { return $false }
+    return ($Value -match '^[0-9a-fA-F]{64}$')
+}
+
+function Get-M24ScanDirectories {
+    # Liefert den Startordner und alle zu durchsuchenden Unterordner.
+    #
+    # Bewusst nicht ueber Get-ChildItem -Recurse: Der FileSystem-Provider
+    # erzeugt pro Eintrag zusaetzliche Objekte und ist bei vielen kleinen
+    # Dateien um ein Vielfaches langsamer als DirectoryInfo. EnumerateDirectories
+    # liefert ausserdem kein vollstaendiges Array, was bei sehr grossen
+    # Verzeichnissen eine Sammelallokation vermeidet.
+    #
+    # Reparse Points werden nicht betreten. Das entspricht exakt dem Verhalten
+    # von Get-ChildItem -Recurse und verhindert, dass Junctions die Sicherung in
+    # fremde Baeume oder in Schleifen fuehren.
+    param(
+        [string]$Path,
+        [System.Collections.IList]$ErrorSink,
+        [scriptblock]$CancelCallback
+    )
+    $directories = New-Object 'System.Collections.Generic.List[System.IO.DirectoryInfo]'
+    $pending = New-Object 'System.Collections.Generic.Stack[System.IO.DirectoryInfo]'
+    $cancelled = $false
+    try {
+        $pending.Push((New-Object System.IO.DirectoryInfo $Path))
+    } catch {
+        [void]$ErrorSink.Add($_.Exception)
+        return [pscustomobject]@{ Directories = $directories; Cancelled = $false }
+    }
+    while ($pending.Count -gt 0) {
+        # Ein Abbruch waehrend der Aufzaehlung muss als Abbruch gemeldet werden.
+        # Wuerde hier nur eine unvollstaendige Liste zurueckkommen, hielte der
+        # Aufrufer den Scan faelschlich fuer vollstaendig und schriebe ein
+        # verkuerztes Manifest.
+        if ($CancelCallback -and (& $CancelCallback)) { $cancelled = $true; break }
+        $current = $pending.Pop()
+        $directories.Add($current)
+        # Ein unzugaenglicher Unterordner darf den gesamten Lauf nicht
+        # abbrechen; der Fehler wird gesammelt und der Aufrufer entscheidet.
+        # Die Ausnahme kann bei einer verzoegerten Aufzaehlung auch erst
+        # waehrend der Iteration auftreten, deshalb umschliesst der Schutz die
+        # gesamte Schleife und nicht nur deren Beginn.
+        try {
+            foreach ($child in $current.EnumerateDirectories()) {
+                if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                $pending.Push($child)
+            }
+        } catch {
+            [void]$ErrorSink.Add($_.Exception)
+        }
+    }
+    return [pscustomobject]@{ Directories = $directories; Cancelled = $cancelled }
 }
 
 function Read-M24ChecksumManifest {
@@ -907,6 +1158,41 @@ function Write-M24ChecksumManifest {
     }
 }
 
+function Get-M24ChecksumMetrics {
+    # EnumerationMilliseconds misst ausschliesslich das Durchlaufen der
+    # Verzeichnisstruktur. OverheadMilliseconds ist der Rest: Metadatenvergleich,
+    # Dateiaufzaehlung innerhalb eines Verzeichnisses, Ausschlussfilter,
+    # Dictionary-Pflege, Fortschrittsmeldungen und Fehlerbehandlung. Beide
+    # zusammen mit Hashen und Manifest-Ein-/Ausgabe ergeben die Gesamtdauer und
+    # zeigen im Protokoll, ob Datentraeger, Aufzaehlung oder CPU begrenzt.
+    param(
+        [System.Diagnostics.Stopwatch]$TotalWatch,
+        [System.Diagnostics.Stopwatch]$HashWatch,
+        [System.Diagnostics.Stopwatch]$EnumerationWatch,
+        [System.Diagnostics.Stopwatch]$ManifestReadWatch,
+        [System.Diagnostics.Stopwatch]$ManifestWriteWatch,
+        [int64]$HashedBytes
+    )
+    [int64]$total = $TotalWatch.ElapsedMilliseconds
+    [int64]$hash = $HashWatch.ElapsedMilliseconds
+    [int64]$enumeration = if ($EnumerationWatch) { $EnumerationWatch.ElapsedMilliseconds } else { 0 }
+    [int64]$read = if ($ManifestReadWatch) { $ManifestReadWatch.ElapsedMilliseconds } else { 0 }
+    [int64]$write = if ($ManifestWriteWatch) { $ManifestWriteWatch.ElapsedMilliseconds } else { 0 }
+    [int64]$overhead = $total - $hash - $enumeration - $read - $write
+    if ($overhead -lt 0) { $overhead = 0 }
+    $hashSeconds = $HashWatch.Elapsed.TotalSeconds
+    $throughput = if ($hashSeconds -gt 0) { [math]::Round((($HashedBytes / 1MB) / $hashSeconds), 1) } else { [double]0 }
+    return [pscustomobject]@{
+        EnumerationMilliseconds = $enumeration
+        OverheadMilliseconds = $overhead
+        HashMilliseconds = $hash
+        ManifestReadMilliseconds = $read
+        ManifestWriteMilliseconds = $write
+        TotalMilliseconds = $total
+        AverageHashMegabytesPerSecond = $throughput
+    }
+}
+
 function Update-M24ChecksumManifest {
     param(
         [array]$Folders,
@@ -914,57 +1200,149 @@ function Update-M24ChecksumManifest {
         [string[]]$ExcludedFiles,
         [switch]$ForceRehash,
         [scriptblock]$StatusCallback,
-        [scriptblock]$CancelCallback
+        [scriptblock]$CancelCallback,
+        [scriptblock]$ProgressCallback
     )
+    $totalWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $hashWatch = New-Object System.Diagnostics.Stopwatch
+    $enumerationWatch = New-Object System.Diagnostics.Stopwatch
+    $manifestReadWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $manifest = Read-M24ChecksumManifest -Path $ManifestPath
+    $manifestReadWatch.Stop()
     $entries = $manifest.Entries
     [int64]$fileCount = 0; [int64]$hashedFiles = 0; [int64]$reusedFiles = 0; [int64]$totalBytes = 0
+    [int64]$hashedBytes = 0; [int64]$reusedBytes = 0
     [int64]$skippedDeviceFiles = 0
+    # Ein Puffer fuer den gesamten Lauf statt einer Allokation je Datei.
+    $buffer = New-M24HashBuffer
+    $progressWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $progressReported = $false
     $folderIndex = 0
     foreach ($folder in $Folders) {
         $folderIndex++
         if ($StatusCallback) { & $StatusCallback $folderIndex @($Folders).Count $folder.Name }
-        $scanErrors = @()
+        $scanErrors = New-Object 'System.Collections.Generic.List[object]'
         $cancelled = $false
-        Get-ChildItem -LiteralPath $folder.Path -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors | ForEach-Object {
-            $file = $_
-            if ($cancelled) { return }
-            if ($CancelCallback -and (& $CancelCallback)) { $cancelled = $true; return }
-            if (Test-M24ExcludedFileName -Name $file.Name -Patterns $ExcludedFiles) { return }
-            $relative = $file.FullName.Substring($folder.Path.TrimEnd('\').Length).TrimStart('\')
-            $entryPath = "{0}\{1}" -f $folder.Name, $relative
-            $existing = if ($entries.ContainsKey($entryPath)) { $entries[$entryPath] } else { $null }
-            $hash = $null
-            # Zielmetadaten werden exakt verglichen. Eine Zeit-Toleranz koennte
-            # gleich grosse, innerhalb des FAT/exFAT-Fensters geaenderte Dateien uebersehen.
-            if (-not $ForceRehash -and $existing -and $existing.Length -eq $file.Length -and $existing.LastWriteUtcTicks -eq $file.LastWriteTimeUtc.Ticks) {
-                $hash = $existing.Sha256; $reusedFiles++
-            } else {
-                try {
-                    $hash = Get-M24FileSha256 -Path $file.FullName -CancelCallback $CancelCallback
-                } catch {
-                    # Nur Dateien mit reservierten Geraetenamen (z. B. "nul")
-                    # duerfen bei einem Zugriffsfehler stillschweigend ohne
-                    # Pruefsumme bleiben; echte Lesefehler brechen weiter ab.
-                    if (Test-M24ReservedDeviceFileName -Name $file.Name) {
-                        $skippedDeviceFiles++
-                        return
+        $fatalError = $null
+        $rootLength = ([string]$folder.Path).TrimEnd('\').Length
+        $enumerationWatch.Start()
+        try {
+            $scan = Get-M24ScanDirectories -Path $folder.Path -ErrorSink $scanErrors -CancelCallback $CancelCallback
+        } finally {
+            $enumerationWatch.Stop()
+        }
+        if ($scan.Cancelled) { $cancelled = $true }
+        foreach ($directory in $scan.Directories) {
+            if ($cancelled -or $fatalError) { break }
+            try {
+                foreach ($file in $directory.EnumerateFiles()) {
+                    if ($CancelCallback -and (& $CancelCallback)) { $cancelled = $true; break }
+                    if (Test-M24ExcludedFileName -Name $file.Name -Patterns $ExcludedFiles) { continue }
+                    $relative = $file.FullName.Substring($rootLength).TrimStart('\')
+                    $entryPath = "{0}\{1}" -f $folder.Name, $relative
+                    $existing = if ($entries.ContainsKey($entryPath)) { $entries[$entryPath] } else { $null }
+                    $hash = $null
+                    # Zielmetadaten werden exakt verglichen. Eine Zeit-Toleranz koennte
+                    # gleich grosse, innerhalb des FAT/exFAT-Fensters geaenderte Dateien uebersehen.
+                    # Ein formal ungueltiger Altwert wird nicht uebernommen, sondern
+                    # neu berechnet; sonst bliebe eine Beschaedigung dauerhaft erhalten.
+                    [int64]$entryLength = $file.Length
+                    [int64]$entryTicks = $file.LastWriteTimeUtc.Ticks
+                    if (-not $ForceRehash -and $existing -and $existing.Length -eq $entryLength -and $existing.LastWriteUtcTicks -eq $entryTicks -and (Test-M24Sha256HexValue -Value ([string]$existing.Sha256))) {
+                        $hash = $existing.Sha256; $reusedFiles++; $reusedBytes += $entryLength
+                    } else {
+                        # Die Metadaten stammen aus der Aufzaehlung, der Hash aus
+                        # einem spaeteren Lesevorgang. Aendert sich die Datei
+                        # dazwischen, beschriebe der Manifesteintrag eine
+                        # Kombination, die es nie gab. Deshalb wird nach dem
+                        # Hashen geprueft, ob Groesse und Zeitstempel noch
+                        # stimmen; eine einmalige Aenderung fuehrt zu einem
+                        # zweiten Versuch, anhaltende Instabilitaet zum Abbruch.
+                        # Die Pruefung ist bewusst hier eingebettet: Eine eigene
+                        # Funktion je Datei kostete in der Messung mehr als der
+                        # zusaetzliche Metadatenzugriff selbst.
+                        $hash = $null
+                        $hashAttempts = 0
+                        $hashStable = $false
+                        $deviceSkipped = $false
+                        while (-not $hashStable -and $hashAttempts -lt 2) {
+                            $hashAttempts++
+                            $entryLength = [int64]$file.Length
+                            $entryTicks = [int64]$file.LastWriteTimeUtc.Ticks
+                            $hashWatch.Start()
+                            try {
+                                $hash = Get-M24FileSha256 -Path $file.FullName -CancelCallback $CancelCallback -Buffer $buffer
+                            } catch {
+                                # Nur Dateien mit reservierten Geraetenamen (z. B. "nul")
+                                # duerfen bei einem Zugriffsfehler stillschweigend ohne
+                                # Pruefsumme bleiben; echte Lesefehler brechen weiter ab.
+                                if (Test-M24ReservedDeviceFileName -Name $file.Name) { $deviceSkipped = $true }
+                                else { $fatalError = $_.Exception }
+                            } finally {
+                                $hashWatch.Stop()
+                            }
+                            if ($deviceSkipped -or $fatalError) { break }
+                            if ($null -eq $hash) { $cancelled = $true; break }
+                            try {
+                                $file.Refresh()
+                                $hashStable = ([int64]$file.Length -eq $entryLength -and [int64]$file.LastWriteTimeUtc.Ticks -eq $entryTicks)
+                            } catch {
+                                $fatalError = New-Object System.IO.IOException ("File disappeared while it was being hashed: {0}" -f $file.FullName)
+                                break
+                            }
+                        }
+                        if ($deviceSkipped) { $skippedDeviceFiles++; continue }
+                        if ($fatalError -or $cancelled) { break }
+                        if (-not $hashStable) {
+                            $fatalError = New-Object System.IO.IOException ("File kept changing while it was being hashed: {0}" -f $file.FullName)
+                            break
+                        }
+                        $hashedFiles++; $hashedBytes += $entryLength
                     }
-                    throw
+                    $entries[$entryPath] = [pscustomobject]@{ Path = $entryPath; Length = $entryLength; LastWriteUtcTicks = $entryTicks; Sha256 = $hash }
+                    $fileCount++; $totalBytes += $entryLength
+                    # Die erste Meldung kommt sofort, damit die Oberflaeche nicht
+                    # stumm bleibt; danach gedrosselt, weil ein Ereignis je Datei
+                    # bei kleinen Dateien selbst zum Leistungsproblem wuerde.
+                    if ($ProgressCallback -and (-not $progressReported -or $progressWatch.ElapsedMilliseconds -ge 250)) {
+                        $progressReported = $true
+                        $progressWatch.Restart()
+                        & $ProgressCallback $fileCount $totalBytes $directory.FullName
+                    }
                 }
-                if ($null -eq $hash) { $cancelled = $true; return }
-                $hashedFiles++
+            } catch {
+                # Aufzaehlungsfehler werden gesammelt, nicht verschluckt.
+                [void]$scanErrors.Add($_.Exception)
             }
-            $entries[$entryPath] = [pscustomobject]@{ Path = $entryPath; Length = [int64]$file.Length; LastWriteUtcTicks = [int64]$file.LastWriteTimeUtc.Ticks; Sha256 = $hash }
-            $fileCount++; $totalBytes += $file.Length
         }
         # Ein unvollstaendiger Scan darf niemals als neues gueltiges Manifest
         # geschrieben werden. Der Worker markiert den gesamten Lauf als Fehler.
-        if ($scanErrors.Count) { throw $scanErrors[0].Exception }
-        if ($cancelled) { return [pscustomobject]@{ Cancelled = $true } }
+        if ($fatalError) { throw $fatalError }
+        if ($scanErrors.Count) { throw $scanErrors[0] }
+        if ($cancelled) { return [pscustomobject]@{ Cancelled = $true; Files = $fileCount; HashedFiles = $hashedFiles; ReusedFiles = $reusedFiles; Bytes = $totalBytes; SkippedDeviceFiles = $skippedDeviceFiles } }
     }
+    $manifestWriteWatch = [System.Diagnostics.Stopwatch]::StartNew()
     Write-M24ChecksumManifest -Path $ManifestPath -Entries $entries
-    return [pscustomobject]@{ Cancelled = $false; Files = $fileCount; HashedFiles = $hashedFiles; ReusedFiles = $reusedFiles; Bytes = $totalBytes; SkippedDeviceFiles = $skippedDeviceFiles }
+    $manifestWriteWatch.Stop()
+    $totalWatch.Stop()
+    $metrics = Get-M24ChecksumMetrics -TotalWatch $totalWatch -HashWatch $hashWatch -EnumerationWatch $enumerationWatch -ManifestReadWatch $manifestReadWatch -ManifestWriteWatch $manifestWriteWatch -HashedBytes $hashedBytes
+    return [pscustomobject]@{
+        Cancelled = $false
+        Files = $fileCount
+        HashedFiles = $hashedFiles
+        ReusedFiles = $reusedFiles
+        Bytes = $totalBytes
+        HashedBytes = $hashedBytes
+        ReusedBytes = $reusedBytes
+        SkippedDeviceFiles = $skippedDeviceFiles
+        EnumerationMilliseconds = $metrics.EnumerationMilliseconds
+        OverheadMilliseconds = $metrics.OverheadMilliseconds
+        HashMilliseconds = $metrics.HashMilliseconds
+        ManifestReadMilliseconds = $metrics.ManifestReadMilliseconds
+        ManifestWriteMilliseconds = $metrics.ManifestWriteMilliseconds
+        TotalMilliseconds = $metrics.TotalMilliseconds
+        AverageHashMegabytesPerSecond = $metrics.AverageHashMegabytesPerSecond
+    }
 }
 
 function Test-M24ChecksumManifest {
@@ -973,57 +1351,104 @@ function Test-M24ChecksumManifest {
         [string]$ManifestPath,
         [string[]]$ExcludedFiles,
         [scriptblock]$StatusCallback,
-        [scriptblock]$CancelCallback
+        [scriptblock]$CancelCallback,
+        [scriptblock]$ProgressCallback
     )
+    $totalWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $hashWatch = New-Object System.Diagnostics.Stopwatch
+    $enumerationWatch = New-Object System.Diagnostics.Stopwatch
+    $manifestReadWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $manifest = Read-M24ChecksumManifest -Path $ManifestPath
+    $manifestReadWatch.Stop()
     if (-not $manifest.Exists) {
         return [pscustomobject]@{ Cancelled = $false; MissingManifest = $true; Files = 0; Bytes = 0; ErrorCount = 1; Errors = @('Checksum manifest missing.') }
     }
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     [int64]$files = 0; [int64]$bytes = 0; [int]$errorCount = 0; $errors = @(); $folderIndex = 0
+    # Ein Puffer fuer den gesamten Lauf statt einer Allokation je Datei.
+    $buffer = New-M24HashBuffer
+    $progressWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $progressReported = $false
     foreach ($folder in $Folders) {
         $folderIndex++
         if ($StatusCallback) { & $StatusCallback $folderIndex @($Folders).Count $folder.Name }
-        $scanErrors = @()
+        $scanErrors = New-Object 'System.Collections.Generic.List[object]'
         $cancelled = $false
-        Get-ChildItem -LiteralPath $folder.Path -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors | ForEach-Object {
-            $file = $_
-            if ($cancelled) { return }
-            if ($CancelCallback -and (& $CancelCallback)) {
-                $cancelled = $true
-                return
-            }
-            if (Test-M24ExcludedFileName -Name $file.Name -Patterns $ExcludedFiles) { return }
-            $relative = $file.FullName.Substring($folder.Path.TrimEnd('\').Length).TrimStart('\')
-            $path = "{0}\{1}" -f $folder.Name, $relative
-            [void]$seen.Add($path)
+        $rootLength = ([string]$folder.Path).TrimEnd('\').Length
+        $enumerationWatch.Start()
+        try {
+            $scan = Get-M24ScanDirectories -Path $folder.Path -ErrorSink $scanErrors -CancelCallback $CancelCallback
+        } finally {
+            $enumerationWatch.Stop()
+        }
+        if ($scan.Cancelled) { $cancelled = $true }
+        foreach ($directory in $scan.Directories) {
+            if ($cancelled) { break }
             try {
-                $hash = Get-M24FileSha256 -Path $file.FullName -CancelCallback $CancelCallback
-                if ($null -eq $hash) {
-                    $cancelled = $true
-                    return
+                foreach ($file in $directory.EnumerateFiles()) {
+                    if ($CancelCallback -and (& $CancelCallback)) { $cancelled = $true; break }
+                    if (Test-M24ExcludedFileName -Name $file.Name -Patterns $ExcludedFiles) { continue }
+                    $relative = $file.FullName.Substring($rootLength).TrimStart('\')
+                    $path = "{0}\{1}" -f $folder.Name, $relative
+                    [void]$seen.Add($path)
+                    try {
+                        $hashWatch.Start()
+                        try {
+                            $hash = Get-M24FileSha256 -Path $file.FullName -CancelCallback $CancelCallback -Buffer $buffer
+                        } finally {
+                            $hashWatch.Stop()
+                        }
+                        if ($null -eq $hash) { $cancelled = $true; break }
+                        $files++; $bytes += $file.Length
+                        if (-not $manifest.Entries.ContainsKey($path)) { throw "Checksum entry missing: $path" }
+                        if (-not $hash.Equals([string]$manifest.Entries[$path].Sha256, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Checksum mismatch: $path" }
+                    } catch {
+                        # Dateien mit reservierten Geraetenamen (z. B. "nul") gelten
+                        # nie als Integritaetsfehler; sie sind Artefakte ohne Nutzwert.
+                        if (Test-M24ReservedDeviceFileName -Name $file.Name) { continue }
+                        $errorCount++; if ($errors.Count -lt 10) { $errors += $_.Exception.Message }
+                    }
+                    # Die erste Meldung kommt sofort, damit die Oberflaeche nicht
+                    # stumm bleibt; danach gedrosselt, weil ein Ereignis je Datei
+                    # bei kleinen Dateien selbst zum Leistungsproblem wuerde.
+                    if ($ProgressCallback -and (-not $progressReported -or $progressWatch.ElapsedMilliseconds -ge 250)) {
+                        $progressReported = $true
+                        $progressWatch.Restart()
+                        & $ProgressCallback $files $bytes $directory.FullName
+                    }
                 }
-                $files++; $bytes += $file.Length
-                if (-not $manifest.Entries.ContainsKey($path)) { throw "Checksum entry missing: $path" }
-                if (-not $hash.Equals([string]$manifest.Entries[$path].Sha256, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Checksum mismatch: $path" }
             } catch {
-                # Dateien mit reservierten Geraetenamen (z. B. "nul") gelten
-                # nie als Integritaetsfehler; sie sind Artefakte ohne Nutzwert.
-                if (Test-M24ReservedDeviceFileName -Name $file.Name) { return }
-                $errorCount++; if ($errors.Count -lt 10) { $errors += $_.Exception.Message }
+                # Aufzaehlungsfehler werden gesammelt, nicht verschluckt.
+                [void]$scanErrors.Add($_.Exception)
             }
         }
         if ($cancelled) {
             return [pscustomobject]@{ Cancelled = $true; MissingManifest = $false; Files = $files; Bytes = $bytes; ErrorCount = $errorCount; Errors = @($errors) }
         }
-        foreach ($scanError in $scanErrors) { $errorCount++; if ($errors.Count -lt 10) { $errors += $scanError.Exception.Message } }
+        foreach ($scanError in $scanErrors) { $errorCount++; if ($errors.Count -lt 10) { $errors += $scanError.Message } }
     }
     foreach ($entry in $manifest.Entries.Values) {
         $entryLeafName = Split-Path -Path ([string]$entry.Path) -Leaf
         if (Test-M24ReservedDeviceFileName -Name $entryLeafName) { continue }
         if (-not $seen.Contains([string]$entry.Path)) { $errorCount++; if ($errors.Count -lt 10) { $errors += "File missing: $($entry.Path)" } }
     }
-    return [pscustomobject]@{ Cancelled = $false; MissingManifest = $false; Files = $files; Bytes = $bytes; ErrorCount = $errorCount; Errors = @($errors) }
+    $totalWatch.Stop()
+    $metrics = Get-M24ChecksumMetrics -TotalWatch $totalWatch -HashWatch $hashWatch -EnumerationWatch $enumerationWatch -ManifestReadWatch $manifestReadWatch -ManifestWriteWatch $null -HashedBytes $bytes
+    return [pscustomobject]@{
+        Cancelled = $false
+        MissingManifest = $false
+        Files = $files
+        Bytes = $bytes
+        HashedBytes = $bytes
+        ErrorCount = $errorCount
+        Errors = @($errors)
+        EnumerationMilliseconds = $metrics.EnumerationMilliseconds
+        OverheadMilliseconds = $metrics.OverheadMilliseconds
+        HashMilliseconds = $metrics.HashMilliseconds
+        ManifestReadMilliseconds = $metrics.ManifestReadMilliseconds
+        TotalMilliseconds = $metrics.TotalMilliseconds
+        AverageHashMegabytesPerSecond = $metrics.AverageHashMegabytesPerSecond
+    }
 }
 
 function Get-M24ChecksumVerifiedDate {
@@ -1143,6 +1568,36 @@ function Get-M24BackupRoot {
         [string]$User = $env:USERNAME
     )
     return Join-Path $Drive ("Bibliothekssicherung\{0}_{1}" -f $Computer, $User)
+}
+
+function Test-M24BackupExistsOnDrive {
+    # Wurde von diesem Computer und Benutzer schon einmal auf dieses Laufwerk
+    # gesichert? Ausschlaggebend ist die Metadatendatei: Der Worker legt sie
+    # vor dem ersten Kopiervorgang an, sie belegt also auch einen
+    # abgebrochenen oder fehlgeschlagenen Versuch.
+    #
+    # Die Oberflaeche entscheidet daran, ob eine einmalige Rueckfrage zur
+    # Laufwerkswahl noch angebracht ist. Ein Erfolg wird bewusst nicht
+    # verlangt - die Wahl des Ziels war auch dann schon eine bewusste.
+    param(
+        [string]$Drive,
+        [string]$Computer = $env:COMPUTERNAME,
+        [string]$User = $env:USERNAME
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Drive)) { return $false }
+    # Lokal auf Stop: Ein abgezogenes Laufwerk laesst Join-Path scheitern.
+    # Ohne diese Festlegung haengt es von der Aufrufumgebung ab, ob daraus
+    # eine Ausnahme oder eine Ausgabe im Fehlerstrom wird.
+    $ErrorActionPreference = 'Stop'
+    try {
+        $metadataFile = Join-Path (Get-M24BackupRoot -Drive $Drive -Computer $Computer -User $User) '_Sicherungsinfo.txt'
+        return [bool](Test-Path -LiteralPath $metadataFile -PathType Leaf)
+    } catch {
+        # Ohne auswertbaren Pfad gilt die Sicherung als nicht vorhanden; die
+        # Rueckfrage erscheint dann lieber einmal zu viel als zu wenig.
+        return $false
+    }
 }
 
 function Get-M24BackupMetadataIdentity {

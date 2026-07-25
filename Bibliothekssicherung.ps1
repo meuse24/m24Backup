@@ -69,12 +69,10 @@ if (Test-Path -LiteralPath $sharedScript -PathType Leaf) {
     throw "Shared helper script not found: $sharedScript"
 }
 
-$script:isGerman = Test-M24GermanUiCulture
-function M {
-    param([string]$German, [string]$English)
-    if ($script:isGerman) { return $German }
-    return $English
-}
+# M bleibt der gewohnte Kurzname fuer zweisprachige Texte, verweist aber auf
+# die gemeinsame Implementierung in M24Backup.Shared.ps1.
+$script:isGerman = Initialize-M24Localization
+Set-Alias -Name M -Value Get-M24Text -Scope Script
 
 function Write-AtomicJsonFile {
     [CmdletBinding()]
@@ -162,7 +160,7 @@ trap {
     }
     if ($StatusFile) {
         try {
-            Write-M24AtomicTextFile -Path $StatusFile -Content ("FEHLER|{0}" -f $_.Exception.Message)
+            Write-M24AtomicTextFile -Path $StatusFile -Content (Format-M24StatusMessage -Type 'FEHLER' -Fields @($_.Exception.Message))
         } catch {
             # Ein Fehler beim optionalen GUI-Status darf den Originalfehler nicht verdecken.
         }
@@ -219,17 +217,26 @@ if ($DryRun -and $Mode -ne 'Backup') {
 }
 
 function Write-BackupStatus {
+    # -Text ist die Kurzform fuer Meldungen mit einem einzigen Textfeld;
+    # -Fields uebergibt mehrteilige Nachrichten. Typ und Feldanzahl prueft
+    # Format-M24StatusMessage gegen den gemeinsamen Vertrag in
+    # M24Backup.Shared.ps1.
     param(
         [string]$Type,
-        [string]$Text
+        [string]$Text,
+        [string[]]$Fields
     )
 
-    if ($StatusFile) {
-        try {
-            Write-M24AtomicTextFile -Path $StatusFile -Content ("{0}|{1}" -f $Type, $Text)
-        } catch {
-            # Die Sicherung laeuft weiter, falls nur die GUI-Statusdatei nicht schreibbar ist.
-        }
+    if (-not $StatusFile) { return }
+
+    $payload = if ($PSBoundParameters.ContainsKey('Fields')) { @($Fields) } else { @($Text) }
+    # Bewusst ausserhalb des catch: Ein Vertragsbruch ist ein Programmierfehler
+    # und darf nicht als vermeintliches Dateiproblem untergehen.
+    $line = Format-M24StatusMessage -Type $Type -Fields $payload
+    try {
+        Write-M24AtomicTextFile -Path $StatusFile -Content $line
+    } catch {
+        # Die Sicherung laeuft weiter, falls nur die GUI-Statusdatei nicht schreibbar ist.
     }
 }
 
@@ -258,7 +265,7 @@ function Get-WorkerCancellationMessage {
     if ($Reason -eq 'GuiExited') {
         return M 'Die Bedienoberflaeche wurde unerwartet geschlossen; der Vorgang wurde kontrolliert beendet.' 'The user interface closed unexpectedly; the operation was stopped safely.'
     }
-    return $(if ($Mode -eq 'Restore') { M 'Wiederherstellung wurde auf Wunsch beendet.' 'Restore was cancelled by request.' } else { M 'Sicherung wurde auf Wunsch beendet.' 'Backup was cancelled by request.' })
+    return (Get-OperationLabels -OperationMode $Mode -DryRun ([bool]$DryRun)).Cancelled
 }
 
 function Stop-M24CancelledOperation {
@@ -351,7 +358,7 @@ function Invoke-RobocopyWithCancel {
         while (-not $process.WaitForExit(500)) {
             $cancellation = Get-WorkerCancellationState
             if ($cancellation.Requested) {
-                Write-BackupStatus -Type 'ABBRUCHLAEUFT' -Text ("{0}|{1}|{2}" -f $CurrentFolder, $TotalFolders, $FolderName)
+                Write-BackupStatus -Type 'ABBRUCHLAEUFT' -Fields $CurrentFolder, $TotalFolders, $FolderName
                 try {
                     if (-not $process.HasExited) { $process.Kill() }
                 } catch {
@@ -366,14 +373,14 @@ function Invoke-RobocopyWithCancel {
                             if (-not $process.HasExited) { $process.Kill() }
                         } catch {}
                     }
-                    Write-BackupStatus -Type 'ABBRUCHWARTET' -Text ("{0}|{1}|{2}|{3}" -f $CurrentFolder, $TotalFolders, $FolderName, $waitedSeconds)
+                    Write-BackupStatus -Type 'ABBRUCHWARTET' -Fields $CurrentFolder, $TotalFolders, $FolderName, $waitedSeconds
                 }
                 return [pscustomobject]@{ Cancelled = $true; CancellationState = $cancellation; ExitCode = 20; HardStopped = $true }
             }
 
             $now = Get-Date
             if (($now - $lastStatusAt).TotalSeconds -ge 2) {
-                Write-BackupStatus -Type 'KOPIERVORGANG' -Text ("{0}|{1}|{2}" -f $CurrentFolder, $TotalFolders, $FolderName)
+                Write-BackupStatus -Type 'KOPIERVORGANG' -Fields $CurrentFolder, $TotalFolders, $FolderName
                 $lastStatusAt = $now
             }
         }
@@ -438,7 +445,7 @@ function Get-BackupPreflight {
             if ($cancelState.Requested) { return [pscustomobject]@{ Cancelled = $true; CancellationState = $cancelState } }
         }
         $index++
-        Write-BackupStatus -Type 'PRUEFUNG' -Text ("{0}|{1}|{2}" -f $index, @($Folders).Count, $folder.Name)
+        Write-BackupStatus -Type 'PRUEFUNG' -Fields $index, @($Folders).Count, $folder.Name
         try {
             $folderScanWarnings = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             $folderScanNotices = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -787,6 +794,598 @@ function Test-IsCustomFolderSpec {
     return ([string]$value).Trim().Equals('true', [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+# --- Ordneraufloesung -------------------------------------------------------
+#
+# Backup und Restore ermitteln ihre Ordnerliste auf grundverschiedene Weise.
+# Frueher stand beides als zwei grosse if-Bloecke im Hauptablauf; die
+# Zuordnungsregeln sind jetzt je Betriebsart in einer eigenen Funktion
+# gebuendelt und ohne kompletten Lauf pruefbar.
+
+function Read-RestoreSourceIdentity {
+    # Wer hat diese Sicherung erstellt und ist sie vollstaendig? Nicht lesbare
+    # Metadaten sind kein Fehler, sondern schraenken nur die Zielwahl ein.
+    param([string]$MetadataFile)
+
+    $identity = [pscustomobject]@{
+        Computer         = ''
+        User             = ''
+        MetadataReadable = $false
+        IsMigration      = $false
+        IsComplete       = $false
+    }
+    if (-not (Test-Path -LiteralPath $MetadataFile -PathType Leaf)) { return $identity }
+
+    try {
+        $lines = @(Get-Content -LiteralPath $MetadataFile -ErrorAction Stop)
+        $sourceIdentity = Get-M24BackupMetadataIdentity -Lines $lines
+        $identity.Computer = [string]$sourceIdentity.Computer
+        $identity.User = [string]$sourceIdentity.User
+        $identity.MetadataReadable = -not [string]::IsNullOrWhiteSpace($identity.Computer) -and
+            -not [string]::IsNullOrWhiteSpace($identity.User)
+        $identity.IsMigration = $identity.MetadataReadable -and
+            -not (Test-M24BackupMetadataIdentity -Lines $lines)
+        $identity.IsComplete = [bool](Get-M24BackupResultInfo -Lines $lines).IsComplete
+    } catch {
+        $identity.MetadataReadable = $false
+    }
+    return $identity
+}
+
+function Resolve-RestoreTargetRoot {
+    # Prueft die Zielwahl und liefert bei 'Folder' die validierte Zielwurzel.
+    # Fuer 'Profile' gibt es keine Wurzel; dort entscheidet je Ordner die
+    # Zuordnung in Resolve-RestoreFolderDefinitions.
+    param(
+        [ValidateSet('Profile', 'Folder')][string]$TargetMode,
+        [string]$TargetRoot,
+        [string]$BackupSourcePath,
+        [string]$BackupDisplayName,
+        $SourceIdentity
+    )
+
+    if ($TargetMode -eq 'Profile') {
+        if (-not $SourceIdentity.MetadataReadable) {
+            throw (M 'Die Sicherungsmetadaten sind nicht lesbar. Diese Sicherung kann nur in einen separaten Ordner kopiert werden.' 'The backup metadata is not readable. This backup can only be copied to a separate folder.')
+        }
+        if (-not $SourceIdentity.IsComplete) {
+            throw (M 'Die Sicherung ist nicht vollständig. Sie kann nur in einen separaten Ordner kopiert werden.' 'The backup is incomplete. It can only be copied to a separate folder.')
+        }
+        return $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
+        throw (M 'Für das Kopieren ist ein Zielordner erforderlich.' 'A destination folder is required for copying.')
+    }
+    $selectedTargetRoot = Assert-SafeRestoreTargetPath -Name (M 'Zielordner' 'Destination folder') -Path $TargetRoot
+    Assert-ValidBackupFolderName -Name $BackupDisplayName
+    $resolved = Assert-SafeRestoreTargetPath -Name $BackupDisplayName -Path (Join-Path $selectedTargetRoot $BackupDisplayName)
+    if (Test-IsSameOrNestedPath -FirstPath $BackupSourcePath -SecondPath $resolved) {
+        throw (M 'Sicherungsquelle und Wiederherstellungsziel dürfen nicht ineinander liegen.' 'Backup source and restore destination must not overlap.')
+    }
+    return $resolved
+}
+
+function Resolve-RestoreFolderDefinitions {
+    # Ordnet jedem Ordner der Sicherung sein Wiederherstellungsziel zu.
+    # Reihenfolge der Regeln: separater Zielordner, Standardbibliothek,
+    # eigener Zusatzordner am Originalpfad, sonst gesammelt unter
+    # "Wiederhergestellte Ordner".
+    param(
+        [string]$BackupSourcePath,
+        $StandardDefinitions,
+        [string]$FolderMetadataFile,
+        [ValidateSet('Profile', 'Folder')][string]$TargetMode,
+        [string]$ResolvedTargetRoot,
+        [bool]$IsMigration,
+        [string]$BackupDisplayName
+    )
+
+    $standardByName = @{}
+    foreach ($definition in $StandardDefinitions) { $standardByName[[string]$definition.Name] = $definition }
+    $customMetadataByName = @{}
+    foreach ($customMetadata in @(Read-CustomFolderMetadata -Path $FolderMetadataFile)) {
+        if ($customMetadata.Name) { $customMetadataByName[[string]$customMetadata.Name] = $customMetadata }
+    }
+
+    $sourceDirectories = @(Get-ChildItem -LiteralPath $BackupSourcePath -Directory -Force -ErrorAction Stop |
+        Where-Object {
+            -not $_.Name.StartsWith('_') -and
+            ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0
+        })
+
+    $restoreDefinitions = @()
+    foreach ($sourceDirectory in $sourceDirectories) {
+        $restoreName = [string]$sourceDirectory.Name
+        Assert-ValidBackupFolderName -Name $restoreName
+        $isStandard = $standardByName.ContainsKey($restoreName)
+        if ($TargetMode -eq 'Folder') {
+            $restorePath = Assert-SafeRestoreTargetPath -Name $restoreName -Path (Join-Path $ResolvedTargetRoot $restoreName)
+        } elseif ($isStandard) {
+            $restorePath = Assert-SafeRestoreTargetPath -Name $restoreName -Path ([string]$standardByName[$restoreName].Path)
+        } elseif (-not $IsMigration -and $customMetadataByName.ContainsKey($restoreName) -and $customMetadataByName[$restoreName].OriginalPath) {
+            # Bestehendes Verhalten fuer die eigene Profilsicherung.
+            $restorePath = Assert-SafeRestoreTargetPath -Name $restoreName -Path ([string]$customMetadataByName[$restoreName].OriginalPath)
+        } else {
+            $documentsDefinition = $standardByName['Dokumente']
+            if (-not $documentsDefinition -or [string]::IsNullOrWhiteSpace([string]$documentsDefinition.Path)) {
+                throw (M 'Der aktuelle Dokumente-Ordner konnte nicht ermittelt werden.' 'The current Documents folder could not be resolved.')
+            }
+            $migrationRoot = Join-Path ([string]$documentsDefinition.Path) (Join-Path (M 'Wiederhergestellte Ordner' 'Restored folders') $BackupDisplayName)
+            $restorePath = Assert-SafeRestoreTargetPath -Name $restoreName -Path (Join-Path $migrationRoot $restoreName)
+        }
+        $restoreDefinitions += [pscustomobject]@{
+            Name     = $restoreName
+            Path     = $restorePath
+            IsCustom = [bool](-not $isStandard)
+        }
+    }
+    return @($restoreDefinitions)
+}
+
+function New-FolderCopyPlan {
+    # Verbindet jede Ordnerdefinition mit ihrem Kopierziel und wendet die
+    # Auswahl des Benutzers an. Beim Backup ist die Definition die Quelle und
+    # das Ziel liegt im Sicherungsordner; beim Restore ist es umgekehrt.
+    param(
+        [ValidateSet('Backup', 'Restore')][string]$OperationMode,
+        $FolderDefinitions,
+        [string]$BackupRootPath,
+        $SelectedFolderSpecs = @()
+    )
+
+    if ($OperationMode -eq 'Backup') {
+        $plan = @($FolderDefinitions |
+            Where-Object { Test-Path -LiteralPath $_.Path -PathType Container } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    Name       = $_.Name
+                    Path       = $_.Path
+                    TargetPath = Join-Path $BackupRootPath $_.Name
+                    IsCustom   = [bool]$_.IsCustom
+                }
+            })
+    } else {
+        $backupRoot = Get-NormalizedFullPath $BackupRootPath
+        $plan = @($FolderDefinitions | ForEach-Object {
+            $restoreSource = Get-NormalizedFullPath (Join-Path $BackupRootPath $_.Name)
+            if (-not $restoreSource.StartsWith("$backupRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw ((M "Der Sicherungsordner '{0}' liegt ausserhalb des erwarteten Sicherungsverzeichnisses." "Backup folder '{0}' is outside the expected backup directory.") -f $_.Name)
+            }
+            if (Test-Path -LiteralPath $restoreSource -PathType Container) {
+                [pscustomobject]@{
+                    Name       = $_.Name
+                    Path       = $restoreSource
+                    TargetPath = $_.Path
+                    IsCustom   = [bool]$_.IsCustom
+                }
+            }
+        })
+    }
+
+    $selected = @($SelectedFolderSpecs)
+    if ($selected.Count -gt 0) {
+        $selectedNames = @($selected | ForEach-Object { [string]$_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $plan = @($plan | Where-Object { $selectedNames -contains $_.Name })
+    }
+    return @($plan)
+}
+
+function Assert-FolderCopyPlanIsSafe {
+    # Buendelt alle Plausibilitaetspruefungen des fertigen Kopierplans.
+    # Sie liefen frueher als vier getrennte Mode-Bloecke im Hauptablauf.
+    param(
+        [ValidateSet('Backup', 'Restore')][string]$OperationMode,
+        $FolderPlan,
+        [string]$BackupRootPath
+    )
+
+    $folders = @($FolderPlan)
+    if (-not $folders) {
+        throw (M "Es wurden keine passenden ausgewaehlten Ordner gefunden." "No matching selected folders were found.")
+    }
+
+    if ($OperationMode -eq 'Restore') {
+        foreach ($folder in $folders) {
+            if (Test-IsSameOrNestedPath -FirstPath $folder.Path -SecondPath $folder.TargetPath) {
+                throw ((M "Sicherungsquelle und Wiederherstellungsziel fuer '{0}' duerfen nicht ineinander liegen." "Backup source and restore destination for '{0}' must not overlap.") -f $folder.Name)
+            }
+        }
+        for ($first = 0; $first -lt $folders.Count; $first++) {
+            for ($second = $first + 1; $second -lt $folders.Count; $second++) {
+                if (Test-IsSameOrNestedPath -FirstPath $folders[$first].TargetPath -SecondPath $folders[$second].TargetPath) {
+                    throw ((M "Wiederherstellungsziele ueberschneiden sich: '{0}' und '{1}'." "Restore destinations overlap: '{0}' and '{1}'.") -f $folders[$first].Name, $folders[$second].Name)
+                }
+            }
+        }
+    } else {
+        $folderConflicts = @(Get-M24FolderPathConflicts -Folders $folders)
+        if ($folderConflicts.Count -gt 0) {
+            $conflict = $folderConflicts[0]
+            $parentName = [string]$conflict.Parent.Name
+            $childName = [string]$conflict.Child.Name
+            if ($conflict.Relationship -eq 'Same') {
+                throw ((M "Die ausgewaehlten Sicherungsordner '{0}' und '{1}' verwenden denselben Quellpfad '{2}'. Bitte waehlen Sie einen Eintrag ab." "The selected backup folders '{0}' and '{1}' use the same source path '{2}'. Please clear one entry.") -f $parentName, $childName, $conflict.FirstPath)
+            }
+            throw ((M "Der ausgewaehlte Sicherungsordner '{0}' ({1}) liegt innerhalb von '{2}' ({3}) und wuerde doppelt gesichert. Bitte waehlen Sie einen Eintrag ab." "The selected backup folder '{0}' ({1}) is inside '{2}' ({3}) and would be backed up twice. Please clear one entry.") -f $childName, $conflict.Child.Path, $parentName, $conflict.Parent.Path)
+        }
+
+        # Verhindert, dass das Sicherungsziel innerhalb einer Quelle liegt und
+        # Robocopy dadurch seine eigenen Ausgabedateien erneut einliest.
+        $destinationFullPath = [System.IO.Path]::GetFullPath($BackupRootPath).TrimEnd('\')
+        foreach ($folder in $folders) {
+            $sourceFullPath = [System.IO.Path]::GetFullPath($folder.Path).TrimEnd('\')
+            if ($destinationFullPath -eq $sourceFullPath -or
+                $destinationFullPath.StartsWith("$sourceFullPath\", [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw ((M "Das Sicherungsziel liegt innerhalb des Quellordners '{0}'. Bitte ein anderes Ziellaufwerk waehlen." "The backup destination is inside source folder '{0}'. Select a different destination drive.") -f $folder.Path)
+            }
+        }
+    }
+
+    # Zielordner ohne Laufwerksbuchstaben (z. B. auf eine Netzwerkfreigabe
+    # umgeleitete Bibliotheken) werden abgelehnt, weil ihr freier Speicherplatz
+    # nicht ueber Win32_LogicalDisk geprueft werden kann.
+    foreach ($folder in $folders) {
+        $targetRootCheck = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($folder.TargetPath)).TrimEnd('\')
+        if ($targetRootCheck -notmatch '^[A-Za-z]:$') {
+            throw ((M "Der Ordner '{0}' ist nach '{1}' umgeleitet. Ziele ohne Laufwerksbuchstaben (z. B. Netzwerkfreigaben) werden nicht unterstuetzt." "Folder '{0}' is redirected to '{1}'. Destinations without a drive letter (such as network shares) are not supported.") -f $folder.Name, $folder.TargetPath)
+        }
+    }
+}
+
+function New-OperationLogHeader {
+    # Die Kopfzeilen der Protokolldatei. Die Restore-Angaben stehen als Block
+    # beisammen, statt einzeln im Ablauf abgefragt zu werden.
+    param(
+        [ValidateSet('Backup', 'Restore')][string]$OperationMode,
+        [string]$OperationName,
+        [string]$BackupRootPath,
+        [double]$FreeSpaceGb,
+        [string]$FileSystem,
+        [string]$BitLockerStatus,
+        [int]$Threads,
+        $RunPolicy,
+        [bool]$DryRun,
+        [string[]]$PreflightNotices = @(),
+        # Nur fuer Wiederherstellungen ausgewertet:
+        [string]$IntegrityPolicy,
+        [bool]$IntegrityVerified,
+        [bool]$IntegrityOverride,
+        [bool]$IntegrityVerificationPerformed,
+        [string]$SourceComputer,
+        [string]$SourceUser,
+        [string]$TargetMode,
+        [bool]$IsMigration,
+        [string]$TargetRoot,
+        $FolderPlan = @()
+    )
+
+    $header = @(
+        "Start: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+        "Vorgang: $OperationName",
+        "Sicherungsordner: $BackupRootPath",
+        ("Freier Platz beim Start: {0:N1} GB" -f $FreeSpaceGb),
+        "Dateisystem: $FileSystem",
+        $BitLockerStatus,
+        "Hinweis: Geoeffnete/gesperrte Dateien werden ohne VSS ggf. uebersprungen.",
+        "Threads: $Threads",
+        ("Robocopy-Wiederholungen: /R:{0} /W:{1}" -f $RunPolicy.RetryCount, $RunPolicy.RetryWaitSeconds),
+        ("Superschnell-Modus: {0}" -f $(if ($RunPolicy.SuperFast) { 'Ja - Vorpruefung, Pruefsummen und BitLocker-Abfrage uebersprungen.' } else { 'Nein' })),
+        ("Dry-Run: {0}" -f $(if ($DryRun) { 'Ja - es werden keine Nutzdaten kopiert.' } else { 'Nein' }))
+    )
+    $header += @($PreflightNotices)
+
+    if ($OperationMode -eq 'Restore') {
+        $header += @(
+            "Restore-Integritaetsrichtlinie: $IntegrityPolicy",
+            "Restore-Integritaet bestaetigt: $IntegrityVerified; ungepruefte Ausnahme: $IntegrityOverride; Pruefung in diesem Lauf: $IntegrityVerificationPerformed",
+            "Quellidentitaet: $SourceComputer\$SourceUser",
+            "Wiederherstellungsart: $TargetMode; Migration: $IsMigration; Zielwurzel: $TargetRoot",
+            'Ordnerzuordnungen:'
+        )
+        $header += @($FolderPlan | ForEach-Object { "  $($_.Path) -> $($_.TargetPath)" })
+    }
+    $header += ''
+    return @($header | Where-Object { $null -ne $_ })
+}
+
+function Write-OperationSummary {
+    # Die Uebersicht vor der Bestaetigung. Buendelt alle betriebsartabhaengigen
+    # Textvarianten an einer Stelle, statt sie ueber den Ablauf zu verteilen.
+    param(
+        [ValidateSet('Backup', 'Restore')][string]$OperationMode,
+        $FolderPlan,
+        [string]$BackupRootPath,
+        [double]$FreeSpaceGb,
+        [string]$FileSystem,
+        [string]$BitLockerStatus,
+        [bool]$PreflightPerformed,
+        $Preflight,
+        [bool]$Fat32Warning,
+        [bool]$ManifestExists,
+        $ChecksumsVerifiedAt,
+        [bool]$IsGerman
+    )
+
+    $isRestore = $OperationMode -eq 'Restore'
+
+    Write-Host ""
+    Write-Host $(if ($isRestore) {
+        M 'Wiederhergestellt werden diese Benutzerordner:' 'These user folders will be restored:'
+    } else {
+        M 'Gesichert werden nur diese Benutzerordner:' 'Only these user folders will be backed up:'
+    })
+    foreach ($folder in $FolderPlan) {
+        Write-Host ("- {0}" -f (Get-M24FolderDisplayName $folder.Name $IsGerman))
+    }
+    Write-Host ""
+    Write-Host $(if ($isRestore) {
+        (M "Sicherungsquelle: {0}" "Backup source: {0}") -f $BackupRootPath
+    } else {
+        (M "Ziel:   {0}" "Destination: {0}") -f $BackupRootPath
+    })
+    Write-Host ((M "USB-Laufwerk: {0:N1} GB frei (Dateisystem: {1})" "USB drive: {0:N1} GB free (file system: {1})") -f $FreeSpaceGb, $FileSystem)
+    if ($PreflightPerformed) {
+        Write-Host ((M "Voraussichtlich zu kopieren: {0} Dateien, {1:N2} GB" "Expected copy volume: {0} files, {1:N2} GB") -f $Preflight.RequiredFileCount, ($Preflight.RequiredBytes / 1GB))
+    } else {
+        Write-Host (M "Superschnell-Modus: Vorpruefung uebersprungen; das Kopiervolumen wird nicht vorab ermittelt." "Super fast mode: preflight skipped; the copy volume is not estimated in advance.")
+    }
+    Write-Host $BitLockerStatus
+    Write-Host ""
+
+    if (-not $isRestore -and $Fat32Warning) {
+        Write-Host (M "WARNUNG: FAT32 kann keine Dateien ab 4 GB speichern. Fuer Sicherungen sind exFAT oder NTFS besser geeignet." "WARNING: FAT32 cannot store files of 4 GB or larger. exFAT or NTFS is better suited for backups.")
+        Write-Host ""
+    }
+
+    if ($isRestore) {
+        Write-Host (M "Es wird nichts in den lokalen Ordnern geloescht." "Nothing is deleted from local folders.")
+        Write-Host (M "Neuere lokale Dateien bleiben durch /XO geschuetzt." "Newer local files remain protected by /XO.")
+        Write-Host ((M "Konflikte: {0} lokale Datei(en) werden ersetzt; {1} neuere lokale Datei(en) bleiben erhalten." "Conflicts: {0} local file(s) will be replaced; {1} newer local file(s) will remain protected.") -f $Preflight.OverwriteFileCount, $Preflight.ProtectedNewerFileCount)
+        if (-not $ManifestExists) {
+            Write-Host (M "WARNUNG: Fuer dieses Backup ist kein SHA-256-Pruefsummenmanifest vorhanden. Beschaedigte Dateien wuerden nicht erkannt." "WARNING: This backup has no SHA-256 checksum manifest. Corrupted files would not be detected.")
+        } elseif ($ChecksumsVerifiedAt) {
+            Write-Host ((M "Integritaet: Pruefsummen zuletzt erfolgreich geprueft am {0}." "Integrity: checksums last verified successfully on {0}.") -f $ChecksumsVerifiedAt)
+        } else {
+            Write-Host (M "Hinweis: Die Pruefsummen dieses Backups wurden seit der letzten Sicherung nicht geprueft. Empfehlung: vorher 'Backup pruefen' ausfuehren." "Note: The checksums of this backup have not been verified since the last backup. Recommendation: run 'Verify backup' first.")
+        }
+    } else {
+        Write-Host (M "Es wird nichts im Backup-Ziel geloescht." "Nothing is deleted from the backup destination.")
+        Write-Host (M "Geaenderte Quelldateien ersetzen ihre vorhandene Kopie im Backup, auch bei aelterem Zeitstempel der Quelle." "Changed source files replace their existing copy in the backup, even when the source timestamp is older.")
+    }
+    Write-Host (M "AppData, Temp- und Cache-Verzeichnisse werden nicht kopiert." "AppData, temporary, and cache folders are not copied.")
+    Write-Host (M "Hinweis: Geoeffnete/gesperrte Dateien koennen uebersprungen werden; Details stehen im Log." "Note: Open or locked files may be skipped; see the log for details.")
+    Write-Host ""
+}
+
+function Get-OperationLabels {
+    # Die Bezeichnungen eines Laufs an einer Stelle. Eine Sicherungssimulation
+    # ist sprachlich weder Sicherung noch Wiederherstellung.
+    param(
+        [ValidateSet('Backup', 'Restore')][string]$OperationMode,
+        [bool]$DryRun
+    )
+
+    $isRestore = $OperationMode -eq 'Restore'
+    return [pscustomobject]@{
+        Operation = $(if ($isRestore) { M 'Wiederherstellung' 'Restore' } elseif ($DryRun) { M 'Sicherungssimulation' 'Backup simulation' } else { M 'Sicherung' 'Backup' })
+        Success   = $(if ($isRestore) { M 'Wiederherstellung erfolgreich abgeschlossen.' 'Restore completed successfully.' } elseif ($DryRun) { M 'Simulation erfolgreich abgeschlossen.' 'Simulation completed successfully.' } else { M 'Sicherung erfolgreich abgeschlossen.' 'Backup completed successfully.' })
+        Failure   = $(if ($isRestore) { M 'Wiederherstellung mit Fehlern beendet.' 'Restore finished with errors.' } else { M 'Sicherung mit Fehlern beendet.' 'Backup finished with errors.' })
+        Cancelled = $(if ($isRestore) { M 'Wiederherstellung wurde auf Wunsch beendet.' 'Restore was cancelled by request.' } else { M 'Sicherung wurde auf Wunsch beendet.' 'Backup was cancelled by request.' })
+    }
+}
+
+function Confirm-OperationStart {
+    # Interaktive Rueckfrage. Eine Sicherung ist additiv und deshalb per Enter
+    # bestaetigt; eine Wiederherstellung veraendert lokale Dateien und wird
+    # deshalb per Enter abgelehnt.
+    param([ValidateSet('Backup', 'Restore')][string]$OperationMode)
+
+    $isRestore = $OperationMode -eq 'Restore'
+    $answer = Read-Host $(if ($isRestore) {
+        M 'Wiederherstellung starten? j/N' 'Start restore? y/N'
+    } else {
+        M 'Sicherung starten? J/n' 'Start backup? Y/n'
+    })
+    if ([string]::IsNullOrWhiteSpace($answer)) {
+        $answer = if ($isRestore) { 'n' } else { 'j' }
+    }
+    return [bool]($answer -match '^(j|ja|y|yes)$')
+}
+
+function New-RobocopyArgument {
+    # Baut die Robocopy-Argumentliste fuer einen Ordner.
+    #
+    # /E        kopiert auch leere Unterordner.
+    # /XJ       folgt keinen Junctions und verhindert Schleifen.
+    # /FFT      toleriert groebere Zeitstempel externer Dateisysteme.
+    # /COPY:DAT kopiert Daten, Attribute und Zeitstempel, aber keine NTFS-ACLs.
+    # Weder /MIR noch /PURGE: Am Ziel wird grundsaetzlich nichts geloescht.
+    param(
+        [string]$SourcePath,
+        [string]$TargetPath,
+        [ValidateSet('Backup', 'Restore')][string]$OperationMode,
+        [int]$Threads,
+        [int]$RetryCount,
+        [int]$RetryWaitSeconds,
+        [string]$LogFile,
+        [bool]$DryRun,
+        [string[]]$ExcludedFiles = @()
+    )
+
+    $arguments = @(
+        $SourcePath,
+        $TargetPath,
+        '/E',
+        '/XJ',
+        '/FFT',
+        "/MT:$Threads",
+        "/R:$RetryCount",
+        "/W:$RetryWaitSeconds",
+        '/COPY:DAT',
+        '/DCOPY:DAT',
+        '/NP',
+        "/UNILOG+:$LogFile"
+    )
+    if ($OperationMode -eq 'Restore') {
+        # /XO nur beim Restore: neuere lokale Dateien bleiben geschuetzt.
+        # Beim Backup wuerde /XO inhaltlich geaenderte Quelldateien mit
+        # aelterem Zeitstempel ueberspringen; dort gewinnt die Quelle.
+        $arguments += '/XO'
+    }
+    if ($DryRun) {
+        $arguments += '/L'
+    } else {
+        $arguments += @('/NFL', '/NDL')
+    }
+    return @($arguments + @('/XF') + @($ExcludedFiles))
+}
+
+function New-RestorePreviewRecord {
+    # Die Vorschau, die der Oberflaeche die Freigabeentscheidung ermoeglicht.
+    # Reine Datenaufbereitung - das Schreiben bleibt beim Aufrufer.
+    param(
+        $Preflight,
+        $FolderPlan,
+        [bool]$ManifestExists,
+        $ChecksumsVerifiedAt,
+        [string]$IntegrityPolicy,
+        [string]$SourceComputer,
+        [string]$SourceUser,
+        [string]$SourcePath,
+        [string]$SourceDisplayName,
+        [bool]$SourceComplete,
+        [string]$TargetMode,
+        [string]$TargetRoot,
+        [bool]$IsMigration
+    )
+
+    return [pscustomobject]@{
+        MissingFiles           = $Preflight.MissingFileCount
+        OverwriteFiles         = $Preflight.OverwriteFileCount
+        ProtectedNewerFiles    = $Preflight.ProtectedNewerFileCount
+        PlannedFiles           = $Preflight.RequiredFileCount
+        PlannedBytes           = $Preflight.RequiredBytes
+        OverwriteExamples      = @($Preflight.OverwriteExamples)
+        ChecksumManifestExists = $ManifestExists
+        ChecksumsVerifiedAt    = $ChecksumsVerifiedAt
+        RestoreIntegrityPolicy = $IntegrityPolicy
+        SourceComputer         = $SourceComputer
+        SourceUser             = $SourceUser
+        SourcePath             = $SourcePath
+        SourceDisplayName      = $SourceDisplayName
+        SourceComplete         = $SourceComplete
+        TargetMode             = $TargetMode
+        TargetRoot             = $TargetRoot
+        IsMigration            = $IsMigration
+        FolderMappings         = @($FolderPlan | ForEach-Object {
+            [pscustomobject]@{ Name = $_.Name; Source = $_.Path; Target = $_.TargetPath; IsCustom = [bool]$_.IsCustom }
+        })
+    }
+}
+
+function Resolve-UnattendedRestoreIntegrity {
+    # Integritaetsentscheidung ohne Oberflaeche (Kommandozeilenbetrieb).
+    # Mit Oberflaeche entscheidet stattdessen Resolve-M24RestoreApproval
+    # anhand der Freigabedatei.
+    param(
+        [ValidateSet('Profile', 'Folder')][string]$TargetMode,
+        [ValidateSet('Verify', 'RequireVerified', 'Warn')][string]$Policy,
+        [bool]$ManifestExists,
+        [bool]$AlreadyVerified
+    )
+
+    $decision = [pscustomobject]@{ VerificationRequired = $false; IntegrityOverride = $false }
+
+    # Ein separater Zielordner laesst den vorhandenen Bestand unberuehrt; eine
+    # ungepruefte Kopie ist dort vertretbar und wird nur vermerkt.
+    if ($TargetMode -eq 'Folder') {
+        $decision.IntegrityOverride = -not $AlreadyVerified
+        return $decision
+    }
+    if ($AlreadyVerified) { return $decision }
+
+    switch ($Policy) {
+        'RequireVerified' {
+            throw (M 'Die Wiederherstellung erfordert ein bereits erfolgreich geprueftes Backup.' 'Restore requires a backup that has already passed verification.')
+        }
+        'Verify' {
+            if (-not $ManifestExists) {
+                throw (M 'Die Wiederherstellung kann nicht geprueft werden, weil kein Pruefsummenmanifest vorhanden ist.' 'Restore cannot be verified because no checksum manifest exists.')
+            }
+            $decision.VerificationRequired = $true
+        }
+        'Warn' {
+            $decision.IntegrityOverride = $true
+        }
+    }
+    return $decision
+}
+
+function Assert-SufficientFreeSpace {
+    # Vergleicht je Zielwurzel den Netto-Mehrbedarf mit dem freien Platz.
+    # Zu ueberschreibende Zieldateien geben ihren Platz wieder frei und zaehlen
+    # nur mit der Groessendifferenz; die Reserve deckt Protokolle, Manifest und
+    # Metadaten ab.
+    param($AdditionalBytesByRoot)
+
+    foreach ($targetRoot in $AdditionalBytesByRoot.Keys) {
+        $spaceDisk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $targetRoot) -ErrorAction Stop
+        $additionalBytes = [int64]$AdditionalBytesByRoot[$targetRoot]
+        $reserveBytes = [int64][math]::Max($additionalBytes * 0.05, 200MB)
+        $requiredWithReserve = $additionalBytes + $reserveBytes
+        if ($requiredWithReserve -gt [int64]$spaceDisk.FreeSpace) {
+            throw ((M "Nicht genug freier Speicherplatz auf {0}. Benoetigt werden voraussichtlich {1:N1} GB zusaetzlich (inkl. Reserve), frei sind {2:N1} GB." "Not enough free space on {0}. Approximately {1:N1} GB of additional space is required (including reserve); {2:N1} GB is available.") -f $targetRoot, ($requiredWithReserve / 1GB), ([int64]$spaceDisk.FreeSpace / 1GB))
+        }
+    }
+}
+
+function Add-CustomBackupFolderDefinitions {
+    # Ergaenzt die Standardbibliotheken um gepruefte Zusatzordner. Ein
+    # Zusatzordner darf weder reserviert sein noch einen bereits vergebenen
+    # Namen oder Pfad einer anderen Auswahl ueberdecken.
+    param(
+        $StandardDefinitions,
+        $SelectedFolderSpecs,
+        [string]$FolderMetadataFile
+    )
+
+    $definitions = @($StandardDefinitions)
+    $customSpecs = @($SelectedFolderSpecs | Where-Object { Test-IsCustomFolderSpec $_ })
+    if ($customSpecs.Count -eq 0) { return $definitions }
+
+    $existingCustomMetadata = @(Read-CustomFolderMetadata -Path $FolderMetadataFile)
+    foreach ($customSpec in $customSpecs) {
+        $customName = [string]$customSpec.Name
+        $customPath = [string]$customSpec.Path
+        Assert-ValidBackupFolderName -Name $customName
+        if ([string]::IsNullOrWhiteSpace($customPath) -or -not (Test-Path -LiteralPath $customPath -PathType Container)) {
+            throw ((M "Der Zusatzordner '{0}' wurde nicht gefunden." "The additional folder '{0}' was not found.") -f $customName)
+        }
+        $customPath = Get-NormalizedFullPath $customPath
+        if ($customPath.Equals((Get-NormalizedFullPath $env:USERPROFILE), [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw (M "Das gesamte Benutzerprofil kann nicht als Zusatzordner gesichert werden." "The whole user profile cannot be backed up as an additional folder.")
+        }
+        foreach ($existingCustom in $existingCustomMetadata) {
+            if ($existingCustom.Name.Equals($customName, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $existingPath = Get-NormalizedFullPath ([string]$existingCustom.OriginalPath)
+                if (-not $existingPath.Equals($customPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw ((M "Der Zusatzordnername '{0}' ist im vorhandenen Backup bereits fuer '{1}' vergeben." "The additional folder name '{0}' is already used in the existing backup for '{1}'.") -f $customName, $existingPath)
+                }
+            }
+        }
+        foreach ($existingDefinition in $definitions) {
+            if ($existingDefinition.Name.Equals($customName, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw ((M "Der Zusatzordnername '{0}' ist bereits vergeben." "The additional folder name '{0}' is already in use.") -f $customName)
+            }
+            if ($existingDefinition.Path -and (Test-IsSameOrNestedPath -FirstPath $customPath -SecondPath $existingDefinition.Path)) {
+                throw ((M "Der Zusatzordner '{0}' ueberschneidet sich mit '{1}'." "The additional folder '{0}' overlaps with '{1}'.") -f $customName, $existingDefinition.Name)
+            }
+        }
+        $definitions = @($definitions) + [pscustomobject]@{ Name = $customName; Path = $customPath; IsCustom = $true }
+    }
+    return @($definitions)
+}
+
 # AppData ist bewusst nicht Teil der Sicherung. Ein Pfad, der direkt dem
 # gesamten Benutzerprofil entspricht, wird ebenfalls ausgeschlossen.
 $folderDefinitions = @(Get-M24StandardFolderDefinitions)
@@ -811,196 +1410,39 @@ $logFile = Join-Path $logDir ("{0}_{1}_{2}.log" -f $logPrefix, $stamp, $logInsta
 $selectedFolderSpecs = @(Read-SelectedFolderSpecs)
 $restoreSourceComputer = ''
 $restoreSourceUser = ''
-$restoreSourceMetadataReadable = $false
 $restoreIsMigration = $false
 $resolvedRestoreTargetRoot = $null
 $restoreSourceDisplayName = Split-Path -Path $destination -Leaf
 $restoreSourceComplete = $false
 
 if ($Mode -eq 'Restore') {
-    $metadataLines = @()
-    if (Test-Path -LiteralPath $metadataFile -PathType Leaf) {
-        try {
-            $metadataLines = @(Get-Content -LiteralPath $metadataFile -ErrorAction Stop)
-            $sourceIdentity = Get-M24BackupMetadataIdentity -Lines $metadataLines
-            $restoreSourceComputer = [string]$sourceIdentity.Computer
-            $restoreSourceUser = [string]$sourceIdentity.User
-            $restoreSourceMetadataReadable = -not [string]::IsNullOrWhiteSpace($restoreSourceComputer) -and
-                -not [string]::IsNullOrWhiteSpace($restoreSourceUser)
-            $restoreIsMigration = $restoreSourceMetadataReadable -and
-                -not (Test-M24BackupMetadataIdentity -Lines $metadataLines)
-            $restoreSourceComplete = [bool](Get-M24BackupResultInfo -Lines $metadataLines).IsComplete
-        } catch {
-            $restoreSourceMetadataReadable = $false
-        }
-    }
+    $sourceIdentity = Read-RestoreSourceIdentity -MetadataFile $metadataFile
+    $restoreSourceComputer = $sourceIdentity.Computer
+    $restoreSourceUser = $sourceIdentity.User
+    $restoreIsMigration = $sourceIdentity.IsMigration
+    $restoreSourceComplete = $sourceIdentity.IsComplete
 
-    if ($RestoreTargetMode -eq 'Profile') {
-        if (-not $restoreSourceMetadataReadable) {
-            throw (M 'Die Sicherungsmetadaten sind nicht lesbar. Diese Sicherung kann nur in einen separaten Ordner kopiert werden.' 'The backup metadata is not readable. This backup can only be copied to a separate folder.')
-        }
-        if (-not $restoreSourceComplete) {
-            throw (M 'Die Sicherung ist nicht vollständig. Sie kann nur in einen separaten Ordner kopiert werden.' 'The backup is incomplete. It can only be copied to a separate folder.')
-        }
-    } else {
-        if ([string]::IsNullOrWhiteSpace($RestoreTargetRoot)) {
-            throw (M 'Für das Kopieren ist ein Zielordner erforderlich.' 'A destination folder is required for copying.')
-        }
-        $selectedTargetRoot = Assert-SafeRestoreTargetPath -Name (M 'Zielordner' 'Destination folder') -Path $RestoreTargetRoot
-        Assert-ValidBackupFolderName -Name $restoreSourceDisplayName
-        $resolvedRestoreTargetRoot = Assert-SafeRestoreTargetPath -Name $restoreSourceDisplayName -Path (Join-Path $selectedTargetRoot $restoreSourceDisplayName)
-        if (Test-IsSameOrNestedPath -FirstPath $destination -SecondPath $resolvedRestoreTargetRoot) {
-            throw (M 'Sicherungsquelle und Wiederherstellungsziel dürfen nicht ineinander liegen.' 'Backup source and restore destination must not overlap.')
-        }
-    }
+    $resolvedRestoreTargetRoot = Resolve-RestoreTargetRoot -TargetMode $RestoreTargetMode -TargetRoot $RestoreTargetRoot `
+        -BackupSourcePath $destination -BackupDisplayName $restoreSourceDisplayName -SourceIdentity $sourceIdentity
 
-    $standardByName = @{}
-    foreach ($definition in $folderDefinitions) { $standardByName[[string]$definition.Name] = $definition }
-    $customMetadataByName = @{}
-    foreach ($customMetadata in @(Read-CustomFolderMetadata -Path $folderMetadataFile)) {
-        if ($customMetadata.Name) { $customMetadataByName[[string]$customMetadata.Name] = $customMetadata }
-    }
-
-    $sourceDirectories = @(Get-ChildItem -LiteralPath $destination -Directory -Force -ErrorAction Stop |
-        Where-Object {
-            -not $_.Name.StartsWith('_') -and
-            ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0
-        })
-    $restoreDefinitions = @()
-    foreach ($sourceDirectory in $sourceDirectories) {
-        $restoreName = [string]$sourceDirectory.Name
-        Assert-ValidBackupFolderName -Name $restoreName
-        $isStandard = $standardByName.ContainsKey($restoreName)
-        $isCustom = -not $isStandard
-        if ($RestoreTargetMode -eq 'Folder') {
-            $restorePath = Assert-SafeRestoreTargetPath -Name $restoreName -Path (Join-Path $resolvedRestoreTargetRoot $restoreName)
-        } elseif ($isStandard) {
-            $restorePath = Assert-SafeRestoreTargetPath -Name $restoreName -Path ([string]$standardByName[$restoreName].Path)
-        } elseif (-not $restoreIsMigration -and $customMetadataByName.ContainsKey($restoreName) -and $customMetadataByName[$restoreName].OriginalPath) {
-            # Bestehendes Verhalten fuer die eigene Profilsicherung.
-            $restorePath = Assert-SafeRestoreTargetPath -Name $restoreName -Path ([string]$customMetadataByName[$restoreName].OriginalPath)
-        } else {
-            $documentsDefinition = $standardByName['Dokumente']
-            if (-not $documentsDefinition -or [string]::IsNullOrWhiteSpace([string]$documentsDefinition.Path)) {
-                throw (M 'Der aktuelle Dokumente-Ordner konnte nicht ermittelt werden.' 'The current Documents folder could not be resolved.')
-            }
-            $migrationRoot = Join-Path ([string]$documentsDefinition.Path) (Join-Path (M 'Wiederhergestellte Ordner' 'Restored folders') $restoreSourceDisplayName)
-            $restorePath = Assert-SafeRestoreTargetPath -Name $restoreName -Path (Join-Path $migrationRoot $restoreName)
-        }
-        $restoreDefinitions += [pscustomobject]@{
-            Name = $restoreName
-            Path = $restorePath
-            IsCustom = [bool]$isCustom
-        }
-    }
-    $folderDefinitions = @($restoreDefinitions)
+    $folderDefinitions = Resolve-RestoreFolderDefinitions -BackupSourcePath $destination `
+        -StandardDefinitions $folderDefinitions -FolderMetadataFile $folderMetadataFile `
+        -TargetMode $RestoreTargetMode -ResolvedTargetRoot $resolvedRestoreTargetRoot `
+        -IsMigration $restoreIsMigration -BackupDisplayName $restoreSourceDisplayName
+} elseif ($selectedFolderSpecs.Count -gt 0) {
+    $folderDefinitions = Add-CustomBackupFolderDefinitions -StandardDefinitions $folderDefinitions `
+        -SelectedFolderSpecs $selectedFolderSpecs -FolderMetadataFile $folderMetadataFile
 }
 
-if ($Mode -eq 'Backup' -and $selectedFolderSpecs.Count -gt 0) {
-    $customSpecs = @($selectedFolderSpecs | Where-Object { Test-IsCustomFolderSpec $_ })
-    $existingCustomMetadata = @(Read-CustomFolderMetadata -Path $folderMetadataFile)
-    foreach ($customSpec in $customSpecs) {
-        $customName = [string]$customSpec.Name
-        $customPath = [string]$customSpec.Path
-        Assert-ValidBackupFolderName -Name $customName
-        if ([string]::IsNullOrWhiteSpace($customPath) -or -not (Test-Path -LiteralPath $customPath -PathType Container)) {
-            throw ((M "Der Zusatzordner '{0}' wurde nicht gefunden." "The additional folder '{0}' was not found.") -f $customName)
-        }
-        $customPath = Get-NormalizedFullPath $customPath
-        if ($customPath.Equals((Get-NormalizedFullPath $env:USERPROFILE), [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw (M "Das gesamte Benutzerprofil kann nicht als Zusatzordner gesichert werden." "The whole user profile cannot be backed up as an additional folder.")
-        }
-        foreach ($existingCustom in $existingCustomMetadata) {
-            if ($existingCustom.Name.Equals($customName, [System.StringComparison]::OrdinalIgnoreCase)) {
-                $existingPath = Get-NormalizedFullPath ([string]$existingCustom.OriginalPath)
-                if (-not $existingPath.Equals($customPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    throw ((M "Der Zusatzordnername '{0}' ist im vorhandenen Backup bereits fuer '{1}' vergeben." "The additional folder name '{0}' is already used in the existing backup for '{1}'.") -f $customName, $existingPath)
-                }
-            }
-        }
-        foreach ($existingDefinition in $folderDefinitions) {
-            if ($existingDefinition.Name.Equals($customName, [System.StringComparison]::OrdinalIgnoreCase)) {
-                throw ((M "Der Zusatzordnername '{0}' ist bereits vergeben." "The additional folder name '{0}' is already in use.") -f $customName)
-            }
-            if ($existingDefinition.Path -and (Test-IsSameOrNestedPath -FirstPath $customPath -SecondPath $existingDefinition.Path)) {
-                throw ((M "Der Zusatzordner '{0}' ueberschneidet sich mit '{1}'." "The additional folder '{0}' overlaps with '{1}'.") -f $customName, $existingDefinition.Name)
-            }
-        }
-        $folderDefinitions = @($folderDefinitions) + [pscustomobject]@{ Name = $customName; Path = $customPath; IsCustom = $true }
-    }
-}
-
-if ($Mode -eq 'Backup') {
-    $backupFolders = @($folderDefinitions | Where-Object { Test-Path -LiteralPath $_.Path -PathType Container } | ForEach-Object {
-        [pscustomobject]@{ Name = $_.Name; Path = $_.Path; TargetPath = Join-Path $destination $_.Name; IsCustom = [bool]$_.IsCustom }
-    })
-    Write-BackupStatus -Type 'STATUS' -Text (M 'Sicherung wird vorbereitet ...' 'Preparing backup ...')
+$backupFolders = New-FolderCopyPlan -OperationMode $Mode -FolderDefinitions $folderDefinitions `
+    -BackupRootPath $destination -SelectedFolderSpecs $selectedFolderSpecs
+Write-BackupStatus -Type 'STATUS' -Text $(if ($Mode -eq 'Restore') {
+    M 'Wiederherstellung wird vorbereitet ...' 'Preparing restore ...'
 } else {
-    $backupFolders = @($folderDefinitions | ForEach-Object {
-        $restoreSource = Join-Path $destination $_.Name
-        $restoreSource = Get-NormalizedFullPath $restoreSource
-        $destinationRoot = Get-NormalizedFullPath $destination
-        if (-not $restoreSource.StartsWith("$destinationRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw ((M "Der Sicherungsordner '{0}' liegt ausserhalb des erwarteten Sicherungsverzeichnisses." "Backup folder '{0}' is outside the expected backup directory.") -f $_.Name)
-        }
-        if (Test-Path -LiteralPath $restoreSource -PathType Container) {
-            [pscustomobject]@{ Name = $_.Name; Path = $restoreSource; TargetPath = $_.Path; IsCustom = [bool]$_.IsCustom }
-        }
-    })
-    Write-BackupStatus -Type 'STATUS' -Text (M 'Wiederherstellung wird vorbereitet ...' 'Preparing restore ...')
-}
+    M 'Sicherung wird vorbereitet ...' 'Preparing backup ...'
+})
 
-if ($selectedFolderSpecs.Count -gt 0) {
-    $selectedNames = @($selectedFolderSpecs | ForEach-Object { [string]$_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $backupFolders = @($backupFolders | Where-Object { $selectedNames -contains $_.Name })
-}
-if (-not $backupFolders) {
-    throw (M "Es wurden keine passenden ausgewaehlten Ordner gefunden." "No matching selected folders were found.")
-}
-if ($Mode -eq 'Restore') {
-    for ($firstTargetIndex = 0; $firstTargetIndex -lt $backupFolders.Count; $firstTargetIndex++) {
-        for ($secondTargetIndex = $firstTargetIndex + 1; $secondTargetIndex -lt $backupFolders.Count; $secondTargetIndex++) {
-            if (Test-IsSameOrNestedPath -FirstPath $backupFolders[$firstTargetIndex].TargetPath -SecondPath $backupFolders[$secondTargetIndex].TargetPath) {
-                throw ((M "Wiederherstellungsziele ueberschneiden sich: '{0}' und '{1}'." "Restore destinations overlap: '{0}' and '{1}'.") -f $backupFolders[$firstTargetIndex].Name, $backupFolders[$secondTargetIndex].Name)
-            }
-        }
-    }
-}
-
-if ($Mode -eq 'Backup') {
-    $folderConflicts = @(Get-M24FolderPathConflicts -Folders $backupFolders)
-    if ($folderConflicts.Count -gt 0) {
-        $conflict = $folderConflicts[0]
-        $parentName = [string]$conflict.Parent.Name
-        $childName = [string]$conflict.Child.Name
-        if ($conflict.Relationship -eq 'Same') {
-            throw ((M "Die ausgewaehlten Sicherungsordner '{0}' und '{1}' verwenden denselben Quellpfad '{2}'. Bitte waehlen Sie einen Eintrag ab." "The selected backup folders '{0}' and '{1}' use the same source path '{2}'. Please clear one entry.") -f $parentName, $childName, $conflict.FirstPath)
-        }
-        throw ((M "Der ausgewaehlte Sicherungsordner '{0}' ({1}) liegt innerhalb von '{2}' ({3}) und wuerde doppelt gesichert. Bitte waehlen Sie einen Eintrag ab." "The selected backup folder '{0}' ({1}) is inside '{2}' ({3}) and would be backed up twice. Please clear one entry.") -f $childName, $conflict.Child.Path, $parentName, $conflict.Parent.Path)
-    }
-}
-
-# Verhindert, dass das Sicherungsziel innerhalb einer Quelle liegt und Robocopy
-# dadurch seine eigenen Ausgabedateien erneut einliest.
-if ($Mode -eq 'Backup') {
-    $destinationFullPath = [System.IO.Path]::GetFullPath($destination).TrimEnd('\')
-    foreach ($folder in $backupFolders) {
-        $sourceFullPath = [System.IO.Path]::GetFullPath($folder.Path).TrimEnd('\')
-        if ($destinationFullPath -eq $sourceFullPath -or $destinationFullPath.StartsWith("$sourceFullPath\", [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw ((M "Das Sicherungsziel liegt innerhalb des Quellordners '{0}'. Bitte ein anderes Ziellaufwerk waehlen." "The backup destination is inside source folder '{0}'. Select a different destination drive.") -f $folder.Path)
-        }
-    }
-}
-
-# Zielordner ohne Laufwerksbuchstaben (z. B. auf eine Netzwerkfreigabe
-# umgeleitete Bibliotheken) werden abgelehnt, weil ihr freier Speicherplatz
-# nicht ueber Win32_LogicalDisk geprueft werden kann.
-foreach ($folder in $backupFolders) {
-    $targetRootCheck = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($folder.TargetPath)).TrimEnd('\')
-    if ($targetRootCheck -notmatch '^[A-Za-z]:$') {
-        throw ((M "Der Ordner '{0}' ist nach '{1}' umgeleitet. Ziele ohne Laufwerksbuchstaben (z. B. Netzwerkfreigaben) werden nicht unterstuetzt." "Folder '{0}' is redirected to '{1}'. Destinations without a drive letter (such as network shares) are not supported.") -f $folder.Name, $folder.TargetPath)
-    }
-}
+Assert-FolderCopyPlanIsSafe -OperationMode $Mode -FolderPlan $backupFolders -BackupRootPath $destination
 
 # Nur schnell verfuegbare Laufwerksinformationen abfragen. Die Bibliotheken
 # werden vorher nicht komplett gescannt, damit die Sicherung zuegig startet.
@@ -1059,19 +1501,8 @@ if ($preflightPerformed -and $preflight.ScanWarnings.Count -gt 0) {
     }
 }
 if (-not $DryRun -and $preflightPerformed) {
-    foreach ($targetRoot in $preflight.AdditionalByRoot.Keys) {
-        # Die Zielwurzeln sind oben bereits als Laufwerksbuchstaben validiert.
-        # Verglichen wird der Netto-Mehrbedarf: Zu ueberschreibende Zieldateien
-        # geben ihren Platz wieder frei und zaehlen nur mit der Groessendifferenz.
-        # Die Mindestreserve deckt Protokolle, Manifest und Metadaten ab.
-        $spaceDisk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $targetRoot) -ErrorAction Stop
-        $additionalBytes = [int64]$preflight.AdditionalByRoot[$targetRoot]
-        $reserveBytes = [int64][math]::Max($additionalBytes * 0.05, 200MB)
-        $requiredWithReserve = $additionalBytes + $reserveBytes
-        if ($requiredWithReserve -gt [int64]$spaceDisk.FreeSpace) {
-            throw ((M "Nicht genug freier Speicherplatz auf {0}. Benoetigt werden voraussichtlich {1:N1} GB zusaetzlich (inkl. Reserve), frei sind {2:N1} GB." "Not enough free space on {0}. Approximately {1:N1} GB of additional space is required (including reserve); {2:N1} GB is available.") -f $targetRoot, ($requiredWithReserve / 1GB), ([int64]$spaceDisk.FreeSpace / 1GB))
-        }
-    }
+    # Die Zielwurzeln sind oben bereits als Laufwerksbuchstaben validiert.
+    Assert-SufficientFreeSpace -AdditionalBytesByRoot $preflight.AdditionalByRoot
 }
 if ($Mode -eq 'Backup' -and $fat32Warning -and $preflightPerformed -and $preflight.LargeFiles.Count -gt 0) {
     $examples = @($preflight.LargeFiles | Select-Object -First 3) -join '; '
@@ -1089,28 +1520,16 @@ if ($Mode -eq 'Restore') {
     $checksumsVerifiedAt = if ($checksumManifestExists) { Get-M24ChecksumVerifiedDate -MetadataFile $metadataFile } else { $null }
     $restoreIntegrityVerified = [bool]$checksumsVerifiedAt
     if ($PreviewFile) {
-        [pscustomobject]@{
-            MissingFiles = $preflight.MissingFileCount
-            OverwriteFiles = $preflight.OverwriteFileCount
-            ProtectedNewerFiles = $preflight.ProtectedNewerFileCount
-            PlannedFiles = $preflight.RequiredFileCount
-            PlannedBytes = $preflight.RequiredBytes
-            OverwriteExamples = @($preflight.OverwriteExamples)
-            ChecksumManifestExists = $checksumManifestExists
-            ChecksumsVerifiedAt = $checksumsVerifiedAt
-            RestoreIntegrityPolicy = $RestoreIntegrityPolicy
-            SourceComputer = $restoreSourceComputer
-            SourceUser = $restoreSourceUser
-            SourcePath = $destination
-            SourceDisplayName = $restoreSourceDisplayName
-            SourceComplete = [bool]$restoreSourceComplete
-            TargetMode = $RestoreTargetMode
-            TargetRoot = $(if ($RestoreTargetMode -eq 'Folder') { $resolvedRestoreTargetRoot } else { $env:USERPROFILE })
-            IsMigration = [bool]$restoreIsMigration
-            FolderMappings = @($backupFolders | ForEach-Object {
-                [pscustomobject]@{ Name = $_.Name; Source = $_.Path; Target = $_.TargetPath }
-            })
-        } | Write-AtomicJsonFile -Path $PreviewFile -Depth 4
+        New-RestorePreviewRecord -Preflight $preflight -FolderPlan $backupFolders `
+            -ManifestExists $checksumManifestExists -ChecksumsVerifiedAt $checksumsVerifiedAt `
+            -IntegrityPolicy $RestoreIntegrityPolicy `
+            -SourceComputer $restoreSourceComputer -SourceUser $restoreSourceUser `
+            -SourcePath $destination -SourceDisplayName $restoreSourceDisplayName `
+            -SourceComplete ([bool]$restoreSourceComplete) `
+            -TargetMode $RestoreTargetMode `
+            -TargetRoot $(if ($RestoreTargetMode -eq 'Folder') { $resolvedRestoreTargetRoot } else { $env:USERPROFILE }) `
+            -IsMigration ([bool]$restoreIsMigration) |
+            Write-AtomicJsonFile -Path $PreviewFile -Depth 4
     }
     if ($Silent) {
         if (-not $ApprovalFile) { throw (M 'Im stillen Restore-Modus ist eine Freigabedatei erforderlich.' 'Silent restore mode requires an approval file.') }
@@ -1134,17 +1553,12 @@ if ($Mode -eq 'Restore') {
             $restoreVerificationRequired = [bool]$approvalDecision.RequiresVerification
             $restoreIntegrityOverride = [bool]$approvalDecision.UnverifiedOverride
         }
-    } elseif ($RestoreTargetMode -eq 'Folder') {
-        $restoreIntegrityOverride = -not $restoreIntegrityVerified
-    } elseif ($RestoreIntegrityPolicy -eq 'RequireVerified' -and -not $restoreIntegrityVerified) {
-        throw (M 'Die Wiederherstellung erfordert ein bereits erfolgreich geprueftes Backup.' 'Restore requires a backup that has already passed verification.')
-    } elseif ($RestoreIntegrityPolicy -eq 'Verify' -and -not $restoreIntegrityVerified) {
-        if (-not $checksumManifestExists) {
-            throw (M 'Die Wiederherstellung kann nicht geprueft werden, weil kein Pruefsummenmanifest vorhanden ist.' 'Restore cannot be verified because no checksum manifest exists.')
-        }
-        $restoreVerificationRequired = $true
-    } elseif ($RestoreIntegrityPolicy -eq 'Warn' -and -not $restoreIntegrityVerified) {
-        $restoreIntegrityOverride = $true
+    } else {
+        $integrityDecision = Resolve-UnattendedRestoreIntegrity -TargetMode $RestoreTargetMode `
+            -Policy $RestoreIntegrityPolicy -ManifestExists $checksumManifestExists `
+            -AlreadyVerified $restoreIntegrityVerified
+        $restoreVerificationRequired = [bool]$integrityDecision.VerificationRequired
+        $restoreIntegrityOverride = [bool]$integrityDecision.IntegrityOverride
     }
 }
 
@@ -1154,51 +1568,15 @@ $bitLockerStatus = if ($runPolicy.SkipBitLockerStatus) {
     Get-BitLockerStatusText -Drive $drive
 }
 
-Write-Host ""
-Write-Host $(if ($Mode -eq 'Restore') { M 'Wiederhergestellt werden diese Benutzerordner:' 'These user folders will be restored:' } else { M 'Gesichert werden nur diese Benutzerordner:' 'Only these user folders will be backed up:' })
-foreach ($folder in $backupFolders) {
-    Write-Host ("- {0}" -f (Get-M24FolderDisplayName $folder.Name $script:isGerman))
-}
-Write-Host ""
-Write-Host $(if ($Mode -eq 'Restore') { (M "Sicherungsquelle: {0}" "Backup source: {0}") -f $destination } else { (M "Ziel:   {0}" "Destination: {0}") -f $destination })
-Write-Host ((M "USB-Laufwerk: {0:N1} GB frei (Dateisystem: {1})" "USB drive: {0:N1} GB free (file system: {1})") -f $freeSpaceGb, $fileSystem)
-if ($preflightPerformed) {
-    Write-Host ((M "Voraussichtlich zu kopieren: {0} Dateien, {1:N2} GB" "Expected copy volume: {0} files, {1:N2} GB") -f $preflight.RequiredFileCount, ($preflight.RequiredBytes / 1GB))
-} else {
-    Write-Host (M "Superschnell-Modus: Vorpruefung uebersprungen; das Kopiervolumen wird nicht vorab ermittelt." "Super fast mode: preflight skipped; the copy volume is not estimated in advance.")
-}
-Write-Host $bitLockerStatus
-Write-Host ""
-if ($Mode -eq 'Backup' -and $fat32Warning) {
-    Write-Host (M "WARNUNG: FAT32 kann keine Dateien ab 4 GB speichern. Fuer Sicherungen sind exFAT oder NTFS besser geeignet." "WARNING: FAT32 cannot store files of 4 GB or larger. exFAT or NTFS is better suited for backups.")
-    Write-Host ""
-}
-if ($Mode -eq 'Restore') {
-    Write-Host (M "Es wird nichts in den lokalen Ordnern geloescht." "Nothing is deleted from local folders.")
-    Write-Host (M "Neuere lokale Dateien bleiben durch /XO geschuetzt." "Newer local files remain protected by /XO.")
-    Write-Host ((M "Konflikte: {0} lokale Datei(en) werden ersetzt; {1} neuere lokale Datei(en) bleiben erhalten." "Conflicts: {0} local file(s) will be replaced; {1} newer local file(s) will remain protected.") -f $preflight.OverwriteFileCount, $preflight.ProtectedNewerFileCount)
-    if (-not $checksumManifestExists) {
-        Write-Host (M "WARNUNG: Fuer dieses Backup ist kein SHA-256-Pruefsummenmanifest vorhanden. Beschaedigte Dateien wuerden nicht erkannt." "WARNING: This backup has no SHA-256 checksum manifest. Corrupted files would not be detected.")
-    } elseif ($checksumsVerifiedAt) {
-        Write-Host ((M "Integritaet: Pruefsummen zuletzt erfolgreich geprueft am {0}." "Integrity: checksums last verified successfully on {0}.") -f $checksumsVerifiedAt)
-    } else {
-        Write-Host (M "Hinweis: Die Pruefsummen dieses Backups wurden seit der letzten Sicherung nicht geprueft. Empfehlung: vorher 'Backup pruefen' ausfuehren." "Note: The checksums of this backup have not been verified since the last backup. Recommendation: run 'Verify backup' first.")
-    }
-} else {
-    Write-Host (M "Es wird nichts im Backup-Ziel geloescht." "Nothing is deleted from the backup destination.")
-    Write-Host (M "Geaenderte Quelldateien ersetzen ihre vorhandene Kopie im Backup, auch bei aelterem Zeitstempel der Quelle." "Changed source files replace their existing copy in the backup, even when the source timestamp is older.")
-}
-Write-Host (M "AppData, Temp- und Cache-Verzeichnisse werden nicht kopiert." "AppData, temporary, and cache folders are not copied.")
-Write-Host (M "Hinweis: Geoeffnete/gesperrte Dateien koennen uebersprungen werden; Details stehen im Log." "Note: Open or locked files may be skipped; see the log for details.")
-Write-Host ""
+Write-OperationSummary -OperationMode $Mode -FolderPlan $backupFolders -BackupRootPath $destination `
+    -FreeSpaceGb $freeSpaceGb -FileSystem $fileSystem -BitLockerStatus $bitLockerStatus `
+    -PreflightPerformed $preflightPerformed -Preflight $preflight -Fat32Warning ([bool]$fat32Warning) `
+    -ManifestExists ([bool]$checksumManifestExists) -ChecksumsVerifiedAt $checksumsVerifiedAt `
+    -IsGerman ([bool]$script:isGerman)
 
 if (-not $Silent) {
-    $confirm = Read-Host $(if ($Mode -eq 'Restore') { M 'Wiederherstellung starten? j/N' 'Start restore? y/N' } else { M 'Sicherung starten? J/n' 'Start backup? Y/n' })
-    if ([string]::IsNullOrWhiteSpace($confirm)) {
-        $confirm = if ($Mode -eq 'Restore') { 'n' } else { 'j' }
-    }
-    if ($confirm -notmatch '^(j|ja|y|yes)$') {
-            Write-Host (M "Abgebrochen." "Cancelled.")
+    if (-not (Confirm-OperationStart -OperationMode $Mode)) {
+        Write-Host (M "Abgebrochen." "Cancelled.")
         exit 1
     }
 }
@@ -1237,7 +1615,8 @@ if ($Mode -eq 'Restore' -and $restoreVerificationRequired) {
         Where-Object { -not $_.Name.StartsWith('_') } |
         ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.FullName } })
     $verification = Test-M24ChecksumManifest -Folders $restoreIntegrityFolders -ManifestPath $checksumManifestFile -ExcludedFiles $excludedFiles `
-        -StatusCallback { param($current, $total, $name) Write-BackupStatus -Type 'RESTOREPRUEFUNG' -Text ("{0}|{1}|{2}" -f $current, $total, $name) } `
+        -StatusCallback { param($current, $total, $name) Write-BackupStatus -Type 'RESTOREPRUEFUNG' -Fields $current, $total, $name } `
+        -ProgressCallback { param($files, $bytes, $folder) Write-BackupStatus -Type 'HASHFORTSCHRITT' -Fields $files, $bytes } `
         -CancelCallback { return (Get-WorkerCancellationState).Requested }
     if ($verification.Cancelled) {
         $verificationCancellation = Get-WorkerCancellationState
@@ -1273,10 +1652,11 @@ $filesCopiedThisRun = $false
 $folderNumber = 0
 $folderCount = @($backupFolders).Count
 $backupStartedAt = Get-Date
-$operationName = if ($Mode -eq 'Restore') { M 'Wiederherstellung' 'Restore' } elseif ($DryRun) { M 'Sicherungssimulation' 'Backup simulation' } else { M 'Sicherung' 'Backup' }
-$successMessage = if ($Mode -eq 'Restore') { M 'Wiederherstellung erfolgreich abgeschlossen.' 'Restore completed successfully.' } elseif ($DryRun) { M 'Simulation erfolgreich abgeschlossen.' 'Simulation completed successfully.' } else { M 'Sicherung erfolgreich abgeschlossen.' 'Backup completed successfully.' }
-$failureMessage = if ($Mode -eq 'Restore') { M 'Wiederherstellung mit Fehlern beendet.' 'Restore finished with errors.' } else { M 'Sicherung mit Fehlern beendet.' 'Backup finished with errors.' }
-$cancelMessage = if ($Mode -eq 'Restore') { M 'Wiederherstellung wurde auf Wunsch beendet.' 'Restore was cancelled by request.' } else { M 'Sicherung wurde auf Wunsch beendet.' 'Backup was cancelled by request.' }
+# Alle betriebsartabhaengigen Bezeichnungen dieses Laufs an einer Stelle.
+$operationLabels = Get-OperationLabels -OperationMode $Mode -DryRun ([bool]$DryRun)
+$operationName = $operationLabels.Operation
+$successMessage = $operationLabels.Success
+$failureMessage = $operationLabels.Failure
 $preflightNoticeLogLines = @()
 if ($preflightPerformed -and $preflight.ScanNotices.Count -gt 0) {
     $preflightNoticeLogLines += ((M "Hinweis: Die Vorpruefung hat {0} nicht lesbare Junction(s) erkannt. Sie werden wie beim Kopieren mit Robocopy /XJ absichtlich uebersprungen; es ist keine Benutzeraktion erforderlich." "Note: The preflight check found {0} unreadable junction(s). They are intentionally skipped, as they are during copying with Robocopy /XJ; no user action is required.") -f $preflight.ScanNotices.Count)
@@ -1286,27 +1666,18 @@ if ($preflightPerformed -and $preflight.ScanNotices.Count -gt 0) {
 }
 
 # Allgemeine Angaben vor den Robocopy-Ausgaben in dieselbe Logdatei schreiben.
-@(
-    "Start: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
-    "Vorgang: $operationName",
-    "Sicherungsordner: $destination",
-    ("Freier Platz beim Start: {0:N1} GB" -f $freeSpaceGb),
-    "Dateisystem: $fileSystem",
-    $bitLockerStatus,
-    "Hinweis: Geoeffnete/gesperrte Dateien werden ohne VSS ggf. uebersprungen.",
-    "Threads: $Threads",
-    ("Robocopy-Wiederholungen: /R:{0} /W:{1}" -f $runPolicy.RetryCount, $runPolicy.RetryWaitSeconds),
-    ("Superschnell-Modus: {0}" -f $(if ($runPolicy.SuperFast) { 'Ja - Vorpruefung, Pruefsummen und BitLocker-Abfrage uebersprungen.' } else { 'Nein' })),
-    ("Dry-Run: {0}" -f $(if ($DryRun) { 'Ja - es werden keine Nutzdaten kopiert.' } else { 'Nein' })),
-    $preflightNoticeLogLines,
-    $(if ($Mode -eq 'Restore') { "Restore-Integritaetsrichtlinie: $RestoreIntegrityPolicy" }),
-    $(if ($Mode -eq 'Restore') { "Restore-Integritaet bestaetigt: $restoreIntegrityVerified; ungepruefte Ausnahme: $restoreIntegrityOverride; Pruefung in diesem Lauf: $restoreIntegrityVerificationPerformed" }),
-    $(if ($Mode -eq 'Restore') { "Quellidentitaet: $restoreSourceComputer\$restoreSourceUser" }),
-    $(if ($Mode -eq 'Restore') { "Wiederherstellungsart: $RestoreTargetMode; Migration: $restoreIsMigration; Zielwurzel: $(if ($RestoreTargetMode -eq 'Folder') { $resolvedRestoreTargetRoot } else { $env:USERPROFILE })" }),
-    $(if ($Mode -eq 'Restore') { "Ordnerzuordnungen:" }),
-    $(if ($Mode -eq 'Restore') { @($backupFolders | ForEach-Object { "  $($_.Path) -> $($_.TargetPath)" }) }),
-    ""
-) | Where-Object { $null -ne $_ } | Add-Content -LiteralPath $logFile -Encoding Unicode
+New-OperationLogHeader -OperationMode $Mode -OperationName $operationName -BackupRootPath $destination `
+    -FreeSpaceGb $freeSpaceGb -FileSystem $fileSystem -BitLockerStatus $bitLockerStatus `
+    -Threads $Threads -RunPolicy $runPolicy -DryRun ([bool]$DryRun) `
+    -PreflightNotices $preflightNoticeLogLines `
+    -IntegrityPolicy $RestoreIntegrityPolicy -IntegrityVerified ([bool]$restoreIntegrityVerified) `
+    -IntegrityOverride ([bool]$restoreIntegrityOverride) `
+    -IntegrityVerificationPerformed ([bool]$restoreIntegrityVerificationPerformed) `
+    -SourceComputer $restoreSourceComputer -SourceUser $restoreSourceUser `
+    -TargetMode $RestoreTargetMode -IsMigration ([bool]$restoreIsMigration) `
+    -TargetRoot $(if ($RestoreTargetMode -eq 'Folder') { $resolvedRestoreTargetRoot } else { $env:USERPROFILE }) `
+    -FolderPlan $backupFolders |
+    Add-Content -LiteralPath $logFile -Encoding Unicode
 
 foreach ($folder in $backupFolders) {
     $folderCancellation = Get-WorkerCancellationState
@@ -1315,39 +1686,12 @@ foreach ($folder in $backupFolders) {
     $target = $folder.TargetPath
     $displayFolderName = Get-M24FolderDisplayName $folder.Name $script:isGerman
     Write-Host $(if ($Mode -eq 'Restore') { (M "Stelle {0} wieder her..." "Restoring {0}...") -f $displayFolderName } else { (M "Sichere {0}..." "Backing up {0}...") -f $displayFolderName })
-    Write-BackupStatus -Type "FORTSCHRITT" -Text ("{0}|{1}|{2}" -f $folderNumber, $folderCount, $folder.Name)
+    Write-BackupStatus -Type 'FORTSCHRITT' -Fields $folderNumber, $folderCount, $folder.Name
 
-    # /E       kopiert auch leere Unterordner.
-    # /XJ      folgt keinen Junctions und verhindert Schleifen.
-    # /FFT     toleriert groebere Zeitstempel externer Dateisysteme.
-    # /COPY:DAT kopiert Daten, Attribute und Zeitstempel, aber keine NTFS-ACLs.
-    # Es wird absichtlich weder /MIR noch /PURGE verwendet: Am Ziel wird nichts geloescht.
-    $robocopyArgs = @(
-        $folder.Path,
-        $target,
-        "/E",
-        "/XJ",
-        "/FFT",
-        "/MT:$Threads",
-        "/R:$($runPolicy.RetryCount)",
-        "/W:$($runPolicy.RetryWaitSeconds)",
-        "/COPY:DAT",
-        "/DCOPY:DAT",
-        "/NP",
-        "/UNILOG+:$logFile"
-    )
-    if ($Mode -eq 'Restore') {
-        # /XO nur beim Restore: neuere lokale Dateien bleiben geschuetzt.
-        # Beim Backup wuerde /XO inhaltlich geaenderte Quelldateien mit
-        # aelterem Zeitstempel ueberspringen; dort gewinnt die Quelle.
-        $robocopyArgs += "/XO"
-    }
-    if (-not $DryRun) {
-        $robocopyArgs += @("/NFL", "/NDL")
-    } else {
-        $robocopyArgs += "/L"
-    }
-    $robocopyArgs += @("/XF") + $excludedFiles
+    $robocopyArgs = New-RobocopyArgument -SourcePath $folder.Path -TargetPath $target `
+        -OperationMode $Mode -Threads $Threads -RetryCount $runPolicy.RetryCount `
+        -RetryWaitSeconds $runPolicy.RetryWaitSeconds -LogFile $logFile `
+        -DryRun ([bool]$DryRun) -ExcludedFiles $excludedFiles
 
     $robocopyResult = Invoke-RobocopyWithCancel -Arguments $robocopyArgs -CancelFile $CancelFile -CurrentFolder $folderNumber -TotalFolders $folderCount -FolderName $folder.Name
     if ($robocopyResult.Cancelled) {
@@ -1408,7 +1752,8 @@ if ($maxCode -le 7) {
                 -Folders $checksumFolders `
                 -ManifestPath $checksumManifestFile `
                 -ExcludedFiles $excludedFiles `
-                -StatusCallback { param($current, $total, $name) Write-BackupStatus -Type 'PRUEFSUMME' -Text ("{0}|{1}|{2}" -f $current, $total, $name) } `
+                -StatusCallback { param($current, $total, $name) Write-BackupStatus -Type 'PRUEFSUMME' -Fields $current, $total, $name } `
+                -ProgressCallback { param($files, $bytes, $folder) Write-BackupStatus -Type 'HASHFORTSCHRITT' -Fields $files, $bytes } `
                 -CancelCallback { return (Get-WorkerCancellationState).Requested }
             if ($checksumResult.Cancelled) {
                 $checksumCancellation = Get-WorkerCancellationState
@@ -1416,6 +1761,18 @@ if ($maxCode -le 7) {
                 Stop-M24CancelledOperation -State $checksumCancellation
             }
             Add-Content -LiteralPath $logFile -Encoding Unicode -Value ((M "Pruefsummen: {0} Dateien; {1} neu berechnet; {2} wiederverwendet." "Checksums: {0} files; {1} recalculated; {2} reused.") -f $checksumResult.Files, $checksumResult.HashedFiles, $checksumResult.ReusedFiles)
+            # Getrennte Laufzeiten machen im Nachhinein erkennbar, ob Datentraeger,
+            # Verzeichnisaufzaehlung oder CPU den Lauf begrenzt hat.
+            Add-Content -LiteralPath $logFile -Encoding Unicode -Value ((M "Pruefsummen-Laufzeit: {0:N1} s gesamt; Verzeichnisaufzaehlung {1:N1} s; Hashen {2:N1} s fuer {3:N0} MiB ({4:N1} MiB/s); Manifest lesen {5:N1} s, schreiben {6:N1} s; sonstiger Aufwand {7:N1} s; wiederverwendet {8:N0} MiB." "Checksum runtime: {0:N1} s total; directory enumeration {1:N1} s; hashing {2:N1} s for {3:N0} MiB ({4:N1} MiB/s); manifest read {5:N1} s, write {6:N1} s; other overhead {7:N1} s; reused {8:N0} MiB.") -f `
+                ([double]$checksumResult.TotalMilliseconds / 1000), `
+                ([double]$checksumResult.EnumerationMilliseconds / 1000), `
+                ([double]$checksumResult.HashMilliseconds / 1000), `
+                ([double]$checksumResult.HashedBytes / 1MB), `
+                ([double]$checksumResult.AverageHashMegabytesPerSecond), `
+                ([double]$checksumResult.ManifestReadMilliseconds / 1000), `
+                ([double]$checksumResult.ManifestWriteMilliseconds / 1000), `
+                ([double]$checksumResult.OverheadMilliseconds / 1000), `
+                ([double]$checksumResult.ReusedBytes / 1MB))
             if ([int64]$checksumResult.SkippedDeviceFiles -gt 0) {
                 Add-Content -LiteralPath $logFile -Encoding Unicode -Value ((M "Hinweis: {0} Datei(en) mit reserviertem Geraetenamen (z. B. 'nul') wurden ohne Pruefsumme uebersprungen." "Note: {0} file(s) with reserved device names (e.g. 'nul') were skipped without a checksum.") -f $checksumResult.SkippedDeviceFiles)
             }

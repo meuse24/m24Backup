@@ -79,6 +79,11 @@ and file system. Ambiguous matches are never accepted automatically. Before back
 the app asks for confirmation; the new drive is remembered only after a
 successful run.
 
+If the selected destination is an internal drive, the app points out once that
+an external USB drive offers better protection against hardware failure and
+malware. This prompt appears only before the first backup to that drive;
+afterwards the choice counts as deliberate and the prompt is omitted.
+
 The app remembers selected standard and custom folders for the next start.
 **History** lists the ten most recent logs. **Verify backup** reads every data
 file completely and compares its SHA-256 checksum with `_Pruefsummen.tsv` to
@@ -372,7 +377,9 @@ The following sections support troubleshooting and review.
   folder selection, status, previews, cancellation, and help.
 - `Bibliothekssicherung.ps1`: worker for backup and restore, validation,
   preflight checks, and Robocopy execution.
-- `M24Backup.Shared.ps1`: shared helpers for reserved names and nested paths.
+- `M24Backup.Shared.ps1`: shared foundation for both scripts – bilingual texts,
+  the status protocol contract, checksum manifest, backup inventory,
+  cancellation detection, plus reserved names and nested paths.
 
 <a id="command-line"></a>
 ## Running directly without the GUI
@@ -440,6 +447,14 @@ responsive.
 The GUI passes selected folders in a temporary JSON file. The worker writes
 status and result files atomically. The GUI polls those files at short
 intervals.
+
+The status file holds a single line of the form `<TYPE>|<field>|<field>`. The
+available message types and their fields are defined once in
+`M24Backup.Shared.ps1` as a shared contract (`Get-M24StatusMessageContract`).
+The worker composes every message through `Format-M24StatusMessage`, and the
+GUI reads it through `ConvertFrom-M24StatusMessage` with named fields. An
+unknown type or a wrong field count therefore surfaces immediately instead of
+during a live run.
 
 ## Preflight and conflict detection
 

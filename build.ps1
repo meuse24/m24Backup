@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Builds the portable ZIP and, when Inno Setup is installed, the per-user installer.
 

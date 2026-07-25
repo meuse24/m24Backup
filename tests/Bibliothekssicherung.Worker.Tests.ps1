@@ -165,10 +165,21 @@ Describe 'Worker result contract' {
         }
     }
 
-    It 'preserves own custom targets and collects foreign custom folders safely' {
+    # Die Zuordnung eigener und fremder Zusatzordner wurde frueher ueber
+    # Quelltextmuster geprueft. Seit die Regeln in Resolve-RestoreFolderDefinitions
+    # stehen, pruefen sie echte Verhaltenstests in
+    # Bibliothekssicherung.Worker.Functions.Tests.ps1:
+    #   - 'returns an own additional folder to its recorded original path'
+    #   - 'collects a foreign additional folder safely below Documents ...'
+    #   - 'maps every folder below the destination root in folder mode'
+
+    # Die Ueberlappungspruefung steht seit der Aufteilung in
+    # Assert-FolderCopyPlanIsSafe und wird dort direkt getestet
+    # (Bibliothekssicherung.Worker.Functions.Tests.ps1), zusaetzlich
+    # end-to-end in Bibliothekssicherung.Worker.Behavior.Tests.ps1.
+
+    It 'includes custom-folder classification in preview mappings' {
         $workerText = Get-Content -LiteralPath $script:workerScript -Raw
-        $workerText | Should -Match '\-not \$restoreIsMigration[\s\S]+OriginalPath'
-        $workerText | Should -Match 'Wiederhergestellte Ordner'
-        $workerText | Should -Match '\$RestoreTargetMode -eq ''Folder'''
+        $workerText | Should -Match 'FolderMappings[\s\S]+IsCustom = \[bool\]\$_.IsCustom'
     }
 }

@@ -8,6 +8,80 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ### Geändert
 
+- Der Hinweis auf ein internes Sicherungsziel erscheint nur noch vor der
+  ersten Sicherung auf dieses Laufwerk. Liegt dort bereits eine Sicherung des
+  aktuellen Profils, war die Wahl eine bewusste Entscheidung und die Rückfrage
+  entfällt. Auch ein abgebrochener oder fehlgeschlagener früherer Versuch zählt
+  dafür; die Sicherung eines anderen Benutzers oder Computers dagegen nicht.
+
+- Der Sicherungs-Worker wurde umstrukturiert: Ordnerauflösung, Kopierplan,
+  Sicherheitsprüfungen, Speicherplatzprüfung, Integritätsentscheidung,
+  Robocopy-Argumente, Bildschirmausgabe und Protokollkopf stehen jetzt in
+  benannten Funktionen statt im durchgehenden Ablauf. Die Fallunterscheidung
+  zwischen Sicherung und Wiederherstellung im Hauptablauf hat sich dadurch
+  halbiert (41 auf 20 Stellen), der in Funktionen gefasste Anteil stieg von
+  41 % auf 63 %. Das Verhalten ist unverändert; abgesichert durch neue Tests.
+- Das Statusprotokoll zwischen Worker und Oberfläche hat einen gemeinsamen,
+  geprüften Vertrag (`Get-M24StatusMessageContract`,
+  `Format-M24StatusMessage`, `ConvertFrom-M24StatusMessage`) in
+  `M24Backup.Shared.ps1`. Nachrichtentypen und Feldpositionen waren zuvor auf
+  beiden Seiten unabhängig als Literale hinterlegt; die Oberfläche liest die
+  Felder jetzt über Namen statt über Positionen. Ein unbekannter Nachrichtentyp
+  oder eine falsche Feldzahl fällt sofort auf, statt erst zur Laufzeit.
+- Die zweisprachigen Oberflächentexte werden von einer gemeinsamen Funktion
+  erzeugt (`Get-M24Text`). Oberfläche und Worker hatten dafür je eine eigene,
+  identische Funktion (`L` bzw. `M`); beide Kurznamen bleiben als Alias
+  erhalten. Ebenso entfallen eine doppelte Größenformatierung und mehrere
+  Weiterleitungsfunktionen ohne eigene Logik in der Oberfläche.
+
+- Die SHA-256-Prüfsummenverarbeitung wurde deutlich beschleunigt. Erstsicherung
+  und vollständige Integritätsprüfung laufen bei vielen kleinen Dateien rund
+  dreimal schneller (gemessen: 20.000 Dateien, 322,6 MiB, Erstlauf
+  37,9 s auf 12,1 s, Verifikation 49,2 s auf 13,5 s). Ursache war ein je Datei
+  neu angelegter 1-MiB-Puffer, der im Large Object Heap landete; er wird nun
+  über den gesamten Lauf wiederverwendet. Die Verzeichnisaufzählung nutzt statt
+  `Get-ChildItem -Recurse` direkt `DirectoryInfo.EnumerateFiles()`. Junctions
+  werden weiterhin nicht verfolgt, ausgeschlossene Dateien identisch gefiltert
+  und Aufzählungsfehler unverändert als Fehler gemeldet. Die Prüfsummen selbst
+  sind bitgleich, das Manifestformat bleibt unverändert.
+- Sicherungs- und Prüfprotokolle weisen die Laufzeit jetzt getrennt nach
+  Verzeichnisaufzählung, Hashen, Manifest lesen, Manifest schreiben und
+  sonstigem Aufwand aus, samt Lesedurchsatz. Damit ist im Nachhinein erkennbar,
+  ob Datenträger, Verzeichnisaufzählung oder CPU den Lauf begrenzt hat.
+- Prüfsumme und gespeicherte Metadaten einer Datei stammen jetzt garantiert aus
+  demselben Zustand. Ändert sich eine Datei während des Hashens, wird sie erneut
+  gelesen; bleibt sie instabil, bricht der Lauf mit einer verständlichen Meldung
+  ab, statt einen Manifesteintrag aus nicht zusammengehörigem Hash und
+  Metadaten zu schreiben.
+- Während längerer Prüfsummenläufe zeigt die Oberfläche zusätzlich die Anzahl
+  bereits verarbeiteter Dateien und die gelesene Datenmenge an. Die Anzeige
+  wird auf höchstens vier Aktualisierungen pro Sekunde gedrosselt.
+- Ein beschädigter Prüfsummenwert im Manifest wird bei Folgesicherungen nicht
+  mehr unverändert übernommen, sondern erkannt und neu berechnet.
+
+### Behoben
+
+- Die Wiederherstellung brach mit „Die Konfliktvorschau konnte nicht gelesen
+  werden" ab, sobald das Backup ein Prüfsummenmanifest besaß, das seit der
+  letzten Sicherung nicht geprüft worden war. Ursache waren typografische
+  Anführungszeichen in zwei doppelt gesetzten Meldungstexten: PowerShell wertet
+  `„`, `“` und `”` als String-Begrenzer, wodurch der Text in mehrere Argumente
+  zerfiel und die Textfunktion mit einem Bindungsfehler abbrach. Beide Texte
+  stehen jetzt in einfachen Anführungszeichen. Zwei neue Prüfungen verhindern
+  einen Rückfall projektweit.
+- Eine Fehlermeldung mit einem `|`-Zeichen wurde in der Statusanzeige der
+  Oberfläche abgeschnitten. Das abschließende Textfeld einer Statusnachricht
+  nimmt das Trennzeichen jetzt mit auf.
+- Scheitert die Auswertung der Wiederherstellungsvorschau oder der
+  Vorprüfungswarnungen, nennt die Oberfläche jetzt die technische Ursache und
+  schreibt sie ins Diagnoseprotokoll (`%LOCALAPPDATA%\M24Backup\Logs`). Zuvor
+  brach der Vorgang mit einem allgemeinen Hinweis ab, ohne dass die Ursache
+  nachvollziehbar war. Auch unerwartete Fehler beim Verarbeiten einer
+  Statusmeldung werden nun einmal je Lauf protokolliert statt verworfen.
+- Ein Abbruch während der Verzeichnisaufzählung einer Prüfsummenaktualisierung
+  wird nun als Abbruch gemeldet, statt einen unvollständigen Bestand als
+  gültiges Manifest zu schreiben.
+
 - Der Wiederherstellungsmodus erkennt nun alle Sicherungen auf dem gewählten
   Laufwerk. Vollständige Sicherungen anderer Computer oder Benutzer können in
   das aktuelle Profil übernommen oder in einen frei gewählten Ordner kopiert

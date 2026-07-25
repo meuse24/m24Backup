@@ -1,5 +1,6 @@
 /build/
 /dist/
+/build.zip
 /.agents/
 /.claude/
 *.user

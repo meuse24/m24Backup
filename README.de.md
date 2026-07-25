@@ -156,6 +156,28 @@ Die relativen Starter sind ebenfalls nutzbar:
 - `Bibliothekssicherung starten.vbs` – normaler Start ohne Konsolenfenster
 - `Bibliothekssicherung starten.bat` – Start für Diagnosezwecke
 
+### Tests
+
+Die Testsuite benötigt [Pester 5](https://pester.dev/):
+
+```powershell
+Invoke-Pester -Path .\tests
+```
+
+| Datei | Inhalt |
+| --- | --- |
+| `M24Backup.Shared.Tests.ps1` | gemeinsame Helfer, Prüfsummen, Inventar, Löschung |
+| `M24Backup.StatusProtocol.Tests.ps1` | Vertrag des Statusprotokolls, Abgleich von Sender und Empfänger |
+| `M24Backup.SourceIntegrity.Tests.ps1` | Quelltext-Invarianten, unter anderem typografische Anführungszeichen |
+| `Bibliothekssicherung.Worker.Tests.ps1` | Parameter- und Ergebnisvertrag des Workers |
+| `Bibliothekssicherung.Worker.Functions.Tests.ps1` | Ablauf-Funktionen des Workers einzeln geprüft |
+| `Bibliothekssicherung.Worker.Behavior.Tests.ps1` | vollständige Sicherungs- und Wiederherstellungsläufe |
+
+Die Verhaltenstests starten den Worker als eigenen Prozess und legen dafür
+über `subst` ein temporäres Laufwerk an. Sie fassen ausschließlich eigene
+Testordner an; Administratorrechte sind nicht erforderlich. Ein vollständiger
+Durchlauf dauert etwa eine Minute.
+
 ### Release bauen
 
 Für den Installer wird [Inno Setup 6](https://jrsoftware.org/isinfo.php)

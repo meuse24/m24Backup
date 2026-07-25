@@ -15,12 +15,10 @@ if (Test-Path -LiteralPath $sharedScript -PathType Leaf) {
     throw "Shared helper script not found: $sharedScript"
 }
 
-$script:isGerman = Test-M24GermanUiCulture
-function L {
-    param([string]$German, [string]$English)
-    if ($script:isGerman) { return $German }
-    return $English
-}
+# L bleibt der gewohnte Kurzname fuer zweisprachige Texte, verweist aber auf
+# die gemeinsame Implementierung in M24Backup.Shared.ps1.
+$script:isGerman = Initialize-M24Localization
+Set-Alias -Name L -Value Get-M24Text -Scope Script
 
 <#
 DPI-Strategie (dokumentiert, siehe plan.md Arbeitspaket 1):
@@ -341,6 +339,9 @@ $script:approvalFile = $null
 $script:selectedFoldersFile = $null
 $script:restorePreviewShown = $false
 $script:scanWarningShown = $false
+# Drosselt das Protokollieren von Fehlern beim Lesen der Statusdatei auf den
+# ersten Vorfall je Lauf.
+$script:statusReadErrorLogged = $false
 $script:lastLogDir = $null
 $script:lastLogFile = $null
 $script:lastDestination = $null
@@ -372,6 +373,7 @@ $script:ejectDialogOpen = $false
 $script:verificationPowerShell = $null
 $script:verificationAsyncResult = $null
 $script:verificationCancelFile = $null
+$script:verificationProgressFile = $null
 $script:deletionPowerShell = $null
 $script:deletionAsyncResult = $null
 $script:deletionInfo = $null
@@ -506,6 +508,90 @@ function Get-FolderItemDisplayName {
     return [string]$Item
 }
 
+function Get-SelectedFolderLocationDetails {
+    param($Item = $libraryList.SelectedItem)
+    $item = $Item
+    if (-not $item) {
+        return [pscustomobject]@{
+            Heading = $(if ($restoreRadio.Checked) { L 'Zielordner:' 'Destination folder:' } else { L 'Quellordner:' 'Source folder:' })
+            Path = ''
+            Message = L 'Ordner auswählen, um den Speicherort anzuzeigen.' 'Select a folder to show its location.'
+        }
+    }
+
+    if ($backupRadio.Checked) {
+        return [pscustomobject]@{
+            Heading = L 'Quellordner:' 'Source folder:'
+            Path = [string]$item.Path
+            Message = ''
+        }
+    }
+
+    $selectedBackup = Get-SelectedBackupInventoryItem
+    if (-not $selectedBackup) {
+        return [pscustomobject]@{
+            Heading = L 'Zielordner:' 'Destination folder:'
+            Path = ''
+            Message = L 'Zuerst eine Sicherung auswählen.' 'Select a backup first.'
+        }
+    }
+
+    if ($restoreFolderRadio.Checked) {
+        if ([string]::IsNullOrWhiteSpace($script:restoreTargetFolder)) {
+            return [pscustomobject]@{
+                Heading = L 'Zielordner:' 'Destination folder:'
+                Path = ''
+                Message = L 'Zuerst einen Zielordner auswählen.' 'Select a destination folder first.'
+            }
+        }
+        $target = Join-Path (Join-Path $script:restoreTargetFolder ([string]$selectedBackup.DisplayName)) ([string]$item.Name)
+        return [pscustomobject]@{ Heading = L 'Zielordner:' 'Destination folder:'; Path = $target; Message = '' }
+    }
+
+    $isMigration = [bool]($selectedBackup.MetadataReadable -and -not $selectedBackup.IsCurrentProfile)
+    if ([bool]$item.IsCustom -and $isMigration) {
+        $documents = Get-LibraryDefinitions -IncludeMissing | Where-Object Name -eq 'Dokumente' | Select-Object -First 1
+        if (-not $documents -or [string]::IsNullOrWhiteSpace([string]$documents.Path)) {
+            return [pscustomobject]@{
+                Heading = L 'Zielordner:' 'Destination folder:'
+                Path = ''
+                Message = L 'Der Dokumente-Ordner konnte nicht ermittelt werden.' 'The Documents folder could not be resolved.'
+            }
+        }
+        $target = Join-Path ([string]$documents.Path) (Join-Path (L 'Wiederhergestellte Ordner' 'Restored folders') (Join-Path ([string]$selectedBackup.DisplayName) ([string]$item.Name)))
+        return [pscustomobject]@{ Heading = L 'Zielordner:' 'Destination folder:'; Path = $target; Message = '' }
+    }
+
+    if ([string]::IsNullOrWhiteSpace([string]$item.Path)) {
+        return [pscustomobject]@{
+            Heading = L 'Zielordner:' 'Destination folder:'
+            Path = ''
+            Message = L 'Der Zielordner kann erst beim Prüfen ermittelt werden.' 'The destination folder can only be resolved during review.'
+        }
+    }
+    return [pscustomobject]@{ Heading = L 'Zielordner:' 'Destination folder:'; Path = [string]$item.Path; Message = '' }
+}
+
+function Update-FolderLocationDisplay {
+    if (-not $folderLocationLabel -or $folderLocationLabel.IsDisposed) { return }
+    $details = Get-SelectedFolderLocationDetails
+    $fullText = if ($details.Path) { [string]$details.Path } else { [string]$details.Message }
+    # Unsichtbare Umbruchmoeglichkeiten nach Verzeichnistrennern verhindern,
+    # dass lange Pfade trotz mehrzeiligem Label nur am rechten Rand enden.
+    $wrappedText = $fullText.Replace('\', "\$([char]0x200B)")
+    $folderLocationLabel.Text = "{0}`r`n{1}" -f $details.Heading, $wrappedText
+    $folderLocationLabel.AccessibleName = [string]$details.Heading
+    $folderLocationLabel.AccessibleDescription = $fullText
+    $folderLocationToolTip.SetToolTip($folderLocationLabel, $fullText)
+}
+
+function Hide-FolderHoverToolTip {
+    $script:hoveredFolderIndex = -1
+    if ($folderHoverToolTip -and -not $folderHoverToolTip.IsDisposed) {
+        $folderHoverToolTip.Hide($libraryList)
+    }
+}
+
 # Stellt noch nicht vermessene Ordner in die Warteschlange und startet bei
 # Bedarf den Hintergrund-Scanner. Bereits ermittelte Groessen bleiben fuer die
 # Sitzung im Cache; erneute Aufrufe (Moduswechsel, Laufwerkswechsel) messen
@@ -604,7 +690,13 @@ function Get-FolderMetadataFile {
 }
 
 function Get-RestoreCustomFolders {
-    param([string]$BackupRoot)
+    param(
+        [string]$BackupRoot,
+        [bool]$IsMigration,
+        [string]$TargetMode,
+        [string]$TargetRoot,
+        [string]$SourceDisplayName
+    )
     $metadataFile = Get-FolderMetadataFile -BackupRoot $BackupRoot
     if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) { return @() }
     try {
@@ -612,7 +704,22 @@ function Get-RestoreCustomFolders {
         return @($metadata | Where-Object {
             $_.Name -and $_.OriginalPath -and (Test-Path -LiteralPath (Join-Path $BackupRoot $_.Name) -PathType Container)
         } | ForEach-Object {
-            New-FolderListItem -Name ([string]$_.Name) -DisplayName ("{0} ({1})" -f $_.Name, $_.OriginalPath) -Path ([string]$_.OriginalPath) -IsCustom $true -Checked $true -SizePath (Join-Path $BackupRoot ([string]$_.Name))
+            $name = [string]$_.Name
+            $displayName = if ($TargetMode -eq 'Folder') {
+                if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
+                    (L '{0} (wird in den gewählten Zielordner kopiert)' '{0} (will be copied to the selected destination folder)') -f $name
+                } else {
+                    $target = Join-Path (Join-Path $TargetRoot $SourceDisplayName) $name
+                    (L '{0} (Ziel: {1})' '{0} (destination: {1})') -f $name, $target
+                }
+            } elseif ($IsMigration) {
+                $documents = Get-LibraryDefinitions -IncludeMissing | Where-Object Name -eq 'Dokumente' | Select-Object -First 1
+                $target = Join-Path ([string]$documents.Path) (Join-Path (L 'Wiederhergestellte Ordner' 'Restored folders') (Join-Path $SourceDisplayName $name))
+                (L '{0} (Ziel: {1})' '{0} (destination: {1})') -f $name, $target
+            } else {
+                "{0} ({1})" -f $name, $_.OriginalPath
+            }
+            New-FolderListItem -Name $name -DisplayName $displayName -Path ([string]$_.OriginalPath) -IsCustom $true -Checked $true -SizePath (Join-Path $BackupRoot $name)
         })
     } catch {
         return @()
@@ -623,7 +730,7 @@ function Get-ExistingCustomFolderMetadataForSelectedDrive {
     if (-not $driveCombo.SelectedItem) { return @() }
     try {
         $disk = $script:driveMap[$driveCombo.SelectedItem.ToString()]
-        $backupRoot = Get-BackupRoot -Drive $disk.DeviceID
+        $backupRoot = Get-M24BackupRoot -Drive $disk.DeviceID
         $metadataFile = Get-FolderMetadataFile -BackupRoot $backupRoot
         if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) { return @() }
         return @(Get-Content -LiteralPath $metadataFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop | Where-Object { $_.Name -and $_.OriginalPath })
@@ -779,39 +886,18 @@ function Get-NewestLogFile {
         Select-Object -First 1
 }
 
-function Get-BackupRoot {
-    param([string]$Drive)
-    return Get-M24BackupRoot -Drive $Drive
-}
-
-function Get-BackupMetadataIdentity {
-    param([string[]]$Lines)
-    return Get-M24BackupMetadataIdentity -Lines $Lines
-}
-
-function Test-BackupMetadataMatchesCurrentProfile {
-    param([string[]]$Lines)
-
-    return Test-M24BackupMetadataIdentity -Lines $Lines
-}
-
-function Test-BackupMetadataHasSuccessfulResult {
-    param([string[]]$Lines)
-    return [bool](Get-M24BackupResultInfo -Lines $Lines).IsComplete
-}
-
 function Test-DriveHasCurrentProfileBackup {
     param($Disk)
 
     if (-not $Disk -or -not $Disk.DeviceID) { return $false }
 
-    $metadataFile = Join-Path (Get-BackupRoot -Drive $Disk.DeviceID) '_Sicherungsinfo.txt'
+    $metadataFile = Join-Path (Get-M24BackupRoot -Drive $Disk.DeviceID) '_Sicherungsinfo.txt'
     if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) { return $false }
 
     try {
         $lines = @(Get-Content -LiteralPath $metadataFile -ErrorAction Stop)
-        return (Test-BackupMetadataMatchesCurrentProfile -Lines $lines) -and
-            (Test-BackupMetadataHasSuccessfulResult -Lines $lines)
+        return (Test-M24BackupMetadataIdentity -Lines $lines) -and
+            [bool](Get-M24BackupResultInfo -Lines $lines).IsComplete
     } catch {
         return $false
     }
@@ -890,9 +976,16 @@ function Update-RestoreSourceList {
         $identityText = if ($item.MetadataReadable) { "{0}\{1}" -f $item.Computer, $item.User } else { L 'Identität unbekannt' 'Identity unknown' }
         $dateText = if ($item.LastCompletedAt) { ([datetime]$item.LastCompletedAt).ToString('dd.MM.yyyy HH:mm') } else { L 'kein Abschlussdatum' 'no completion date' }
         $stateText = if ($item.IsComplete) { L 'vollständig' 'complete' } elseif ($item.MetadataReadable) { L 'unvollständig' 'incomplete' } else { L 'Metadaten nicht lesbar' 'metadata unreadable' }
-        $display = "{0} — {1} — {2} — {3}" -f $item.DisplayName, $identityText, $dateText, $stateText
-        # DisplayName ist der direkte und damit innerhalb des Inventarstamms
-        # eindeutige Ordnername. Die Anzeige benoetigt keinen technischen Index.
+        $display = if ($item.MetadataReadable) {
+            "{0} — {1} — {2}" -f $identityText, $dateText, $stateText
+        } else {
+            "{0} — {1} — {2}" -f $item.DisplayName, $dateText, $stateText
+        }
+        # Nur bei identischen menschenlesbaren Angaben wird der technische
+        # Ordnername zur eindeutigen Unterscheidung angehaengt.
+        if ($script:backupInventoryMap.ContainsKey($display)) {
+            $display = "{0} — {1}" -f $display, $item.DisplayName
+        }
         $key = $display
         $script:backupInventoryMap[$key] = $item
         [void]$backupSourceCombo.Items.Add($key)
@@ -938,7 +1031,7 @@ function Update-BackupArtifactActions {
     $script:lastDestination = if ($restoreRadio.Checked) {
         if ($selectedBackup) { [string]$selectedBackup.RootPath } else { $null }
     } else {
-        Get-BackupRoot -Drive $disk.DeviceID
+        Get-M24BackupRoot -Drive $disk.DeviceID
     }
     if (-not $script:lastDestination) {
         $script:lastLogDir = $null
@@ -1134,7 +1227,7 @@ function Get-BackupHealth {
         [string]$BackupRoot
     )
 
-    $backupDirectory = if ($BackupRoot) { $BackupRoot } else { Get-BackupRoot -Drive $Drive }
+    $backupDirectory = if ($BackupRoot) { $BackupRoot } else { Get-M24BackupRoot -Drive $Drive }
     $metadataFile = Join-Path $backupDirectory '_Sicherungsinfo.txt'
     if (-not (Test-Path -LiteralPath $metadataFile -PathType Leaf)) {
         return [pscustomobject]@{
@@ -1146,7 +1239,7 @@ function Get-BackupHealth {
 
     try {
         $lines = @(Get-Content -LiteralPath $metadataFile -ErrorAction Stop)
-        if (-not $BackupRoot -and -not (Test-BackupMetadataMatchesCurrentProfile -Lines $lines)) {
+        if (-not $BackupRoot -and -not (Test-M24BackupMetadataIdentity -Lines $lines)) {
             throw (L 'Die Sicherungsmetadaten gehören zu einem anderen Profil.' 'The backup metadata belongs to a different profile.')
         }
 
@@ -1738,6 +1831,7 @@ $libraryList.IntegralHeight = $false
 $libraryList.BackColor = $listBackColor
 $libraryList.AccessibleName = L 'Ordnerauswahl' 'Folder selection'
 $libraryList.TabIndex = 0
+$script:hoveredFolderIndex = -1
 $folderSurface.Controls.Add($libraryList, 0, 1)
 
 foreach ($folder in Get-LibraryDefinitions) {
@@ -1747,17 +1841,18 @@ foreach ($folder in Get-LibraryDefinitions) {
 
 # Auswahlbefehle als kompaktes 2x2-Raster rechts neben der Liste.
 $folderCommandPanel = New-Object System.Windows.Forms.TableLayoutPanel
-$folderCommandPanel.AutoSize = $true
-$folderCommandPanel.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+$folderCommandPanel.AutoSize = $false
 $folderCommandPanel.BackColor = $surfaceColor
 $folderCommandPanel.ColumnCount = 2
 [void]$folderCommandPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$folderCommandPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
-$folderCommandPanel.RowCount = 2
+$folderCommandPanel.RowCount = 3
 [void]$folderCommandPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$folderCommandPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$folderCommandPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
 $folderCommandPanel.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 0)
-$folderCommandPanel.Anchor = 'Top, Right'
+$folderCommandPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
+$folderCommandPanel.MinimumSize = New-Object System.Drawing.Size(184, 0)
 $folderCommandPanel.TabIndex = 1
 $folderSurface.Controls.Add($folderCommandPanel, 1, 1)
 
@@ -1781,6 +1876,30 @@ $removeFolderButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 0)
 $removeFolderButton.Enabled = $false
 $removeFolderButton.TabIndex = 3
 $folderCommandPanel.Controls.Add($removeFolderButton, 1, 1)
+
+$folderLocationLabel = New-Object System.Windows.Forms.Label
+$folderLocationLabel.AutoSize = $false
+$folderLocationLabel.Dock = [System.Windows.Forms.DockStyle]::Fill
+$folderLocationLabel.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
+$folderLocationLabel.Padding = New-Object System.Windows.Forms.Padding(2, 0, 2, 0)
+$folderLocationLabel.TextAlign = [System.Drawing.ContentAlignment]::TopLeft
+$folderLocationLabel.ForeColor = $secondaryTextColor
+$folderLocationLabel.BackColor = $surfaceColor
+$folderLocationLabel.AutoEllipsis = $true
+$folderLocationLabel.AccessibleName = L 'Ordnerspeicherort' 'Folder location'
+$folderCommandPanel.Controls.Add($folderLocationLabel, 0, 2)
+$folderCommandPanel.SetColumnSpan($folderLocationLabel, 2)
+
+$folderLocationToolTip = New-Object System.Windows.Forms.ToolTip
+$folderLocationToolTip.AutoPopDelay = 20000
+$folderLocationToolTip.InitialDelay = 400
+$folderLocationToolTip.ReshowDelay = 100
+
+$folderHoverToolTip = New-Object System.Windows.Forms.ToolTip
+$folderHoverToolTip.AutoPopDelay = 10000
+$folderHoverToolTip.InitialDelay = 350
+$folderHoverToolTip.ReshowDelay = 100
+$folderHoverToolTip.ShowAlways = $true
 
 # Backupverwaltung: Befehle, die ein vorhandenes Backup betreffen, bilden
 # eine eigene beschriftete Zeile. "Backup loeschen" steht zuletzt und wird
@@ -2259,7 +2378,28 @@ $ejectTimer.Add_Tick({
 $verificationTimer = New-Object System.Windows.Forms.Timer
 $verificationTimer.Interval = 500
 $verificationTimer.Add_Tick({
-    if (-not $script:verificationAsyncResult -or -not $script:verificationAsyncResult.IsCompleted) { return }
+    if (-not $script:verificationAsyncResult -or -not $script:verificationAsyncResult.IsCompleted) {
+        # Die Pruefung laeuft in einem eigenen Runspace. Der Fortschritt kommt
+        # ueber eine Datei zurueck, die der Lauf gedrosselt schreibt.
+        if ($script:verificationProgressFile -and (Test-Path -LiteralPath $script:verificationProgressFile -PathType Leaf)) {
+            try {
+                $progressParts = ([System.IO.File]::ReadAllText($script:verificationProgressFile)).Split('|')
+                if ($progressParts.Count -ge 2) {
+                    $progressFiles = 0L; $progressBytes = 0L
+                    [void][int64]::TryParse($progressParts[0], [ref]$progressFiles)
+                    [void][int64]::TryParse($progressParts[1], [ref]$progressBytes)
+                    $resultBox.Text = if ($script:isGerman) {
+                        "Bisher geprüft: $('{0:N0}' -f $progressFiles) Dateien, $(Format-FolderSizeText $progressBytes)."
+                    } else {
+                        "Verified so far: $('{0:N0}' -f $progressFiles) files, $(Format-FolderSizeText $progressBytes)."
+                    }
+                }
+            } catch {
+                # Ein gleichzeitiger Schreibvorgang darf die Anzeige nicht stoeren.
+            }
+        }
+        return
+    }
     $verificationTimer.Stop()
     try {
         $output = @($script:verificationPowerShell.EndInvoke($script:verificationAsyncResult))
@@ -2309,6 +2449,8 @@ $verificationTimer.Add_Tick({
         $script:verificationAsyncResult = $null
         if ($script:verificationCancelFile) { Remove-Item -LiteralPath $script:verificationCancelFile -Force -ErrorAction SilentlyContinue }
         $script:verificationCancelFile = $null
+        if ($script:verificationProgressFile) { Remove-Item -LiteralPath $script:verificationProgressFile -Force -ErrorAction SilentlyContinue }
+        $script:verificationProgressFile = $null
         Stop-BusyProgress
         $closeButton.Visible = $true
         $startButton.Visible = $true
@@ -2339,7 +2481,7 @@ $deletionTimer.Add_Tick({
             }
         }
         $script:artifactCache.Clear()
-        $freedSize = Format-BackupDeletionSize $script:deletionInfo.Bytes
+        $freedSize = Format-FolderSizeText -Bytes $script:deletionInfo.Bytes
         $deviceWarning = ''
         if ([int]$deleted.IgnoredDeviceFiles -gt 0) {
             $deviceWarningGerman = " {0} nicht löschbare(s) Windows-Geräteartefakt(e), beispielsweise NUL, wurde(n) ignoriert; dadurch kann ein leerer Restordner bestehen bleiben."
@@ -2541,6 +2683,7 @@ function Update-SelectionState {
     $removeFolderButton.Enabled = $backupRadio.Checked -and $selectedItem -and
         $selectedItem.PSObject.Properties['IsCustom'] -and $selectedItem.IsCustom -and -not $script:backupProcess -and -not $script:pendingEjectDrive -and -not $script:verificationAsyncResult
     if ($backupRadio.Checked) { Update-BackupSelectionSnapshot }
+    Update-FolderLocationDisplay
     Update-ResultOverview
 }
 
@@ -2606,6 +2749,7 @@ function Update-BackupOptionState {
 }
 
 function Update-LibraryList {
+    Hide-FolderHoverToolTip
     $libraryList.Items.Clear()
     $items = @()
     if ($restoreRadio.Checked) {
@@ -2616,7 +2760,11 @@ function Update-LibraryList {
                 $checked = if ($script:folderCheckStates.ContainsKey([string]$_.Name)) { [bool]$script:folderCheckStates[[string]$_.Name] } else { $true }
                 New-FolderListItem -Name $_.Name -DisplayName (Get-M24FolderDisplayName $_.Name $script:isGerman) -Path $_.Path -IsCustom $false -Checked $checked -SizePath (Join-Path $backupRoot ([string]$_.Name))
             })
-            $items += @(Get-RestoreCustomFolders -BackupRoot $backupRoot)
+            $items += @(Get-RestoreCustomFolders -BackupRoot $backupRoot `
+                -IsMigration ([bool]($selectedBackup.MetadataReadable -and -not $selectedBackup.IsCurrentProfile)) `
+                -TargetMode $(if ($restoreFolderRadio.Checked) { 'Folder' } else { 'Profile' }) `
+                -TargetRoot $script:restoreTargetFolder `
+                -SourceDisplayName ([string]$selectedBackup.DisplayName))
             # Auch ohne lesbare _Ordner.json muessen vorhandene fremde
             # Datenordner beim sicheren Kopieren auswählbar bleiben.
             $knownNames = @($items | ForEach-Object { [string]$_.Name })
@@ -2721,6 +2869,20 @@ $libraryList.Add_ItemCheck({
 })
 
 $libraryList.Add_SelectedIndexChanged({ Update-SelectionState })
+$libraryList.Add_MouseMove({
+    param($sender, $eventArgs)
+    $hoverIndex = $sender.IndexFromPoint($eventArgs.Location)
+    if ($hoverIndex -eq $script:hoveredFolderIndex) { return }
+    Hide-FolderHoverToolTip
+    if ($hoverIndex -lt 0 -or $hoverIndex -ge $sender.Items.Count) { return }
+
+    $script:hoveredFolderIndex = $hoverIndex
+    $details = Get-SelectedFolderLocationDetails -Item $sender.Items[$hoverIndex]
+    $locationText = if ($details.Path) { [string]$details.Path } else { [string]$details.Message }
+    $toolTipText = "{0} {1}" -f $details.Heading, $locationText
+    $folderHoverToolTip.Show($toolTipText, $sender, $eventArgs.X + 16, $eventArgs.Y + 18, 10000)
+})
+$libraryList.Add_MouseLeave({ Hide-FolderHoverToolTip })
 
 function Get-PhysicalDriveConnectionInfo {
     param($LogicalDisk)
@@ -3022,8 +3184,8 @@ $backupSourceCombo.Add_SelectedIndexChanged({
     Update-LibraryList
     Update-SelectionState
 })
-$restoreProfileRadio.Add_CheckedChanged({ if ($restoreProfileRadio.Checked) { Update-RestoreTargetState; Update-SelectionState } })
-$restoreFolderRadio.Add_CheckedChanged({ if ($restoreFolderRadio.Checked) { Update-RestoreTargetState; Update-SelectionState } })
+$restoreProfileRadio.Add_CheckedChanged({ if ($restoreProfileRadio.Checked) { Update-RestoreTargetState; Update-LibraryList; Update-SelectionState } })
+$restoreFolderRadio.Add_CheckedChanged({ if ($restoreFolderRadio.Checked) { Update-RestoreTargetState; Update-LibraryList; Update-SelectionState } })
 $restoreFolderButton.Add_Click({
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
     $dialog.Description = L 'Zielordner für die wiederhergestellten Daten auswählen' 'Choose a destination folder for the restored data'
@@ -3032,6 +3194,7 @@ $restoreFolderButton.Add_Click({
         if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
             $script:restoreTargetFolder = [string]$dialog.SelectedPath
             Update-RestoreTargetState
+            Update-LibraryList
             Update-SelectionState
         }
     } finally {
@@ -3159,7 +3322,11 @@ $startButton.Add_Click({
         )
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     }
-    if ($backupRadio.Checked -and $disk.M24IsInternal) {
+    # Der Hinweis auf ein internes Ziel ist eine Entscheidungshilfe vor der
+    # ersten Sicherung. Liegt auf dem Laufwerk bereits eine Sicherung dieses
+    # Profils, war die Wahl bewusst und die Rueckfrage nur noch Reibung.
+    if ($backupRadio.Checked -and $disk.M24IsInternal -and
+        -not (Test-M24BackupExistsOnDrive -Drive $disk.DeviceID)) {
         $answer = [System.Windows.Forms.MessageBox]::Show(
             (L "Das ausgewählte Ziel ist ein internes Laufwerk. Eine Sicherung auf einem externen USB-Laufwerk schützt besser vor Defekten und Schadsoftware.`r`n`r`nTrotzdem fortfahren?" "The selected destination is an internal drive. An external USB drive offers better protection against hardware failure and malware.`r`n`r`nContinue anyway?"),
             (L "Internes Sicherungsziel" "Internal backup destination"),
@@ -3183,7 +3350,7 @@ $startButton.Add_Click({
     $script:approvalFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.approve" -f [guid]::NewGuid().ToString("N"))
     $script:selectedFoldersFile = Join-Path $env:TEMP ("Bibliothekssicherung_{0}.folders.json" -f [guid]::NewGuid().ToString("N"))
     $selectedRestoreBackup = if ($restoreRadio.Checked) { Get-SelectedBackupInventoryItem } else { $null }
-    $operationBackupRoot = if ($selectedRestoreBackup) { [string]$selectedRestoreBackup.RootPath } else { Get-BackupRoot -Drive $drive }
+    $operationBackupRoot = if ($selectedRestoreBackup) { [string]$selectedRestoreBackup.RootPath } else { Get-M24BackupRoot -Drive $drive }
     $script:lastLogDir = Join-Path $operationBackupRoot '_logs'
     $script:lastLogFile = $null
     $script:lastDestination = $operationBackupRoot
@@ -3197,6 +3364,7 @@ $startButton.Add_Click({
     $script:autoEjectRequested = $backupRadio.Checked -and $ejectCheckBox.Checked -and $disk.M24CanEject
     $script:restorePreviewShown = $false
     $script:scanWarningShown = $false
+    $script:statusReadErrorLogged = $false
     Update-ElapsedDuration
     $cancelButton.Text = if ($restoreRadio.Checked) { L "Wiederherstellung abbrechen" "Cancel restore" } else { L "Sicherung abbrechen" "Cancel backup" }
     $logButton.Enabled = $false
@@ -3377,8 +3545,10 @@ $timer.Add_Tick({
         try {
             $status = (Get-Content -LiteralPath $script:statusFile -Raw -ErrorAction Stop).Trim()
             if ($status) {
-                $parts = $status -split '\|'
-                switch ($parts[0]) {
+                # Der Nachrichtenvertrag liegt in M24Backup.Shared.ps1; die
+                # Felder kommen benannt zurueck statt als Positionen.
+                $statusMessage = ConvertFrom-M24StatusMessage -Line $status
+                switch ($statusMessage.Type) {
                     "VORSCHAU" {
                         if (-not $script:restorePreviewShown -and $script:previewFile -and (Test-Path -LiteralPath $script:previewFile)) {
                             $script:restorePreviewShown = $true
@@ -3394,7 +3564,10 @@ $timer.Add_Tick({
                                 } elseif ($verifiedAt) {
                                     (L "Integrität: Prüfsummen zuletzt erfolgreich geprüft am {0}." "Integrity: checksums last verified successfully on {0}.") -f $verifiedAt
                                 } else {
-                                    L "Integrität: Prüfsummen seit der letzten Sicherung nicht geprüft – Empfehlung: zuerst „Backup prüfen“ ausführen." "Integrity: checksums not verified since the last backup – recommendation: run “Verify backup” first."
+                                    # Einfache Anfuehrungszeichen sind hier Pflicht: PowerShell wertet
+                                    # die typografischen Zeichen „ “ ” als Begrenzer eines doppelt
+                                    # gesetzten Strings und wuerde den Text zerreissen.
+                                    L 'Integrität: Prüfsummen seit der letzten Sicherung nicht geprüft – Empfehlung: zuerst „Backup prüfen“ ausführen.' 'Integrity: checksums not verified since the last backup – recommendation: run “Verify backup” first.'
                                 }
                                 $sourceIdentity = if ($preview.SourceComputer -or $preview.SourceUser) { "$($preview.SourceComputer)\$($preview.SourceUser)" } else { L 'unbekannt' 'unknown' }
                                 $targetDescription = if ([string]$preview.TargetMode -eq 'Folder') {
@@ -3403,12 +3576,31 @@ $timer.Add_Tick({
                                     L 'Aktuelles Benutzerprofil' 'Current user profile'
                                 }
                                 $migrationNotice = if ([bool]$preview.IsMigration -and [string]$preview.TargetMode -eq 'Profile') {
-                                    (L "`r`n`r`nDiese Sicherung stammt von „{0}“. Die ausgewählten Daten werden in das aktuelle Benutzerprofil übernommen." "`r`n`r`nThis backup originates from “{0}”. The selected data will be restored to the current user profile.") -f $sourceIdentity
+                                    # Zeilenumbruch getrennt verkettet, damit der Text mit den
+                                    # typografischen Anfuehrungszeichen einfach gesetzt bleiben kann.
+                                    (L ("`r`n`r`n" + 'Diese Sicherung stammt von „{0}“. Die ausgewählten Daten werden in das aktuelle Benutzerprofil übernommen.') ("`r`n`r`n" + 'This backup originates from “{0}”. The selected data will be restored to the current user profile.')) -f $sourceIdentity
                                 } else { '' }
-                                $message = if ($script:isGerman) {
-                                    "Wiederherstellungsvorschau:`r`n`r`nHerkunft: $sourceIdentity`r`nZiel: $targetDescription`r`nFehlende Dateien: $($preview.MissingFiles)`r`nLokale Dateien, die ersetzt werden: $($preview.OverwriteFiles)`r`nNeuere lokale Dateien, die geschützt bleiben: $($preview.ProtectedNewerFiles)`r`nZu kopieren: $($preview.PlannedFiles) Dateien / $previewGb GB`r`n`r`n$integrityText$migrationNotice$exampleText`r`n`r`nWiederherstellung jetzt starten?"
+                                $folderMappings = @($preview.FolderMappings)
+                                $folderLines = @($folderMappings | ForEach-Object {
+                                    "• {0} → {1}" -f (Get-M24FolderDisplayName ([string]$_.Name) $script:isGerman), $_.Target
+                                })
+                                $redirectedCount = @($folderMappings | Where-Object { $_.PSObject.Properties['IsCustom'] -and [bool]$_.IsCustom }).Count
+                                $folderText = if ($script:isGerman) {
+                                    "Ausgewählte Ordner ($($folderMappings.Count)):`r`n$($folderLines -join "`r`n")"
                                 } else {
-                                    "Restore preview:`r`n`r`nOrigin: $sourceIdentity`r`nDestination: $targetDescription`r`nMissing files: $($preview.MissingFiles)`r`nLocal files to be replaced: $($preview.OverwriteFiles)`r`nNewer local files that remain protected: $($preview.ProtectedNewerFiles)`r`nTo be copied: $($preview.PlannedFiles) files / $previewGb GB`r`n`r`n$integrityText$migrationNotice$exampleText`r`n`r`nStart the restore now?"
+                                    "Selected folders ($($folderMappings.Count)):`r`n$($folderLines -join "`r`n")"
+                                }
+                                if ([bool]$preview.IsMigration -and [string]$preview.TargetMode -eq 'Profile' -and $redirectedCount -gt 0) {
+                                    $folderText += if ($script:isGerman) {
+                                        "`r`nDavon werden $redirectedCount Zusatzordner sicher unter 'Wiederhergestellte Ordner' abgelegt."
+                                    } else {
+                                        "`r`n$redirectedCount additional folders will be placed safely under 'Restored folders'."
+                                    }
+                                }
+                                $message = if ($script:isGerman) {
+                                    "Wiederherstellungsvorschau:`r`n`r`nHerkunft: $sourceIdentity`r`nZiel: $targetDescription`r`n`r`n$folderText`r`n`r`nFehlende Dateien: $($preview.MissingFiles)`r`nLokale Dateien, die ersetzt werden: $($preview.OverwriteFiles)`r`nNeuere lokale Dateien, die geschützt bleiben: $($preview.ProtectedNewerFiles)`r`nZu kopieren: $($preview.PlannedFiles) Dateien / $previewGb GB`r`n`r`n$integrityText$migrationNotice$exampleText`r`n`r`nWiederherstellung jetzt starten?"
+                                } else {
+                                    "Restore preview:`r`n`r`nOrigin: $sourceIdentity`r`nDestination: $targetDescription`r`n`r`n$folderText`r`n`r`nMissing files: $($preview.MissingFiles)`r`nLocal files to be replaced: $($preview.OverwriteFiles)`r`nNewer local files that remain protected: $($preview.ProtectedNewerFiles)`r`nTo be copied: $($preview.PlannedFiles) files / $previewGb GB`r`n`r`n$integrityText$migrationNotice$exampleText`r`n`r`nStart the restore now?"
                                 }
                                 $answer = [System.Windows.Forms.MessageBox]::Show($message, (L "Wiederherstellung prüfen" "Review restore"), "YesNo", "Warning")
                                 if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
@@ -3439,9 +3631,19 @@ $timer.Add_Tick({
                                     $statusLabel.Text = L "Wiederherstellung wird abgebrochen ..." "Cancelling restore ..."
                                 }
                             } catch {
+                                # Ein Abbruch an dieser Stelle verhindert die
+                                # Wiederherstellung. Die Ursache muss deshalb
+                                # nachvollziehbar bleiben und darf nicht nur
+                                # als allgemeiner Hinweis erscheinen.
+                                $previewError = $_
+                                Write-M24DiagnosticLog -EventId 'GUI.RestorePreview' `
+                                    -Message 'Failed to evaluate the restore preview.' -Exception $previewError `
+                                    -Context ('PreviewFile={0}; Exists={1}' -f $script:previewFile, (Test-Path -LiteralPath $script:previewFile))
                                 $script:backupCancelled = $true
                                 Set-Content -LiteralPath $script:cancelFile -Value 'cancel' -Encoding ASCII -ErrorAction SilentlyContinue
-                                [System.Windows.Forms.MessageBox]::Show((L "Die Konfliktvorschau konnte nicht gelesen werden. Die Wiederherstellung wurde nicht gestartet." "The conflict preview could not be read. The restore was not started."), (L "Fehler" "Error"), "OK", "Error") | Out-Null
+                                [System.Windows.Forms.MessageBox]::Show(
+                                    ((L "Die Konfliktvorschau konnte nicht ausgewertet werden. Die Wiederherstellung wurde nicht gestartet.`r`n`r`nUrsache: {0}" "The conflict preview could not be evaluated. The restore was not started.`r`n`r`nCause: {0}") -f $previewError.Exception.Message),
+                                    (L "Fehler" "Error"), "OK", "Error") | Out-Null
                             }
                         }
                     }
@@ -3467,29 +3669,46 @@ $timer.Add_Tick({
                                     $statusLabel.Text = L "Sicherung wird abgebrochen ..." "Cancelling backup ..."
                                 }
                             } catch {
+                                $warningError = $_
+                                Write-M24DiagnosticLog -EventId 'GUI.ScanWarnings' `
+                                    -Message 'Failed to evaluate the preflight warnings.' -Exception $warningError `
+                                    -Context ('PreviewFile={0}; Exists={1}' -f $script:previewFile, (Test-Path -LiteralPath $script:previewFile))
                                 $script:backupCancelled = $true
                                 Set-Content -LiteralPath $script:cancelFile -Value 'cancel' -Encoding ASCII -ErrorAction SilentlyContinue
-                                [System.Windows.Forms.MessageBox]::Show((L "Die Warnungen der Vorprüfung konnten nicht gelesen werden. Die Sicherung wurde nicht fortgesetzt." "The preflight warnings could not be read. The backup was not continued."), (L "Fehler" "Error"), "OK", "Error") | Out-Null
+                                [System.Windows.Forms.MessageBox]::Show(
+                                    ((L "Die Warnungen der Vorprüfung konnten nicht ausgewertet werden. Die Sicherung wurde nicht fortgesetzt.`r`n`r`nUrsache: {0}" "The preflight warnings could not be evaluated. The backup was not continued.`r`n`r`nCause: {0}") -f $warningError.Exception.Message),
+                                    (L "Fehler" "Error"), "OK", "Error") | Out-Null
                             }
                         }
                     }
                     "PRUEFUNG" {
                         Start-BusyProgress
-                        $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
-                        $statusLabel.Text = if ($script:isGerman) { "Prüfe Ordner $($parts[1]) von $($parts[2]): $displayFolder" } else { "Checking folder $($parts[1]) of $($parts[2]): $displayFolder" }
+                        $displayFolder = Get-M24FolderDisplayName $statusMessage.FolderName $script:isGerman
+                        $statusLabel.Text = if ($script:isGerman) { "Prüfe Ordner $($statusMessage.Current) von $($statusMessage.Total): $displayFolder" } else { "Checking folder $($statusMessage.Current) of $($statusMessage.Total): $displayFolder" }
                         $resultBox.Text = L "Dateien und benötigter Speicherplatz werden geprüft ..." "Checking files and required disk space ..."
                     }
                     "PRUEFSUMME" {
                         Start-BusyProgress
-                        $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
-                        $statusLabel.Text = if ($script:isGerman) { "Prüfsummen für Ordner $($parts[1]) von $($parts[2]): $displayFolder" } else { "Checksums for folder $($parts[1]) of $($parts[2]): $displayFolder" }
+                        $displayFolder = Get-M24FolderDisplayName $statusMessage.FolderName $script:isGerman
+                        $statusLabel.Text = if ($script:isGerman) { "Prüfsummen für Ordner $($statusMessage.Current) von $($statusMessage.Total): $displayFolder" } else { "Checksums for folder $($statusMessage.Current) of $($statusMessage.Total): $displayFolder" }
                         $resultBox.Text = L "Neue und geänderte Backup-Dateien werden mit SHA-256 erfasst ..." "New and changed backup files are being recorded with SHA-256 ..."
+                    }
+                    "HASHFORTSCHRITT" {
+                        # Der Worker meldet gedrosselt, damit die Anzeige bei
+                        # vielen kleinen Dateien nicht selbst zum Engpass wird.
+                        if ($null -ne $statusMessage.Files -and $null -ne $statusMessage.Bytes) {
+                            $resultBox.Text = if ($script:isGerman) {
+                                "Bisher verarbeitet: $('{0:N0}' -f $statusMessage.Files) Dateien, $(Format-FolderSizeText -Bytes $statusMessage.Bytes)."
+                            } else {
+                                "Processed so far: $('{0:N0}' -f $statusMessage.Files) files, $(Format-FolderSizeText -Bytes $statusMessage.Bytes)."
+                            }
+                        }
                     }
                     "RESTOREPRUEFUNG" {
                         Start-BusyProgress
-                        if ($parts.Count -ge 4) {
-                            $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
-                            $statusLabel.Text = if ($script:isGerman) { "Prüfe Backup-Integrität für Ordner $($parts[1]) von $($parts[2]): $displayFolder" } else { "Verifying backup integrity for folder $($parts[1]) of $($parts[2]): $displayFolder" }
+                        if ($statusMessage.FolderName) {
+                            $displayFolder = Get-M24FolderDisplayName $statusMessage.FolderName $script:isGerman
+                            $statusLabel.Text = if ($script:isGerman) { "Prüfe Backup-Integrität für Ordner $($statusMessage.Current) von $($statusMessage.Total): $displayFolder" } else { "Verifying backup integrity for folder $($statusMessage.Current) of $($statusMessage.Total): $displayFolder" }
                         } else {
                             $statusLabel.Text = L 'Backup-Integrität wird geprüft ...' 'Verifying backup integrity ...'
                         }
@@ -3497,11 +3716,11 @@ $timer.Add_Tick({
                     }
                     "KOPIERVORGANG" {
                         Start-BusyProgress
-                        $current = [int]$parts[1]
-                        $total = [int]$parts[2]
+                        $current = [int]$statusMessage.Current
+                        $total = [int]$statusMessage.Total
                         $script:lastProgressCurrent = $current
                         $script:lastProgressTotal = [math]::Max(1, $total)
-                        $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
+                        $displayFolder = Get-M24FolderDisplayName $statusMessage.FolderName $script:isGerman
                         $statusLabel.Text = if ($restoreRadio.Checked) {
                             if ($script:isGerman) { "Robocopy stellt Ordner $current von $total wieder her: $displayFolder" } else { "Robocopy is restoring folder $current of $total`: $displayFolder" }
                         } elseif ($script:activeDryRun) {
@@ -3513,9 +3732,9 @@ $timer.Add_Tick({
                     }
                     "ABBRUCHLAEUFT" {
                         Start-BusyProgress
-                        $current = [int]$parts[1]
-                        $total = [int]$parts[2]
-                        $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
+                        $current = [int]$statusMessage.Current
+                        $total = [int]$statusMessage.Total
+                        $displayFolder = Get-M24FolderDisplayName $statusMessage.FolderName $script:isGerman
                         $statusLabel.Text = if ($script:isGerman) { "Abbruch läuft für Ordner $current von $total`: $displayFolder" } else { "Cancelling folder $current of $total`: $displayFolder" }
                         $resultBox.Text = if ($restoreRadio.Checked) {
                             L "Robocopy wird gestoppt. Die zuletzt aktive Datei kann unvollständig sein." "Robocopy is being stopped. The last active file may be incomplete."
@@ -3527,10 +3746,10 @@ $timer.Add_Tick({
                     }
                     "ABBRUCHWARTET" {
                         Start-BusyProgress
-                        $current = [int]$parts[1]
-                        $total = [int]$parts[2]
-                        $displayFolder = Get-M24FolderDisplayName $parts[3] $script:isGerman
-                        $seconds = if ($parts.Count -ge 5) { [int]$parts[4] } else { 0 }
+                        $current = [int]$statusMessage.Current
+                        $total = [int]$statusMessage.Total
+                        $displayFolder = Get-M24FolderDisplayName $statusMessage.FolderName $script:isGerman
+                        $seconds = [int]$statusMessage.WaitedSeconds
                         $statusLabel.Text = if ($script:isGerman) { "Warte auf Robocopy-Ende für Ordner $current von $total`: $displayFolder" } else { "Waiting for Robocopy to exit for folder $current of $total`: $displayFolder" }
                         $resultBox.Text = if ($script:isGerman) {
                             "Robocopy wird beendet. Bitte Laufwerk nicht entfernen. Wartezeit: $seconds s."
@@ -3540,11 +3759,11 @@ $timer.Add_Tick({
                     }
                     "FORTSCHRITT" {
                         Start-BusyProgress
-                        $current = [int]$parts[1]
-                        $total = [int]$parts[2]
+                        $current = [int]$statusMessage.Current
+                        $total = [int]$statusMessage.Total
                         $script:lastProgressCurrent = $current
                         $script:lastProgressTotal = [math]::Max(1, $total)
-                        $name = Get-M24FolderDisplayName $parts[3] $script:isGerman
+                        $name = Get-M24FolderDisplayName $statusMessage.FolderName $script:isGerman
                         $statusLabel.Text = if ($restoreRadio.Checked) {
                             if ($script:isGerman) { "Ordner $current von $total wird wiederhergestellt: $name" } else { "Restoring folder $current of $total`: $name" }
                         } elseif ($script:activeDryRun) {
@@ -3561,12 +3780,22 @@ $timer.Add_Tick({
                         Stop-BusyProgress
                         $statusLabel.Text = if ($restoreRadio.Checked) { L "Wiederherstellung erfolgreich abgeschlossen." "Restore completed successfully." } elseif ($script:activeDryRun) { L "Simulation erfolgreich abgeschlossen." "Simulation completed successfully." } else { L "Sicherung erfolgreich abgeschlossen." "Backup completed successfully." }
                     }
-                    "FEHLER" { $statusLabel.Text = $parts[1] }
+                    "FEHLER" { $statusLabel.Text = $statusMessage.Text }
                     "ABGEBROCHEN" { $statusLabel.Text = L "Vorgang wurde abgebrochen." "Operation was cancelled." }
                 }
             }
         } catch {
-            # Beim ersten Anlegen oder Entfernen kann die Datei kurz fehlen.
+            # Beim ersten Anlegen oder Entfernen kann die Datei kurz fehlen;
+            # das ist erwartet. Ein Fehler beim Auswerten einer Statusmeldung
+            # ist es nicht und wuerde hier sonst spurlos verschwinden. Nur der
+            # erste Fehler je Lauf wird protokolliert, weil der Timer im
+            # Sekundentakt feuert.
+            if (-not $script:statusReadErrorLogged) {
+                $script:statusReadErrorLogged = $true
+                Write-M24DiagnosticLog -EventId 'GUI.StatusRead' -Severity 'Warning' `
+                    -Message 'Failed to read or handle a worker status message.' -Exception $_ `
+                    -Context ('StatusFile={0}' -f $script:statusFile)
+            }
         }
     }
 
@@ -3812,14 +4041,6 @@ $historyButton.Add_Click({
     }
 })
 
-function Format-BackupDeletionSize {
-    param([int64]$Bytes)
-    if ($Bytes -ge 1GB) { return (L '{0:N2} GB' '{0:N2} GB') -f ($Bytes / 1GB) }
-    if ($Bytes -ge 1MB) { return (L '{0:N1} MB' '{0:N1} MB') -f ($Bytes / 1MB) }
-    if ($Bytes -ge 1KB) { return (L '{0:N1} KB' '{0:N1} KB') -f ($Bytes / 1KB) }
-    return (L '{0} Bytes' '{0} bytes') -f $Bytes
-}
-
 function Show-BackupDeletionTextConfirmation {
     param($Info)
 
@@ -3901,7 +4122,7 @@ $deleteBackupButton.Add_Click({
         $deletionEnglish = "The following backup will be deleted completely and permanently:`r`n`r`nPath: {0}`r`nComputer: {1}`r`nUser: {2}`r`nLatest result: {3}`r`nBacked-up libraries: {4}`r`nLatest checksum verification: {5}`r`nOn-disk contents: {6} files, {7} directories, {8}`r`n`r`nAll user data, metadata, checksums, and logs in this backup will be removed. The drive and other backups remain unchanged.`r`n`r`nContinue to the final safety confirmation?"
         $message = (L $deletionGerman $deletionEnglish) -f
             $info.BackupRoot, $info.Computer, $info.User, $resultText, $foldersText, $verifiedText,
-            $info.Files, $info.Directories, (Format-BackupDeletionSize $info.Bytes)
+            $info.Files, $info.Directories, (Format-FolderSizeText -Bytes $info.Bytes)
         $answer = [System.Windows.Forms.MessageBox]::Show($message, (L 'Backup löschen' 'Delete backup'), 'YesNo', 'Warning')
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         if (-not (Show-BackupDeletionTextConfirmation -Info $info)) { return }
@@ -3963,6 +4184,7 @@ $verifyButton.Add_Click({
 
     Set-VerificationControlsEnabled -Enabled $false
     $script:verificationCancelFile = Join-Path ([System.IO.Path]::GetTempPath()) ("M24Backup.verify-cancel.{0}.{1}.tmp" -f $PID, [guid]::NewGuid().ToString('N'))
+    $script:verificationProgressFile = Join-Path ([System.IO.Path]::GetTempPath()) ("M24Backup.verify-progress.{0}.{1}.tmp" -f $PID, [guid]::NewGuid().ToString('N'))
     $statusLabel.Text = if ($initializeManifest) { L 'Prüfsummen werden initial erstellt ...' 'Creating initial checksums ...' } else { L 'SHA-256-Prüfsummen werden verglichen ...' 'Comparing SHA-256 checksums ...' }
     Start-BusyProgress
     $closeButton.Visible = $false
@@ -3972,8 +4194,14 @@ $verifyButton.Add_Click({
     $cancelButton.Visible = $true
     $form.AcceptButton = $null
     $verificationScript = {
-        param([string]$root, [string]$sharedScript, [string]$manifestPath, [bool]$initialize, [string]$cancelFile, [string]$missingFoldersMessage)
+        param([string]$root, [string]$sharedScript, [string]$manifestPath, [bool]$initialize, [string]$cancelFile, [string]$missingFoldersMessage, [string]$progressFile)
         . $sharedScript
+        $reportProgress = {
+            param($processedFiles, $processedBytes, $currentFolder)
+            try { Write-M24AtomicTextFile -Path $progressFile -Content ("{0}|{1}" -f $processedFiles, $processedBytes) } catch {
+                # Die Pruefung laeuft weiter, falls nur die Fortschrittsdatei klemmt.
+            }
+        }
         $startedAt = Get-Date
         $logDir = Join-Path $root '_logs'
         New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop | Out-Null
@@ -3991,17 +4219,17 @@ $verifyButton.Add_Click({
                 $lockStream = [System.IO.File]::Open($lockFile, 'OpenOrCreate', 'ReadWrite', 'None'); $lockAcquired = $true
                 if ($initialize) {
                     $created = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles $excluded -ForceRehash `
-                        -CancelCallback { Test-Path -LiteralPath $cancelFile }
-                    $result = [pscustomobject]@{ Initialized = $true; Cancelled = $created.Cancelled; Files = $created.Files; Bytes = $created.Bytes; ErrorCount = 0; Errors = @() }
+                        -CancelCallback { Test-Path -LiteralPath $cancelFile } -ProgressCallback $reportProgress
+                    $result = [pscustomobject]@{ Initialized = $true; Cancelled = $created.Cancelled; Files = $created.Files; Bytes = $created.Bytes; ErrorCount = 0; Errors = @(); Metrics = $created }
                 } else {
                     $checked = Test-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles $excluded `
-                        -CancelCallback { Test-Path -LiteralPath $cancelFile }
+                        -CancelCallback { Test-Path -LiteralPath $cancelFile } -ProgressCallback $reportProgress
                     if (-not $checked.Cancelled -and [int]$checked.ErrorCount -eq 0) {
                         # Erfolgreiche Vollpruefung in den Metadaten vermerken; die
                         # Restore-Vorschau zeigt diesen Stand als Integritaetsstatus an.
                         Set-M24ChecksumVerifiedMetadata -MetadataFile (Join-Path $root '_Sicherungsinfo.txt')
                     }
-                    $result = [pscustomobject]@{ Initialized = $false; Cancelled = $checked.Cancelled; Files = $checked.Files; Bytes = $checked.Bytes; ErrorCount = $checked.ErrorCount; Errors = @($checked.Errors) }
+                    $result = [pscustomobject]@{ Initialized = $false; Cancelled = $checked.Cancelled; Files = $checked.Files; Bytes = $checked.Bytes; ErrorCount = $checked.ErrorCount; Errors = @($checked.Errors); Metrics = $checked }
                 }
             }
         } catch {
@@ -4025,6 +4253,17 @@ $verifyButton.Add_Click({
                 "Bytes: $([int64]$result.Bytes)",
                 "Integritaetsfehler: $([int]$result.ErrorCount)"
             )
+            # Getrennte Laufzeiten zeigen, ob Datentraeger, Verzeichnisaufzaehlung
+            # oder CPU den Lauf begrenzt hat.
+            if ($result.Metrics) {
+                $lines += ("Verzeichnisaufzaehlung: {0:N1} s" -f ([double]$result.Metrics.EnumerationMilliseconds / 1000))
+                $lines += ("Sonstiger Aufwand: {0:N1} s" -f ([double]$result.Metrics.OverheadMilliseconds / 1000))
+                $lines += ("Hashen: {0:N1} s fuer {1:N0} MiB ({2:N1} MiB/s)" -f ([double]$result.Metrics.HashMilliseconds / 1000), ([double]$result.Metrics.HashedBytes / 1MB), ([double]$result.Metrics.AverageHashMegabytesPerSecond))
+                $lines += ("Manifest lesen: {0:N1} s" -f ([double]$result.Metrics.ManifestReadMilliseconds / 1000))
+                if ($null -ne $result.Metrics.ManifestWriteMilliseconds) {
+                    $lines += ("Manifest schreiben: {0:N1} s" -f ([double]$result.Metrics.ManifestWriteMilliseconds / 1000))
+                }
+            }
             if (@($result.Errors).Count -gt 0) {
                 $lines += ''
                 $lines += 'Fehlerdetails:'
@@ -4035,7 +4274,7 @@ $verifyButton.Add_Click({
         return [pscustomobject]@{ Initialized = $result.Initialized; Cancelled = $result.Cancelled; Files = $result.Files; Bytes = $result.Bytes; ErrorCount = $result.ErrorCount; Errors = @($result.Errors); UnexpectedError = $unexpectedError; LogFile = $logFile }
     }
     $script:verificationPowerShell = [System.Management.Automation.PowerShell]::Create()
-    [void]$script:verificationPowerShell.AddScript($verificationScript.ToString()).AddArgument($script:lastDestination).AddArgument($sharedScript).AddArgument($manifestPath).AddArgument($initializeManifest).AddArgument($script:verificationCancelFile).AddArgument((L 'Keine Sicherungsordner mit Nutzdaten gefunden.' 'No backup data folders were found.'))
+    [void]$script:verificationPowerShell.AddScript($verificationScript.ToString()).AddArgument($script:lastDestination).AddArgument($sharedScript).AddArgument($manifestPath).AddArgument($initializeManifest).AddArgument($script:verificationCancelFile).AddArgument((L 'Keine Sicherungsordner mit Nutzdaten gefunden.' 'No backup data folders were found.')).AddArgument($script:verificationProgressFile)
     $script:verificationAsyncResult = $script:verificationPowerShell.BeginInvoke()
     $verificationTimer.Start()
 })
@@ -4280,7 +4519,7 @@ Close-StartupSplash
 } finally {
     Close-StartupSplash
     if ($notifyIcon) { try { $notifyIcon.Visible = $false; $notifyIcon.Dispose() } catch {} }
-    foreach ($resource in @($appIcon, $healthToolTip, $driveToolTip, $optionsToolTip, $resultContextMenu, $timer, $driveWatchTimer, $ejectTimer, $notificationTimer, $verificationTimer, $deletionTimer)) {
+    foreach ($resource in @($appIcon, $healthToolTip, $driveToolTip, $optionsToolTip, $folderLocationToolTip, $folderHoverToolTip, $resultContextMenu, $timer, $driveWatchTimer, $ejectTimer, $notificationTimer, $verificationTimer, $deletionTimer)) {
         if ($resource) { try { $resource.Dispose() } catch {} }
     }
     if ($form) { try { $form.Dispose() } catch {} }

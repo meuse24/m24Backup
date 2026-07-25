@@ -87,6 +87,11 @@ einer Sicherung auf ein anderes Laufwerk fragt sie nach; erst nach einem
 erfolgreichen Lauf wird das neue Laufwerk für die künftige Wiedererkennung
 gespeichert.
 
+Ist das gewählte Ziel ein internes Laufwerk, weist die App einmalig darauf hin,
+dass ein externes USB-Laufwerk besser vor Defekten und Schadsoftware schützt.
+Dieser Hinweis erscheint nur vor der ersten Sicherung auf dieses Laufwerk;
+danach gilt die Wahl als bewusste Entscheidung und die Rückfrage entfällt.
+
 Die App merkt sich die gewählten Standard- und Zusatzordner für den nächsten
 Start. **Verlauf** zeigt die letzten zehn vorhandenen Protokolle. Mit **Backup
 prüfen** wird jede Nutzdatei vollständig gelesen und ihre SHA-256-Prüfsumme mit
@@ -402,8 +407,9 @@ Die folgenden Abschnitte dienen der Diagnose und Nachvollziehbarkeit.
   Laufwerks- und Ordnerauswahl, Status, Vorschauen, Abbruch und Hilfe.
 - `Bibliothekssicherung.ps1`: Worker für Sicherung und Wiederherstellung,
   Validierung, Vorprüfung und Robocopy-Aufrufe.
-- `M24Backup.Shared.ps1`: gemeinsame Helfer für reservierte Namen und
-  Pfadverschachtelung.
+- `M24Backup.Shared.ps1`: gemeinsame Grundlage beider Skripte – zweisprachige
+  Texte, der Vertrag des Statusprotokolls, Prüfsummenmanifest, Sicherungs-
+  inventar, Abbrucherkennung sowie reservierte Namen und Pfadverschachtelung.
 
 <a id="command-line"></a>
 ## Direkter Aufruf ohne GUI
@@ -470,6 +476,15 @@ ausgetauscht, damit die Oberfläche bedienbar bleibt.
 Die GUI übergibt die ausgewählten Ordner in einer temporären JSON-Datei.
 Der Worker schreibt Status- und Ergebnisdateien atomar. Die GUI pollt diese
 Dateien in kurzen Intervallen.
+
+Die Statusdatei enthält jeweils eine Zeile der Form `<TYP>|<Feld>|<Feld>`.
+Welche Nachrichtentypen es gibt und welche Felder sie führen, ist in
+`M24Backup.Shared.ps1` als gemeinsamer Vertrag hinterlegt
+(`Get-M24StatusMessageContract`). Der Worker baut jede Meldung über
+`Format-M24StatusMessage`, die Oberfläche liest sie über
+`ConvertFrom-M24StatusMessage` mit benannten Feldern. Ein unbekannter Typ oder
+eine falsche Feldzahl fällt dadurch sofort auf und nicht erst im laufenden
+Betrieb.
 
 ## Preflight und Konflikterkennung
 

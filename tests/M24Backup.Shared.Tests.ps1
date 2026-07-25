@@ -321,6 +321,26 @@ Describe 'Folder-overlap integration contract' {
         $ancestor.Clauses[0].Item1.Extent.Text | Should -Be '$backupRadio.Checked'
     }
 
+    It 'asks about an internal destination only before the first backup' {
+        # Die Rueckfrage ist eine Entscheidungshilfe vor der ersten Sicherung.
+        # Steht auf dem Laufwerk bereits eine Sicherung dieses Profils, war die
+        # Wahl bewusst und der Dialog darf nicht erneut erscheinen.
+        $internalDialog = $script:guiAst.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.Extent.Text -match 'Internes Sicherungsziel'
+        }, $true)
+        $internalDialog | Should -Not -BeNullOrEmpty
+
+        $ancestor = $internalDialog.Parent
+        while ($ancestor -and $ancestor -isnot [System.Management.Automation.Language.IfStatementAst]) { $ancestor = $ancestor.Parent }
+        $ancestor | Should -Not -BeNullOrEmpty
+        $condition = $ancestor.Clauses[0].Item1.Extent.Text
+        $condition | Should -Match '\$disk\.M24IsInternal' -Because 'die Rueckfrage gilt nur fuer interne Ziele'
+        $condition | Should -Match 'Test-M24BackupExistsOnDrive' -Because 'eine vorhandene Sicherung unterdrueckt die Rueckfrage'
+        $condition | Should -Match '-not\s*\(Test-M24BackupExistsOnDrive' -Because 'die Bedingung muss negiert sein'
+    }
+
     It 'returns from the GUI before drive warnings and worker setup on conflict' {
         $conflictIndex = $script:guiSource.IndexOf('$folderConflicts = @(Get-M24FolderPathConflicts')
         $conflictIndex | Should -BeGreaterThan -1
@@ -330,14 +350,16 @@ Describe 'Folder-overlap integration contract' {
         $conflictIndex | Should -BeLessThan $tempFileIndex
     }
 
-    It 'guards the worker overlap check with backup mode after selection filtering' {
-        $filterAssignment = $script:workerAst.Find({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$backupFolders' -and $node.Right.Extent.Text -match '\$selectedNames -contains' }, $true)
-        $filterAssignment | Should -Not -BeNullOrEmpty
-        $script:workerOverlapCommand.Extent.StartOffset | Should -BeGreaterThan $filterAssignment.Extent.StartOffset
+    It 'runs the worker overlap check only for backups' {
+        # Die Reihenfolge "erst Auswahl filtern, dann auf Ueberschneidung
+        # pruefen" wird seit der Aufteilung des Workers direkt am Verhalten
+        # geprueft: 'ignores a conflict between selected and unselected folders'
+        # in Bibliothekssicherung.Worker.Functions.Tests.ps1.
         $ancestor = $script:workerOverlapCommand.Parent
         while ($ancestor -and $ancestor -isnot [System.Management.Automation.Language.IfStatementAst]) { $ancestor = $ancestor.Parent }
         $ancestor | Should -Not -BeNullOrEmpty
-        $ancestor.Clauses[0].Item1.Extent.Text | Should -Be "`$Mode -eq 'Backup'"
+        $ancestor.Clauses[0].Item1.Extent.Text | Should -Be "`$OperationMode -eq 'Restore'" `
+            -Because 'die Quellueberschneidung wird nur im Backup-Zweig geprueft'
     }
 
     It 'does not run the worker source-overlap check in restore mode' {
@@ -415,6 +437,311 @@ Describe 'Checksum manifest lifecycle' {
         $result = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @() -CancelCallback { $true }
         $result.Cancelled | Should -Be $true
         Test-Path -LiteralPath $manifestPath | Should -Be $false
+    }
+
+    It 'reports separate runtime metrics' {
+        $source = Join-Path $TestDrive 'metrics-source'
+        $manifestPath = Join-Path $TestDrive 'metrics.tsv'
+        New-Item -ItemType Directory -Path $source | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $source 'a.txt'), 'metrics')
+        $folders = @([pscustomobject]@{ Name = 'Dokumente'; Path = $source })
+
+        $updated = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @()
+        foreach ($field in @('HashedBytes', 'ReusedBytes', 'EnumerationMilliseconds', 'HashMilliseconds', 'ManifestReadMilliseconds', 'ManifestWriteMilliseconds', 'TotalMilliseconds', 'AverageHashMegabytesPerSecond')) {
+            $updated.PSObject.Properties.Name | Should -Contain $field
+        }
+        $updated.PSObject.Properties.Name | Should -Contain 'OverheadMilliseconds'
+        $updated.HashedBytes | Should -Be 7
+        $updated.ReusedBytes | Should -Be 0
+        # Die Teilzeiten ergeben zusammen exakt die Gesamtdauer.
+        ([int64]$updated.HashMilliseconds + [int64]$updated.EnumerationMilliseconds + [int64]$updated.ManifestReadMilliseconds + [int64]$updated.ManifestWriteMilliseconds + [int64]$updated.OverheadMilliseconds) | Should -Be ([int64]$updated.TotalMilliseconds)
+
+        $reused = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @()
+        $reused.ReusedBytes | Should -Be 7
+        $reused.HashedBytes | Should -Be 0
+    }
+
+    It 'recomputes instead of reusing a corrupted manifest checksum' {
+        $source = Join-Path $TestDrive 'corrupt-source'
+        $manifestPath = Join-Path $TestDrive 'corrupt.tsv'
+        New-Item -ItemType Directory -Path $source | Out-Null
+        $file = Join-Path $source 'sample.txt'
+        [System.IO.File]::WriteAllText($file, 'stable content')
+        $folders = @([pscustomobject]@{ Name = 'Dokumente'; Path = $source })
+        $expected = Get-M24FileSha256 -Path $file
+
+        Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @() | Out-Null
+        # Den gespeicherten Hash beschaedigen, Groesse und Zeitstempel aber
+        # unveraendert lassen. Ohne Formatpruefung wuerde der Wert dauerhaft
+        # weitergereicht und die Datei nie wieder geprueft.
+        $entries = (Read-M24ChecksumManifest -Path $manifestPath).Entries
+        $key = @($entries.Keys)[0]
+        $entries[$key].Sha256 = 'nicht-ein-gueltiger-hash'
+        Write-M24ChecksumManifest -Path $manifestPath -Entries $entries
+
+        $repaired = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @()
+        $repaired.HashedFiles | Should -Be 1
+        $repaired.ReusedFiles | Should -Be 0
+        (Read-M24ChecksumManifest -Path $manifestPath).Entries[$key].Sha256 | Should -Be $expected
+    }
+}
+
+Describe 'Metadata consistency while hashing' {
+    It 'stores length and timestamp from the same state as the hash' {
+        $source = Join-Path $TestDrive 'consistency-source'
+        New-Item -ItemType Directory -Path $source | Out-Null
+        $file = Join-Path $source 'sample.txt'
+        [System.IO.File]::WriteAllText($file, 'consistent content')
+        $folders = @([pscustomobject]@{ Name = 'Dokumente'; Path = $source })
+        $manifestPath = Join-Path $TestDrive 'consistency.tsv'
+
+        Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @() | Out-Null
+        $entry = @((Read-M24ChecksumManifest -Path $manifestPath).Entries.Values)[0]
+        $info = New-Object System.IO.FileInfo $file
+        $entry.Length | Should -Be $info.Length
+        $entry.LastWriteUtcTicks | Should -Be $info.LastWriteTimeUtc.Ticks
+        $entry.Sha256 | Should -Be (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+    }
+
+    It 'fails instead of storing a hash that does not match the stored metadata' {
+        $source = Join-Path $TestDrive 'changing-source'
+        New-Item -ItemType Directory -Path $source | Out-Null
+        $file = Join-Path $source 'moving.txt'
+        [System.IO.File]::WriteAllText($file, 'first state')
+        $folders = @([pscustomobject]@{ Name = 'Dokumente'; Path = $source })
+        $manifestPath = Join-Path $TestDrive 'changing.tsv'
+
+        # Die Datei aendert sich bei jedem Hashvorgang. Ein Manifesteintrag aus
+        # altem Hash und neuen Metadaten waere dauerhaft falsch, weil der
+        # naechste Lauf die Datei anhand der Metadaten fuer geprueft haelt.
+        # Der Pfad kommt aus dem gebundenen Parameter, nicht aus einer Variablen
+        # des Testkoerpers: Die Sichtbarkeit umgebender Variablen im Mock-Rumpf
+        # unterscheidet sich zwischen den PowerShell-Versionen.
+        Mock Get-M24FileSha256 {
+            [System.IO.File]::AppendAllText($Path, 'x')
+            return '0000000000000000000000000000000000000000000000000000000000000000'
+        }
+
+        { Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @() } |
+            Should -Throw '*kept changing while it was being hashed*'
+        Test-Path -LiteralPath $manifestPath | Should -Be $false
+        Should -Invoke Get-M24FileSha256 -Times 2 -Exactly
+    }
+
+    It 'accepts a file that only changes once and then settles' {
+        $source = Join-Path $TestDrive 'settling-source'
+        New-Item -ItemType Directory -Path $source | Out-Null
+        $file = Join-Path $source 'settles.txt'
+        [System.IO.File]::WriteAllText($file, 'start')
+        $folders = @([pscustomobject]@{ Name = 'Dokumente'; Path = $source })
+        $manifestPath = Join-Path $TestDrive 'settling.tsv'
+
+        # Nur der erste Hashvorgang veraendert die Datei. Die Entscheidung haengt
+        # allein am aktuellen Dateizustand, damit der Mock ohne gemeinsamen
+        # Zaehler auskommt und in beiden PowerShell-Versionen gleich arbeitet.
+        Mock Get-M24FileSha256 {
+            if ((New-Object System.IO.FileInfo $Path).Length -lt 100) {
+                [System.IO.File]::AppendAllText($Path, ('x' * 200))
+            }
+            return '1111111111111111111111111111111111111111111111111111111111111111'
+        }
+
+        $updated = Update-M24ChecksumManifest -Folders $folders -ManifestPath $manifestPath -ExcludedFiles @()
+        $updated.HashedFiles | Should -Be 1
+        Should -Invoke Get-M24FileSha256 -Times 2 -Exactly
+        # Der gespeicherte Eintrag muss den Zustand nach dem letzten Hashvorgang
+        # beschreiben, nicht den davor.
+        $entry = @((Read-M24ChecksumManifest -Path $manifestPath).Entries.Values)[0]
+        $entry.Length | Should -Be (New-Object System.IO.FileInfo $file).Length
+    }
+}
+
+Describe 'Throttled progress reporting' {
+    BeforeAll {
+        # Genug Daten, damit die Drosselschwelle von 250 ms sicher ueberschritten
+        # wird, aber wenig genug fuer einen schnellen Test.
+        $script:progressSource = Join-Path $TestDrive 'progress-source'
+        New-Item -ItemType Directory -Path $script:progressSource | Out-Null
+        $block = New-Object byte[] (2MB)
+        (New-Object Random 4711).NextBytes($block)
+        for ($index = 0; $index -lt 20; $index++) {
+            [System.IO.File]::WriteAllBytes((Join-Path $script:progressSource ("p{0:D2}.bin" -f $index)), $block)
+        }
+        $script:progressFolders = @([pscustomobject]@{ Name = 'Dokumente'; Path = $script:progressSource })
+    }
+
+    It 'reports monotonically increasing progress while updating' {
+        $manifestPath = Join-Path $TestDrive 'progress-update.tsv'
+        $reports = New-Object 'System.Collections.Generic.List[object]'
+        Update-M24ChecksumManifest -Folders $script:progressFolders -ManifestPath $manifestPath -ExcludedFiles @() `
+            -ProgressCallback { param($files, $bytes, $folder) $reports.Add([pscustomobject]@{ Files = $files; Bytes = $bytes; Folder = $folder }) } | Out-Null
+
+        $reports.Count | Should -BeGreaterThan 0
+        # Ein Ereignis je Datei waere bei kleinen Dateien selbst ein
+        # Leistungsproblem; die Drosselung muss also deutlich weniger melden.
+        $reports.Count | Should -BeLessThan 20
+        $previousFiles = -1
+        foreach ($report in $reports) {
+            [int64]$report.Files | Should -BeGreaterThan $previousFiles
+            [int64]$report.Bytes | Should -BeGreaterThan 0
+            $report.Folder | Should -Not -BeNullOrEmpty
+            $previousFiles = [int64]$report.Files
+        }
+    }
+
+    It 'reports progress while verifying' {
+        $manifestPath = Join-Path $TestDrive 'progress-verify.tsv'
+        Update-M24ChecksumManifest -Folders $script:progressFolders -ManifestPath $manifestPath -ExcludedFiles @() | Out-Null
+        $reports = New-Object 'System.Collections.Generic.List[object]'
+        $verified = Test-M24ChecksumManifest -Folders $script:progressFolders -ManifestPath $manifestPath -ExcludedFiles @() `
+            -ProgressCallback { param($files, $bytes, $folder) $reports.Add([pscustomobject]@{ Files = $files; Bytes = $bytes }) }
+
+        $verified.ErrorCount | Should -Be 0
+        $reports.Count | Should -BeGreaterThan 0
+        [int64]$reports[-1].Files | Should -BeLessOrEqual ([int64]$verified.Files)
+    }
+}
+
+Describe 'SHA-256 hash buffer reuse' {
+    BeforeAll {
+        $script:hashSource = Join-Path $TestDrive 'buffer-source'
+        New-Item -ItemType Directory -Path $script:hashSource | Out-Null
+        # Groessen rund um die Puffergrenze von 1 MiB, damit sowohl ein
+        # vollstaendig gefuellter als auch ein nur teilweise gefuellter
+        # Leseblock vorkommt.
+        $script:hashSamples = [ordered]@{
+            'empty.bin'      = 0
+            'tiny.bin'       = 3
+            'below.bin'      = (1MB - 1)
+            'exact.bin'      = 1MB
+            'above.bin'      = (1MB + 1)
+            'multiblock.bin' = ([int](2.5 * 1MB))
+        }
+        $random = New-Object Random 20260725
+        foreach ($name in $script:hashSamples.Keys) {
+            $bytes = New-Object byte[] ([int]$script:hashSamples[$name])
+            if ($bytes.Length -gt 0) { $random.NextBytes($bytes) }
+            [System.IO.File]::WriteAllBytes((Join-Path $script:hashSource $name), $bytes)
+        }
+    }
+
+    It 'matches Get-FileHash for every size around the buffer boundary' {
+        foreach ($name in $script:hashSamples.Keys) {
+            $path = Join-Path $script:hashSource $name
+            $expected = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            Get-M24FileSha256 -Path $path | Should -Be $expected -Because $name
+        }
+    }
+
+    It 'produces identical hashes when one buffer is shared across files' {
+        $buffer = New-M24HashBuffer
+        # Absichtlich von der groessten zur kleinsten Datei: Eine kurze Datei
+        # nach einer langen deckt auf, ob Restbytes der vorherigen Datei in den
+        # Hash einfliessen. Der Sollwert stammt aus Get-FileHash, also aus einer
+        # von dieser Implementierung unabhaengigen Quelle.
+        foreach ($name in @('multiblock.bin', 'tiny.bin', 'exact.bin', 'empty.bin', 'above.bin', 'below.bin')) {
+            $path = Join-Path $script:hashSource $name
+            $expected = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            Get-M24FileSha256 -Path $path -Buffer $buffer | Should -Be $expected -Because $name
+        }
+    }
+
+    It 'returns a real byte array from New-M24HashBuffer' {
+        # PowerShell entrollt ein Array beim Rueckgeben, wenn das fuehrende
+        # Komma fehlt. Der Aufrufer erhielte dann ein object[] mit einzeln
+        # geboxten Bytes, was jeden Stream.Read() um Groessenordnungen
+        # verlangsamt, ohne ein falsches Ergebnis zu erzeugen.
+        $buffer = New-M24HashBuffer
+        $buffer -is [byte[]] | Should -Be $true
+        $buffer.Length | Should -Be 1MB
+    }
+
+    It 'keeps the shared buffer usable after a failed file' {
+        $missing = Join-Path $script:hashSource 'does-not-exist.bin'
+        $buffer = New-M24HashBuffer
+        { Get-M24FileSha256 -Path $missing -Buffer $buffer } | Should -Throw
+        $path = Join-Path $script:hashSource 'below.bin'
+        Get-M24FileSha256 -Path $path -Buffer $buffer | Should -Be (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+    }
+
+    It 'keeps the shared buffer usable after a cancelled file' {
+        $buffer = New-M24HashBuffer
+        # Der Abbruch greift nach dem ersten gelesenen Block, also mitten in
+        # der Datei.
+        Get-M24FileSha256 -Path (Join-Path $script:hashSource 'multiblock.bin') -Buffer $buffer -CancelCallback { $true } | Should -BeNullOrEmpty
+        $path = Join-Path $script:hashSource 'above.bin'
+        Get-M24FileSha256 -Path $path -Buffer $buffer | Should -Be (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+    }
+
+    It 'hashes only the bytes actually returned by Read' {
+        # Eine Regel, die sich nicht ueber echte Dateien erzwingen laesst:
+        # Read() darf jederzeit weniger liefern als angefordert. Der Hash muss
+        # deshalb den Rueckgabewert verwenden und nie die Pufferlaenge.
+        $definition = (Get-Command Get-M24FileSha256).Definition
+        $definition | Should -Match 'TransformBlock\(\$workBuffer,\s*0,\s*\$read'
+        $definition | Should -Not -Match 'TransformBlock\(\$workBuffer,\s*0,\s*\$workBuffer\.Length'
+    }
+}
+
+Describe 'Backup scan enumeration' {
+    It 'finds exactly the same files as the previous Get-ChildItem based scan' {
+        $source = Join-Path $TestDrive 'scan-source'
+        New-Item -ItemType Directory -Path (Join-Path $source 'a\b\c') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $source 'd') -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $source 'root.txt'), 'r')
+        [System.IO.File]::WriteAllText((Join-Path $source 'a\one.txt'), '1')
+        [System.IO.File]::WriteAllText((Join-Path $source 'a\b\two.txt'), '2')
+        [System.IO.File]::WriteAllText((Join-Path $source 'a\b\c\three.txt'), '3')
+        [System.IO.File]::WriteAllText((Join-Path $source 'd\four.txt'), '4')
+
+        $expected = @(Get-ChildItem -LiteralPath $source -File -Recurse -Force | ForEach-Object { $_.FullName }) | Sort-Object
+        $errors = New-Object 'System.Collections.Generic.List[object]'
+        $scan = Get-M24ScanDirectories -Path $source -ErrorSink $errors
+        $actual = @(foreach ($directory in $scan.Directories) { foreach ($file in $directory.EnumerateFiles()) { $file.FullName } }) | Sort-Object
+
+        $errors.Count | Should -Be 0
+        $scan.Cancelled | Should -Be $false
+        $actual | Should -Be $expected
+    }
+
+    It 'does not follow junctions, matching Get-ChildItem -Recurse' {
+        $base = Join-Path $TestDrive 'junction-base'
+        New-Item -ItemType Directory -Path (Join-Path $base 'real') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $base 'target') -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $base 'real\kept.txt'), 'k')
+        [System.IO.File]::WriteAllText((Join-Path $base 'target\inside.txt'), 'i')
+        $link = Join-Path $base 'link'
+        cmd.exe /c mklink /J "$link" "$(Join-Path $base 'target')" | Out-Null
+        if (-not (Test-Path -LiteralPath $link)) { Set-ItResult -Skipped -Because 'junctions cannot be created in this environment' }
+
+        $errors = New-Object 'System.Collections.Generic.List[object]'
+        $scan = Get-M24ScanDirectories -Path $base -ErrorSink $errors
+        $found = @(foreach ($directory in $scan.Directories) { foreach ($file in $directory.EnumerateFiles()) { $file.FullName } })
+
+        # Die Datei hinter der Junction darf nur ueber ihren echten Pfad
+        # auftauchen, nicht zusaetzlich ueber den Link.
+        @($found | Where-Object { $_ -like "$link*" }).Count | Should -Be 0
+        @($found).Count | Should -Be 2
+    }
+
+    It 'reports cancellation during enumeration instead of an empty result' {
+        $source = Join-Path $TestDrive 'scan-cancel'
+        New-Item -ItemType Directory -Path $source -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $source 'a.txt'), 'a')
+        $errors = New-Object 'System.Collections.Generic.List[object]'
+
+        $scan = Get-M24ScanDirectories -Path $source -ErrorSink $errors -CancelCallback { $true }
+        # Ohne dieses Signal hielte der Aufrufer den Scan fuer vollstaendig und
+        # schriebe ein verkuerztes Manifest.
+        $scan.Cancelled | Should -Be $true
+        @($scan.Directories).Count | Should -Be 0
+    }
+
+    It 'collects an unreadable directory as an error instead of throwing' {
+        $errors = New-Object 'System.Collections.Generic.List[object]'
+        $scan = Get-M24ScanDirectories -Path (Join-Path $TestDrive 'no-such-directory') -ErrorSink $errors
+        $errors.Count | Should -BeGreaterThan 0
+        $scan.Cancelled | Should -Be $false
     }
 }
 
@@ -557,6 +884,60 @@ Describe 'Shared backup identity' {
         $identity.Computer | Should -Be 'TEST-PC'
         $identity.User | Should -Be 'TestUser'
         Test-M24BackupMetadataIdentity -Lines $lines -Computer 'test-pc' -User 'testuser' | Should -Be $true
+    }
+}
+
+Describe 'Test-M24BackupExistsOnDrive' {
+    # Grundlage fuer die einmalige Rueckfrage bei einem internen Ziel: Die
+    # Warnung erscheint nur, solange dort noch nicht gesichert wurde.
+    BeforeAll {
+        $script:existsDrive = Join-Path $TestDrive 'exists'
+        New-Item -ItemType Directory -Path $script:existsDrive -Force | Out-Null
+    }
+
+    It 'reports no backup on an untouched drive' {
+        Test-M24BackupExistsOnDrive -Drive $script:existsDrive -Computer 'PC' -User 'User' | Should -BeFalse
+    }
+
+    It 'reports no backup when only the folder exists without metadata' {
+        $root = Get-M24BackupRoot -Drive $script:existsDrive -Computer 'Leer' -User 'User'
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        Test-M24BackupExistsOnDrive -Drive $script:existsDrive -Computer 'Leer' -User 'User' | Should -BeFalse
+    }
+
+    It 'reports an existing backup once the metadata file is present' {
+        $root = Get-M24BackupRoot -Drive $script:existsDrive -Computer 'PC' -User 'User'
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $root '_Sicherungsinfo.txt') -Encoding UTF8 -Value @(
+            'Bibliothekssicherung', 'Computer: PC', 'Benutzer: User')
+        Test-M24BackupExistsOnDrive -Drive $script:existsDrive -Computer 'PC' -User 'User' | Should -BeTrue
+    }
+
+    It 'counts an unsuccessful attempt as an existing backup' {
+        # Auch ein abgebrochener Versuch belegt eine bewusste Zielwahl.
+        $root = Get-M24BackupRoot -Drive $script:existsDrive -Computer 'PC' -User 'Abbruch'
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $root '_Sicherungsinfo.txt') -Encoding UTF8 -Value @(
+            'Bibliothekssicherung', 'Computer: PC', 'Benutzer: Abbruch',
+            'Ergebnis: Vom Benutzer abgebrochen am 2026-01-01 10:00:00.')
+        Test-M24BackupExistsOnDrive -Drive $script:existsDrive -Computer 'PC' -User 'Abbruch' | Should -BeTrue
+    }
+
+    It 'keeps profiles apart' {
+        # Die Sicherung eines anderen Benutzers belegt keine Entscheidung
+        # des aktuellen Profils.
+        $root = Get-M24BackupRoot -Drive $script:existsDrive -Computer 'PC' -User 'Fremd'
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $root '_Sicherungsinfo.txt') -Encoding UTF8 -Value @(
+            'Bibliothekssicherung', 'Computer: PC', 'Benutzer: Fremd')
+        Test-M24BackupExistsOnDrive -Drive $script:existsDrive -Computer 'PC' -User 'Fremd' | Should -BeTrue
+        Test-M24BackupExistsOnDrive -Drive $script:existsDrive -Computer 'PC' -User 'Anderer' | Should -BeFalse
+    }
+
+    It 'returns false instead of throwing for an empty or invalid drive' {
+        Test-M24BackupExistsOnDrive -Drive '' | Should -BeFalse
+        Test-M24BackupExistsOnDrive -Drive $null | Should -BeFalse
+        { Test-M24BackupExistsOnDrive -Drive 'Q:' } | Should -Not -Throw
     }
 }
 
@@ -1606,6 +1987,77 @@ Describe 'GUI worker launch and drive discovery contract' {
     It 'shows migration identity only for profile restores and uses simple approval for folder copies' {
         $script:guiText | Should -Match "IsMigration[\s\S]+TargetMode -eq 'Profile'"
         $script:guiText | Should -Match "TargetMode -eq 'Folder'[\s\S]+?'continue'"
+    }
+
+    It 'shows actual custom-folder destinations instead of foreign original paths' {
+        $customFolderFunction = $script:guiAst.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Get-RestoreCustomFolders'
+            }, $true)
+        $customFolderFunction | Should -Not -BeNullOrEmpty
+        $customFolderFunction.Extent.Text | Should -Match '\$IsMigration'
+        $customFolderFunction.Extent.Text | Should -Match 'Wiederhergestellte Ordner'
+        $customFolderFunction.Extent.Text | Should -Match 'Ziel: \{1\}'
+    }
+
+    It 'lists selected folder mappings in the final restore confirmation' {
+        $script:guiText | Should -Match '\$preview\.FolderMappings'
+        $script:guiText | Should -Match 'Ausgewählte Ordner'
+        $script:guiText | Should -Match '\$_.Target'
+    }
+
+    It 'keeps the technical backup folder name out of normal readable inventory labels' {
+        $script:guiText | Should -Match 'if \(\$item\.MetadataReadable\)[\s\S]+?\$identityText, \$dateText, \$stateText'
+        $script:guiText | Should -Match 'if \(\$script:backupInventoryMap\.ContainsKey\(\$display\)\)'
+    }
+
+    It 'uses the free command-panel space for a multiline folder location' {
+        $script:guiText | Should -Match '\$folderCommandPanel\.RowCount = 3'
+        $script:guiText | Should -Match '\$folderLocationLabel\.AutoSize = \$false'
+        $script:guiText | Should -Match '\$folderLocationLabel\.Dock = \[System\.Windows\.Forms\.DockStyle\]::Fill'
+        $script:guiText | Should -Match '\$folderCommandPanel\.SetColumnSpan\(\$folderLocationLabel, 2\)'
+        $script:guiText | Should -Match '\$folderLocationLabel\.AutoEllipsis = \$true'
+    }
+
+    It 'distinguishes backup sources from calculated restore destinations' {
+        $locationFunction = $script:guiAst.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Get-SelectedFolderLocationDetails'
+            }, $true)
+        $locationFunction | Should -Not -BeNullOrEmpty
+        $locationFunction.Extent.Text | Should -Match 'Quellordner:'
+        $locationFunction.Extent.Text | Should -Match 'Zielordner:'
+        $locationFunction.Extent.Text | Should -Match '\$restoreFolderRadio\.Checked'
+        $locationFunction.Extent.Text | Should -Match 'Wiederhergestellte Ordner'
+        $locationFunction.Extent.Text | Should -Match '\$selectedBackup\.IsCurrentProfile'
+    }
+
+    It 'updates the visible location for selection changes and exposes the full path accessibly' {
+        $script:guiText | Should -Match '\$libraryList\.Add_SelectedIndexChanged\(\{ Update-SelectionState \}\)'
+        $script:guiText | Should -Match 'Update-FolderLocationDisplay'
+        $script:guiText | Should -Match '\$folderLocationLabel\.AccessibleDescription = \$fullText'
+        $script:guiText | Should -Match '\$folderLocationToolTip\.SetToolTip\(\$folderLocationLabel, \$fullText\)'
+    }
+
+    It 'shows the same calculated location while hovering a list item without flicker' {
+        $script:guiText | Should -Match '\$libraryList\.Add_MouseMove'
+        $script:guiText | Should -Match '\.IndexFromPoint\(\$eventArgs\.Location\)'
+        $script:guiText | Should -Match '\$hoverIndex -eq \$script:hoveredFolderIndex'
+        $script:guiText | Should -Match 'Get-SelectedFolderLocationDetails -Item \$sender\.Items\[\$hoverIndex\]'
+        $script:guiText | Should -Match '\$folderHoverToolTip\.Show'
+        $script:guiText | Should -Match '\$libraryList\.Add_MouseLeave\(\{ Hide-FolderHoverToolTip \}\)'
+    }
+
+    It 'hides the item tooltip before rebuilding the folder list and disposes it on exit' {
+        $updateLibraryFunction = $script:guiAst.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Update-LibraryList'
+            }, $true)
+        $updateLibraryFunction.Extent.Text | Should -Match 'Hide-FolderHoverToolTip[\s\S]+?\$libraryList\.Items\.Clear'
+        $script:guiText | Should -Match '\$folderHoverToolTip[\s\S]+?\.Dispose\(\)'
     }
 
     It 'acquires and releases the per-user GUI mutex' {
