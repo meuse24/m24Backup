@@ -8,6 +8,15 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ### Geändert
 
+- Während Sicherung, Wiederherstellung, Prüfung und Löschung zeigt die
+  Ordnerauswahl ein langsam pulsierendes Anwendungslogo im freien Bereich
+  oberhalb von „Backup löschen“. Im Ruhezustand bleibt es ausgeblendet. Das
+  Zeichenfeld richtet sich nach dem tatsächlich freien Platz und der
+  Bildschirmskalierung; das Logo bleibt dadurch in jeder Fenstergröße
+  vollständig sichtbar und wird bei sehr wenig Platz ausgeblendet, statt
+  angeschnitten zu erscheinen. Die Animation benötigt keine zusätzlichen
+  Bilddateien.
+
 - Der Hinweis auf ein internes Sicherungsziel erscheint nur noch vor der
   ersten Sicherung auf dieses Laufwerk. Liegt dort bereits eine Sicherung des
   aktuellen Profils, war die Wahl eine bewusste Entscheidung und die Rückfrage
@@ -61,6 +70,18 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ### Behoben
 
+- Das Anwendungssymbol war unten und rechts angeschnitten. `app.ico` wird beim
+  Bauen aus `logo.jpg` zugeschnitten; der feste Zuschnitt von 72 % ab der
+  Oberkante entfernte die unteren 94 Bildpunkte des Motivs samt USB-Stecker und
+  ließ das Bild randlos an der Kante enden. Der Zuschnitt vermisst jetzt das
+  Motiv und hält auf allen Seiten Abstand. Das wirkt sich auf Fenster- und
+  Taskleistensymbol, Startbild und Aktivitätsanzeige gleichermaßen aus.
+- Das pulsierende Logo wurde bei niedrigem Fenster zusätzlich abgeschnitten. Das
+  Zeichenfeld hatte eine feste Größe und ragte aus seinem Bereich heraus, sobald
+  dieser kleiner war als das Feld. Größe und Lage werden jetzt aus dem freien
+  Bereich abgeleitet und bei jeder Layoutänderung nachgeführt; die Mindesthöhe
+  des Fensters wurde von 700 auf 750 Punkte angehoben, damit der Platz dafür
+  auch im kleinsten Fenster reicht.
 - Die Wiederherstellung brach mit „Die Konfliktvorschau konnte nicht gelesen
   werden" ab, sobald das Backup ein Prüfsummenmanifest besaß, das seit der
   letzten Sicherung nicht geprüft worden war. Ursache waren typografische

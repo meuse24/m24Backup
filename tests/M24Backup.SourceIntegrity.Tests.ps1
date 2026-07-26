@@ -106,6 +106,60 @@ Describe 'Localization calls receive exactly two texts' {
     }
 }
 
+Describe 'Application icon shows the complete artwork' {
+    # app.ico wird von build.ps1 aus logo.jpg zugeschnitten. Ein fester
+    # Prozentzuschnitt schnitt den unteren Teil des Schildes samt USB-Stecker
+    # ab; im Bild lag das Motiv danach ohne Rand an der rechten und unteren
+    # Kante. Diese Pruefung faengt einen solchen Rueckfall ab.
+    BeforeAll {
+        Add-Type -AssemblyName System.Drawing
+        $script:iconPath = Join-Path $script:repoRoot 'app.ico'
+
+        function Get-OpaqueBounds {
+            param([string]$Path, [int]$Size)
+            $icon = New-Object System.Drawing.Icon($Path, $Size, $Size)
+            try {
+                $bitmap = $icon.ToBitmap()
+                try {
+                    $left = $bitmap.Width; $right = -1; $top = $bitmap.Height; $bottom = -1
+                    for ($y = 0; $y -lt $bitmap.Height; $y++) {
+                        for ($x = 0; $x -lt $bitmap.Width; $x++) {
+                            if ($bitmap.GetPixel($x, $y).A -gt 8) {
+                                if ($x -lt $left) { $left = $x }
+                                if ($x -gt $right) { $right = $x }
+                                if ($y -lt $top) { $top = $y }
+                                if ($y -gt $bottom) { $bottom = $y }
+                            }
+                        }
+                    }
+                    return [pscustomobject]@{
+                        Canvas = $bitmap.Width
+                        MarginLeft = $left
+                        MarginRight = ($bitmap.Width - 1 - $right)
+                        MarginTop = $top
+                        MarginBottom = ($bitmap.Height - 1 - $bottom)
+                    }
+                } finally { $bitmap.Dispose() }
+            } finally { $icon.Dispose() }
+        }
+    }
+
+    It 'keeps a margin on every side of the <_>x<_> frame' -ForEach @(64, 128) {
+        $bounds = Get-OpaqueBounds -Path $script:iconPath -Size $_
+        foreach ($side in @('MarginLeft', 'MarginRight', 'MarginTop', 'MarginBottom')) {
+            $bounds.$side | Should -BeGreaterThan 0 `
+                -Because "$side ist 0 - das Motiv beruehrt dort die Kante und wirkt abgeschnitten"
+        }
+    }
+
+    It 'derives the crop from the artwork instead of a fixed percentage' {
+        $buildText = Get-Content -LiteralPath (Join-Path $script:repoRoot 'build.ps1') -Raw
+        $buildText | Should -Match 'Get-LogoSymbolBounds' -Because 'der Zuschnitt muss das Motiv vermessen'
+        $buildText | Should -Not -Match '\$sourceImage\.Width \* 0\.72\), \[int\]\(\$sourceImage\.Height \* 0\.72\)\)\s*\r?\n\s*\$sourceX = \[int\]\(\(\$sourceImage\.Width - \$cropSize\) / 2\)\s*\r?\n\s*\$sourceRectangle' `
+            -Because 'der feste Prozentzuschnitt darf nicht mehr der Hauptweg sein'
+    }
+}
+
 Describe 'Restore preview texts survive formatting' {
     BeforeAll {
         . (Join-Path $script:repoRoot 'M24Backup.Shared.ps1')

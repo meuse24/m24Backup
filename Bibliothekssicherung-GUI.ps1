@@ -21,7 +21,7 @@ $script:isGerman = Initialize-M24Localization
 Set-Alias -Name L -Value Get-M24Text -Scope Script
 
 <#
-DPI-Strategie (dokumentiert, siehe plan.md Arbeitspaket 1):
+DPI-Strategie (Begruendung im CHANGELOG):
 Die GUI laeuft unter Windows PowerShell 5.1 (.NET Framework). Der dafuer von
 Microsoft dokumentierte PerMonitorV2-Weg erfordert eine App-Konfiguration
 (app.config) des Hostprozesses; powershell.exe.config kann eine portable App
@@ -100,8 +100,7 @@ $script:splashProgress = $null
 $script:mainWindowShown = $false
 $script:fatalGuiError = $false
 # Der Splash erscheint erst, wenn der Start messbar laenger dauert. Schnelle
-# Starts bleiben dadurch ohne kurz aufblitzendes Zwischenfenster (plan.md,
-# Arbeitspaket 7).
+# Starts bleiben dadurch ohne kurz aufblitzendes Zwischenfenster.
 $script:startupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $script:splashDelayMilliseconds = 400
 $script:driveDiscoveryActive = $false
@@ -812,6 +811,80 @@ function Stop-BusyProgress {
     }
 }
 
+function Get-ActivityLogoScale {
+    $scaleFactor = $form.CurrentAutoScaleDimensions.Width / 96
+    if ($scaleFactor -le 0) { $scaleFactor = 1 }
+    return $scaleFactor
+}
+
+function Update-ActivityLogoBounds {
+    # Groesse und Lage des Zeichenfeldes bestimmen. Das Feld darf nie groesser
+    # sein als sein Container: Ein zu grosses Feld ragt unten heraus und das
+    # Logo wird dort abgeschnitten. Den noetigen Platz haelt die Mindesthoehe
+    # des Fensters frei; hier wird nur noch auf den Ist-Zustand reagiert.
+    if (-not $activityLogoBox -or $activityLogoBox.IsDisposed) { return }
+    if (-not $folderLocationHost -or $folderLocationHost.IsDisposed) { return }
+
+    $scaleFactor = Get-ActivityLogoScale
+    $preferred = [int][math]::Round($script:activityLogoBaseSize * $scaleFactor)
+    $available = [math]::Min($folderLocationHost.ClientSize.Width, $folderLocationHost.ClientSize.Height)
+    $size = [math]::Min($preferred, [math]::Max(0, $available))
+
+    # Unterhalb dieser Groesse waere das Logo nur noch ein Fleck; dann bleibt
+    # es aus. Der Fortschrittsbalken zeigt den laufenden Vorgang weiterhin an.
+    $script:activityLogoFits = $size -ge [int][math]::Round(32 * $scaleFactor)
+    if (-not $script:activityLogoFits) {
+        if ($activityLogoBox.Visible) { $activityLogoBox.Visible = $false }
+        return
+    }
+
+    if ($activityLogoBox.Width -ne $size -or $activityLogoBox.Height -ne $size) {
+        $activityLogoBox.Size = New-Object System.Drawing.Size($size, $size)
+    }
+    $activityLogoBox.Left = [math]::Max(0, [int][math]::Round(($folderLocationHost.ClientSize.Width - $size) / 2.0))
+    $activityLogoBox.Top = [math]::Max(0, $folderLocationHost.ClientSize.Height - $size)
+}
+
+function Set-ActivityLogoFrame {
+    if (-not $activityLogoBox -or $activityLogoBox.IsDisposed) { return }
+    $frameCount = 20
+    $phase = (2.0 * [math]::PI * $script:activityLogoFrame) / $frameCount
+
+    # Am Hoehepunkt des Pulses erreicht das Logo genau seine Originalgroesse
+    # von 64 Punkten; groesser wird es nie, damit es scharf bleibt. Der
+    # Sicherheitsabstand zum Feldrand ist unabhaengig davon immer gewahrt.
+    $scaleFactor = Get-ActivityLogoScale
+    $margin = [math]::Max(2, [int][math]::Round($script:activityLogoMargin * $scaleFactor))
+    $boxSize = [math]::Min($activityLogoBox.ClientSize.Width, $activityLogoBox.ClientSize.Height)
+    $maxDraw = [math]::Min([int][math]::Round($script:activityLogoNaturalSize * $scaleFactor), $boxSize - (2 * $margin))
+    if ($maxDraw -lt 8) { $maxDraw = [math]::Max(8, $boxSize) }
+
+    $fraction = 0.89 + (0.11 * [math]::Sin($phase))
+    $script:activityLogoDrawSize = [math]::Max(8, [int][math]::Round($maxDraw * $fraction))
+    $activityLogoBox.Invalidate()
+}
+
+function Start-ActivityLogoAnimation {
+    if (-not $activityLogoBox -or $activityLogoBox.IsDisposed -or -not $activityLogoBitmap) { return }
+    $script:activityLogoFrame = 0
+    # Erst das Feld an den aktuell freien Platz anpassen, dann den ersten
+    # Rahmen berechnen - dieser richtet sich nach der Feldgroesse.
+    Update-ActivityLogoBounds
+    if (-not $script:activityLogoFits) { return }
+    Set-ActivityLogoFrame
+    $activityLogoBox.Visible = $true
+    $activityLogoTimer.Start()
+}
+
+function Stop-ActivityLogoAnimation {
+    if ($activityLogoTimer) { $activityLogoTimer.Stop() }
+    $script:activityLogoFrame = 0
+    if ($activityLogoBox -and -not $activityLogoBox.IsDisposed) {
+        Set-ActivityLogoFrame
+        $activityLogoBox.Visible = $false
+    }
+}
+
 function Reset-ProgressIndicator {
     param([int]$Maximum)
 
@@ -1317,7 +1390,7 @@ function Get-BackupHealth {
 }
 
 <#
-Theme-Strategie (dokumentiert, siehe plan.md Arbeitspaket 6):
+Theme-Strategie (Begruendung im CHANGELOG):
 Die Oberflaeche verwendet eine zentrale semantische Palette statt verstreuter
 RGB-Literale. Bei aktivem Windows-Hochkontrastmodus werden ausschliesslich
 Systemfarben und die Systemdarstellung der Buttons verwendet, damit das
@@ -1325,11 +1398,11 @@ gewaehlte Kontrastschema vollstaendig wirksam bleibt. Ein eigener Dark Mode
 wird bewusst nicht ausgeliefert: WinForms unter .NET Framework rendert
 ComboBox-Listen, Scrollbalken und Menues weiterhin hell; statt eines
 inkonsistenten dunklen Themes bleibt ein konsistentes, kontrastgeprueftes
-helles Theme erhalten (Risikoabwaegung aus plan.md).
+helles Theme erhalten (Risikoabwaegung im CHANGELOG).
 #>
 # Der Hochkontrastzustand wird bewusst nur einmal beim Start gelesen; ein
-# Schemawechsel bei laufender Anwendung greift nach einem Neustart (die von
-# plan.md erlaubte Neustart-Variante fuer Themenwechsel).
+# Schemawechsel bei laufender Anwendung greift nach einem Neustart; ein
+# Wechsel im laufenden Betrieb ist bewusst nicht vorgesehen.
 $script:highContrast = [System.Windows.Forms.SystemInformation]::HighContrast
 if ($script:highContrast) {
     $formBackColor = [System.Drawing.SystemColors]::Control
@@ -1371,7 +1444,7 @@ $captionFont = New-Object System.Drawing.Font($semiboldFontName, 9.5)
 $footerButtonFont = New-Object System.Drawing.Font($semiboldFontName, 10)
 
 <#
-Interaktionsziele (plan.md Arbeitspaket 4): Alle Befehle entstehen ueber eine
+Interaktionsziele: Alle Befehle entstehen ueber eine
 gemeinsame Fabrik mit einheitlichen Zustaenden. Regulaere Befehle sind
 mindestens 32 logische Pixel hoch, die Hauptaktionen im Fussbereich 40.
 Im Hochkontrastmodus rendert die Systemdarstellung Rahmen und Fokus.
@@ -1462,7 +1535,7 @@ function Show-CompletionNotification {
     $notificationTimer.Start()
 }
 <#
-Responsives Layout (plan.md Arbeitspaket 2): Ein aeusseres TableLayoutPanel
+Responsives Layout: Ein aeusseres TableLayoutPanel
 stapelt die Funktionsbereiche vertikal. Kopf-, Ziel-, Options-, Aktivitaets-
 und Fussbereich bemessen sich selbst; der Ordnerbereich erhaelt die restliche
 Hoehe und waechst beim Vergroessern oder Maximieren des Fensters mit. Die
@@ -1783,7 +1856,7 @@ $fat32Label.Visible = $false
 $driveStatusPanel.Controls.Add($fat32Label)
 
 <#
-Ordnerbereich (plan.md Arbeitspaket 3): Die Ordnerliste ist der dominante
+Ordnerbereich: Die Ordnerliste ist der dominante
 Inhalt und waechst mit dem Fenster. Direkt wirkende Auswahlbefehle stehen
 rechts neben der Liste; Befehle, die ein vorhandenes Backup betreffen,
 bilden eine eigene beschriftete Gruppe am unteren Rand. "Backup loeschen"
@@ -1877,18 +1950,95 @@ $removeFolderButton.Enabled = $false
 $removeFolderButton.TabIndex = 3
 $folderCommandPanel.Controls.Add($removeFolderButton, 1, 1)
 
+# Groessen der Aktivitaetsanzeige in logischen Punkten. Sie werden schon hier
+# gebraucht, weil der Bereich darunter den Platz dafuer freihalten muss.
+$script:activityLogoNaturalSize = 64
+$script:activityLogoMargin = 8
+$script:activityLogoBaseSize = $script:activityLogoNaturalSize + (2 * $script:activityLogoMargin)
+
+$folderLocationHost = New-Object System.Windows.Forms.Panel
+$folderLocationHost.Dock = [System.Windows.Forms.DockStyle]::Fill
+$folderLocationHost.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
+$folderLocationHost.BackColor = $surfaceColor
+# Bewusst keine MinimumSize: Sie wuerde das Panel groesser machen als die
+# Zelle, in der es liegt. Es ragte dann unten heraus und das Logo wuerde dort
+# abgeschnitten. Den noetigen Platz sichert stattdessen die Mindesthoehe des
+# Fensters (siehe $form.MinimumSize).
+$folderCommandPanel.Controls.Add($folderLocationHost, 0, 2)
+$folderCommandPanel.SetColumnSpan($folderLocationHost, 2)
+
 $folderLocationLabel = New-Object System.Windows.Forms.Label
 $folderLocationLabel.AutoSize = $false
 $folderLocationLabel.Dock = [System.Windows.Forms.DockStyle]::Fill
-$folderLocationLabel.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
-$folderLocationLabel.Padding = New-Object System.Windows.Forms.Padding(2, 0, 2, 0)
+# Unterer Abstand haelt den Text ueber dem Logobereich frei.
+$folderLocationLabel.Padding = New-Object System.Windows.Forms.Padding(2, 0, 2, ($script:activityLogoBaseSize + 2))
 $folderLocationLabel.TextAlign = [System.Drawing.ContentAlignment]::TopLeft
 $folderLocationLabel.ForeColor = $secondaryTextColor
 $folderLocationLabel.BackColor = $surfaceColor
 $folderLocationLabel.AutoEllipsis = $true
 $folderLocationLabel.AccessibleName = L 'Ordnerspeicherort' 'Folder location'
-$folderCommandPanel.Controls.Add($folderLocationLabel, 0, 2)
-$folderCommandPanel.SetColumnSpan($folderLocationLabel, 2)
+$folderLocationHost.Controls.Add($folderLocationLabel)
+
+$activityLogoBitmap = $null
+# Die Groessen stehen weiter oben, weil der Bereich darunter den Platz dafuer
+# freihalten muss. Das Feld ist bewusst groesser als das Logo selbst.
+$script:activityLogoFits = $true
+$activityLogoBox = New-Object System.Windows.Forms.PictureBox
+$activityLogoBox.Size = New-Object System.Drawing.Size($script:activityLogoBaseSize, $script:activityLogoBaseSize)
+# Lage und Groesse werden ausschliesslich in Update-ActivityLogoBounds gesetzt;
+# ein Anchor wuerde zusaetzlich verschieben und beides gegeneinander laufen lassen.
+$activityLogoBox.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left
+$activityLogoBox.BackColor = $surfaceColor
+$activityLogoBox.TabStop = $false
+$activityLogoBox.Visible = $false
+$activityLogoBox.AccessibleName = L 'Aktivitätsanzeige' 'Activity indicator'
+$activityLogoBox.AccessibleDescription = L 'Das pulsierende Logo zeigt einen laufenden Vorgang an.' 'The pulsing logo indicates an active operation.'
+try {
+    # Form.Icon.ToBitmap() verwendet bei einer ICO-Datei typischerweise nur
+    # die 32x32-Variante. Deren Rand ist fuer die vergroesserte Anzeige zu
+    # knapp. Die gezielt geladene 64x64-Variante enthaelt das vollstaendige
+    # Motiv und wird nach dem Konvertieren sofort wieder freigegeben.
+    if (Test-Path -LiteralPath $appIconFile -PathType Leaf) {
+        $activitySourceIcon = New-Object System.Drawing.Icon($appIconFile, 64, 64)
+        try { $activityLogoBitmap = $activitySourceIcon.ToBitmap() } finally { $activitySourceIcon.Dispose() }
+    } else {
+        $activityLogoBitmap = $form.Icon.ToBitmap()
+    }
+} catch {
+    $activityLogoBitmap = $null
+}
+$script:activityLogoFrame = 0
+$script:activityLogoDrawSize = 44
+$activityLogoBox.Add_Paint({
+    param($sender, $e)
+    if (-not $activityLogoBitmap -or $activityLogoBitmap.Width -le 0 -or $activityLogoBitmap.Height -le 0) { return }
+    # Letzte Absicherung: Das Bild bleibt in jedem Fall innerhalb des Feldes,
+    # auch wenn die Feldgroesse zwischen zwei Rahmen wechselt.
+    $size = [math]::Min($script:activityLogoDrawSize, [math]::Min($sender.ClientSize.Width, $sender.ClientSize.Height))
+    if ($size -le 0) { return }
+    $left = [int][math]::Round(($sender.ClientSize.Width - $size) / 2.0)
+    $top = [int][math]::Round(($sender.ClientSize.Height - $size) / 2.0)
+    $e.Graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $e.Graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $e.Graphics.DrawImage($activityLogoBitmap, $left, $top, $size, $size)
+})
+$folderLocationHost.Controls.Add($activityLogoBox)
+$activityLogoBox.BringToFront()
+$folderLocationHost.Add_Resize({
+    # Der freie Bereich aendert sich mit der Fenstergroesse und waehrend eines
+    # Vorgangs, weil Schaltflaechen ein- und ausgeblendet werden.
+    Update-ActivityLogoBounds
+    # Nur waehrend eines laufenden Vorgangs nachfuehren. Wird das Fenster
+    # zwischendurch zu klein und danach wieder groesser, kehrt das Logo zurueck.
+    if ($activityLogoTimer -and $activityLogoTimer.Enabled) {
+        if ($script:activityLogoFits) {
+            Set-ActivityLogoFrame
+            if (-not $activityLogoBox.Visible) { $activityLogoBox.Visible = $true }
+        } elseif ($activityLogoBox.Visible) {
+            $activityLogoBox.Visible = $false
+        }
+    }
+})
 
 $folderLocationToolTip = New-Object System.Windows.Forms.ToolTip
 $folderLocationToolTip.AutoPopDelay = 20000
@@ -1951,7 +2101,7 @@ $deleteBackupButton.TabIndex = 2
 $manageRow.Controls.Add($deleteBackupButton, 4, 0)
 
 <#
-Optionen (plan.md Arbeitspaket 5): Vorgangsbezogene Optionen und die
+Optionen: Vorgangsbezogene Optionen und die
 dauerhafte Erinnerungs-Einstellung stehen in getrennten, beschrifteten
 Zeilen. Die Optionszeile bricht bei schmalen Fenstern oder grosser Schrift
 um, statt abgeschnitten zu werden. Der fruehere Name "Superschnell" heisst
@@ -1996,7 +2146,7 @@ $optionsSurface.Controls.Add($operationOptionsFlow, 1, 0)
 function New-M24OptionCheckBox {
     param([string]$Text, [int]$TabIndex)
     # Padding vergroessert die klickbare Flaeche der gesamten Optionszeile
-    # ueber das reine Kaestchen hinaus (plan.md Arbeitspaket 4).
+    # ueber das reine Kaestchen hinaus.
     $checkBox = New-Object System.Windows.Forms.CheckBox
     $checkBox.Text = $Text
     $checkBox.AutoSize = $true
@@ -2149,7 +2299,7 @@ $resultBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
 $resultBox.BorderStyle = [System.Windows.Forms.BorderStyle]::None
 $resultBox.BackColor = $surfaceColor
 # Bewusst fokussierbar: Tastatur- und Screenreader-Nutzer erreichen die
-# Ergebnisuebersicht damit direkt (plan.md Arbeitspaket 6).
+# Ergebnisuebersicht damit direkt.
 $resultBox.TabStop = $true
 $resultBox.TabIndex = 0
 $resultBox.AccessibleName = L 'Ergebnisübersicht' 'Summary'
@@ -2294,6 +2444,13 @@ $primaryActionHost.Controls.Add($cancelButton)
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 500
+
+$activityLogoTimer = New-Object System.Windows.Forms.Timer
+$activityLogoTimer.Interval = 75
+$activityLogoTimer.Add_Tick({
+    $script:activityLogoFrame = ($script:activityLogoFrame + 1) % 20
+    Set-ActivityLogoFrame
+})
 
 $driveWatchTimer = New-Object System.Windows.Forms.Timer
 $driveWatchTimer.Interval = 2500
@@ -2452,6 +2609,7 @@ $verificationTimer.Add_Tick({
         if ($script:verificationProgressFile) { Remove-Item -LiteralPath $script:verificationProgressFile -Force -ErrorAction SilentlyContinue }
         $script:verificationProgressFile = $null
         Stop-BusyProgress
+        Stop-ActivityLogoAnimation
         $closeButton.Visible = $true
         $startButton.Visible = $true
         $cancelButton.Visible = $false
@@ -2514,6 +2672,7 @@ $deletionTimer.Add_Tick({
         $script:deletionInfo = $null
         $script:deletionDisk = $null
         Stop-BusyProgress
+        Stop-ActivityLogoAnimation
         $form.UseWaitCursor = $false
         Set-VerificationControlsEnabled -Enabled $true
         Update-ResultOverview
@@ -3389,6 +3548,7 @@ $startButton.Add_Click({
     }
     Reset-ProgressIndicator -Maximum $selectedFolders.Count
     Start-BusyProgress
+    Start-ActivityLogoAnimation
     $startButton.Enabled = $false
     $refreshButton.Enabled = $false
     $backupRadio.Enabled = $false
@@ -3480,6 +3640,7 @@ $startButton.Add_Click({
         # pumpt Nachrichten, ein laufender Timer koennte sonst mitten im
         # Aufraeumen ticken.
         try { $timer.Stop() } catch {}
+        Stop-ActivityLogoAnimation
         $workerExitConfirmed = $true
         if ($script:backupProcess) {
             # Ein eventuell doch schon gestarteter Worker wird kooperativ
@@ -3809,6 +3970,7 @@ $timer.Add_Tick({
         if ($script:backupProcess.HasExited) {
             $exitCode = $script:backupProcess.ExitCode
             $timer.Stop()
+            Stop-ActivityLogoAnimation
             Set-ProgressFromLastStatus
             Update-ElapsedDuration
             $startButton.Enabled = $true
@@ -4132,6 +4294,7 @@ $deleteBackupButton.Add_Click({
         $statusLabel.Text = L 'Backup wird endgültig gelöscht ...' 'Permanently deleting backup ...'
         $resultBox.Text = L 'Die ausgewählte Sicherung wird entfernt. Das Laufwerk darf jetzt nicht getrennt werden.' 'The selected backup is being removed. Do not disconnect the drive.'
         Start-BusyProgress
+        Start-ActivityLogoAnimation
         $script:deletionInfo = $info
         $script:deletionDisk = $disk
         $deletionScript = {
@@ -4156,6 +4319,7 @@ $deleteBackupButton.Add_Click({
         $script:deletionInfo = $null
         $script:deletionDisk = $null
         Stop-BusyProgress
+        Stop-ActivityLogoAnimation
         $form.UseWaitCursor = $false
         Set-VerificationControlsEnabled -Enabled $true
     }
@@ -4187,6 +4351,7 @@ $verifyButton.Add_Click({
     $script:verificationProgressFile = Join-Path ([System.IO.Path]::GetTempPath()) ("M24Backup.verify-progress.{0}.{1}.tmp" -f $PID, [guid]::NewGuid().ToString('N'))
     $statusLabel.Text = if ($initializeManifest) { L 'Prüfsummen werden initial erstellt ...' 'Creating initial checksums ...' } else { L 'SHA-256-Prüfsummen werden verglichen ...' 'Comparing SHA-256 checksums ...' }
     Start-BusyProgress
+    Start-ActivityLogoAnimation
     $closeButton.Visible = $false
     $startButton.Visible = $false
     $cancelButton.Text = L 'Prüfung abbrechen' 'Cancel verification'
@@ -4401,9 +4566,15 @@ $form.Add_Shown({
     # 770 logische Pixel Mindestbreite halten die vier Fusszeilen-Befehle
     # einzeilig; wird das Fenster durch eine kleine Arbeitsflaeche schmaler
     # geklemmt, bricht die Fusszeile kontrolliert um statt zu ueberlappen.
+    #
+    # 750 logische Pixel Mindesthoehe lassen unter den Ordner-Schaltflaechen
+    # genug Platz, damit die Aktivitaetsanzeige ihr Logo in voller Groesse
+    # zeigen kann. Bei 700 blieben dort nur rund 30 Punkte und das Logo musste
+    # verkleinert werden. Reicht die Arbeitsflaeche nicht, greift die Klemmung
+    # unten und die Anzeige verkleinert sich kontrolliert.
     $form.MinimumSize = New-Object System.Drawing.Size(
         [math]::Min([int](770 * $scaleFactor), $workingArea.Width),
-        [math]::Min([int](700 * $scaleFactor), $workingArea.Height))
+        [math]::Min([int](750 * $scaleFactor), $workingArea.Height))
     if ($form.Width -gt $workingArea.Width -or $form.Height -gt $workingArea.Height) {
         $form.Size = New-Object System.Drawing.Size(
             [math]::Min($form.Width, $workingArea.Width),
@@ -4519,7 +4690,7 @@ Close-StartupSplash
 } finally {
     Close-StartupSplash
     if ($notifyIcon) { try { $notifyIcon.Visible = $false; $notifyIcon.Dispose() } catch {} }
-    foreach ($resource in @($appIcon, $healthToolTip, $driveToolTip, $optionsToolTip, $folderLocationToolTip, $folderHoverToolTip, $resultContextMenu, $timer, $driveWatchTimer, $ejectTimer, $notificationTimer, $verificationTimer, $deletionTimer)) {
+    foreach ($resource in @($activityLogoBitmap, $appIcon, $healthToolTip, $driveToolTip, $optionsToolTip, $folderLocationToolTip, $folderHoverToolTip, $resultContextMenu, $timer, $activityLogoTimer, $driveWatchTimer, $ejectTimer, $notificationTimer, $verificationTimer, $deletionTimer)) {
         if ($resource) { try { $resource.Dispose() } catch {} }
     }
     if ($form) { try { $form.Dispose() } catch {} }

@@ -341,6 +341,52 @@ Describe 'Folder-overlap integration contract' {
         $condition | Should -Match '-not\s*\(Test-M24BackupExistsOnDrive' -Because 'die Bedingung muss negiert sein'
     }
 
+    It 'keeps the activity logo inside its container' {
+        # Das Zeichenfeld sass frueher mit fester Groesse am unteren Rand seines
+        # Panels. War das Panel niedriger als das Feld, ragte es unten heraus und
+        # das Logo wurde abgeschnitten. Die Groesse muss deshalb aus dem
+        # tatsaechlich freien Bereich abgeleitet werden.
+        $bounds = $script:guiAst.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Update-ActivityLogoBounds'
+        }, $true)
+        $bounds | Should -Not -BeNullOrEmpty -Because 'die Feldgroesse muss an einer Stelle bestimmt werden'
+
+        $boundsText = $bounds.Extent.Text
+        $boundsText | Should -Match '\$folderLocationHost\.ClientSize\.Height' -Because 'die Hoehe des freien Bereichs begrenzt das Feld'
+        $boundsText | Should -Match '\$folderLocationHost\.ClientSize\.Width' -Because 'die Breite des freien Bereichs begrenzt das Feld'
+        $boundsText | Should -Match '\[math\]::Min' -Because 'das Feld darf den freien Bereich nicht ueberschreiten'
+
+        # Der Puls muss sich auf die Feldgroesse beziehen, nicht auf einen
+        # festen Wert - sonst passt er nicht mehr in ein verkleinertes Feld.
+        $frame = $script:guiAst.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Set-ActivityLogoFrame'
+        }, $true)
+        $frame | Should -Not -BeNullOrEmpty
+        $frame.Extent.Text | Should -Match '\$activityLogoBox\.ClientSize' -Because 'die Bildgroesse leitet sich aus dem Feld ab'
+        $frame.Extent.Text | Should -Match '\$script:activityLogoNaturalSize' -Because 'das Logo wird nie ueber seine Originalgroesse hinaus vergroessert'
+        $frame.Extent.Text | Should -Match '2 \* \$margin' -Because 'zwischen Bild und Feldrand bleibt Abstand'
+
+        # Und die Neuberechnung muss beim Groessenwechsel wirklich laufen.
+        $script:guiSource | Should -Match 'Add_Resize\([\s\S]{0,400}?Update-ActivityLogoBounds'
+    }
+
+    It 'reserves layout space for the activity logo instead of forcing its panel' {
+        # Eine MinimumSize am Panel wuerde es groesser machen als seine Zelle;
+        # es raegte heraus und das Logo wuerde am unteren Rand abgeschnitten.
+        # Den Platz sichert stattdessen die Mindesthoehe des Fensters.
+        $script:guiSource | Should -Not -Match '\$folderLocationHost\.MinimumSize' `
+            -Because 'eine Untergrenze am Panel taeuscht Platz vor, den die Zelle nicht hat'
+        $script:guiSource | Should -Match '\[math\]::Min\(\[int\]\(750 \* \$scaleFactor\), \$workingArea\.Height\)' `
+            -Because 'die Mindesthoehe des Fensters haelt den Platz fuer das Logo frei'
+        # Der Text darueber muss den Logobereich aussparen.
+        $script:guiSource | Should -Match '\$script:activityLogoBaseSize \+ 2' `
+            -Because 'der untere Textabstand richtet sich nach der Feldgroesse'
+    }
+
     It 'returns from the GUI before drive warnings and worker setup on conflict' {
         $conflictIndex = $script:guiSource.IndexOf('$folderConflicts = @(Get-M24FolderPathConflicts')
         $conflictIndex | Should -BeGreaterThan -1
@@ -2014,9 +2060,11 @@ Describe 'GUI worker launch and drive discovery contract' {
 
     It 'uses the free command-panel space for a multiline folder location' {
         $script:guiText | Should -Match '\$folderCommandPanel\.RowCount = 3'
+        $script:guiText | Should -Match '\$folderLocationHost\.Dock = \[System\.Windows\.Forms\.DockStyle\]::Fill'
+        $script:guiText | Should -Match '\$folderCommandPanel\.SetColumnSpan\(\$folderLocationHost, 2\)'
         $script:guiText | Should -Match '\$folderLocationLabel\.AutoSize = \$false'
         $script:guiText | Should -Match '\$folderLocationLabel\.Dock = \[System\.Windows\.Forms\.DockStyle\]::Fill'
-        $script:guiText | Should -Match '\$folderCommandPanel\.SetColumnSpan\(\$folderLocationLabel, 2\)'
+        $script:guiText | Should -Match '\$folderLocationHost\.Controls\.Add\(\$folderLocationLabel\)'
         $script:guiText | Should -Match '\$folderLocationLabel\.AutoEllipsis = \$true'
     }
 
@@ -2090,7 +2138,7 @@ Describe 'GUI worker launch and drive discovery contract' {
     It 'shows the splash only for measurably slow starts and closes it before ShowDialog' {
         # Der Splash entsteht verzoegert in Set-StartupSplashStatus, ist nie
         # TopMost und wird ohne kuenstliche Wartezeit vor ShowDialog
-        # geschlossen (plan.md Arbeitspaket 7).
+        # geschlossen.
         $script:guiText | Should -Match ([regex]::Escape('$script:startupStopwatch.ElapsedMilliseconds -lt $script:splashDelayMilliseconds'))
         $script:guiText | Should -Match 'Close-StartupSplash\s+\[void\]\$form\.ShowDialog'
         $script:guiText | Should -Not -Match 'Complete-StartupSplash'
@@ -2136,8 +2184,7 @@ Describe 'GUI worker launch and drive discovery contract' {
 
     It 'presents the reminder as a persistent setting separate from operation options' {
         # Die Erinnerung ist eine dauerhafte Anwendungs-Einstellung und steht
-        # in einer eigenen beschrifteten Zeile unterhalb der Vorgangsoptionen
-        # (plan.md Arbeitspaket 5).
+        # in einer eigenen beschrifteten Zeile unterhalb der Vorgangsoptionen.
         $script:guiText | Should -Match '\$reminderCheckBox = New-M24OptionCheckBox'
         $script:guiText | Should -Match ([regex]::Escape("L 'Beim Windows-Login an fällige Sicherungen erinnern' 'Remind me at Windows sign-in when a backup is due'"))
         $script:guiText | Should -Match ([regex]::Escape("L 'Einstellung:' 'Setting:'"))
@@ -2171,6 +2218,35 @@ Describe 'GUI worker launch and drive discovery contract' {
         $script:guiText | Should -Match ([regex]::Escape('$activitySurface.Add_Resize({ Update-ActivitySurfaceLayout })'))
         $script:guiText | Should -Not -Match ([regex]::Escape('$footerSurface.BringToFront()'))
         $script:guiText | Should -Not -Match ([regex]::Escape('$closeButton.Location = New-Object System.Drawing.Point(621, 16)'))
+    }
+
+    It 'shows a subtle animated logo only while an operation is active' {
+        $script:guiText | Should -Match '\$activityLogoBox = New-Object System\.Windows\.Forms\.PictureBox'
+        $script:guiText | Should -Match '\$activityLogoBox\.Visible = \$false'
+        $script:guiText | Should -Match '\$activityLogoTimer\.Interval = 75'
+        $script:guiText | Should -Match 'function Start-ActivityLogoAnimation'
+        $script:guiText | Should -Match 'function Stop-ActivityLogoAnimation'
+        ([regex]::Matches($script:guiText, 'Start-ActivityLogoAnimation')).Count | Should -BeGreaterThan 3
+        ([regex]::Matches($script:guiText, 'Stop-ActivityLogoAnimation')).Count | Should -BeGreaterThan 4
+    }
+
+    It 'keeps the logo animation visible, unclipped, accessible, and disposable' {
+        # Der Puls wird als Anteil des Zeichenfeldes bestimmt. Ein fester
+        # Zahlenwert (frueher 44 +/- 6 logische Punkte) passte nicht mehr,
+        # sobald das Feld wegen wenig Platz verkleinert werden musste.
+        $script:guiText | Should -Match '\[math\]::Sin\(\$phase\)'
+        $script:guiText | Should -Match '\$maxDraw \* \$fraction'
+        $script:guiText | Should -Match '\$activityLogoBox\.Size = New-Object System\.Drawing\.Size\(\$script:activityLogoBaseSize, \$script:activityLogoBaseSize\)'
+        # Das Bild wird beim Zeichnen zusaetzlich auf das Feld begrenzt.
+        $script:guiText | Should -Match '\[math\]::Min\(\$sender\.ClientSize\.Width, \$sender\.ClientSize\.Height\)'
+        $script:guiText | Should -Match '\$folderLocationHost\.Controls\.Add\(\$activityLogoBox\)'
+        $script:guiText | Should -Match 'New-Object System\.Drawing\.Icon\(\$appIconFile, 64, 64\)'
+        $script:guiText | Should -Match '\$activitySourceIcon\.Dispose\(\)'
+        $script:guiText | Should -Match '\$activityLogoBox\.Add_Paint'
+        $script:guiText | Should -Match '\$e\.Graphics\.DrawImage\(\$activityLogoBitmap'
+        $script:guiText | Should -Match '\$activityLogoBox\.AccessibleName'
+        $script:guiText | Should -Match '\$activityLogoBitmap[\s\S]+?\.Dispose\(\)'
+        $script:guiText | Should -Match '\$activityLogoTimer[\s\S]+?\.Dispose\(\)'
     }
 
     It 'enables reminders by default and migrates the original seven-day default to fourteen days' {

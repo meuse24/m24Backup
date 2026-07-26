@@ -59,6 +59,66 @@ function Get-BuildVersion {
     return '0.0.0-dev'
 }
 
+function Get-LogoSymbolBounds {
+    # Determines the bounding box of the symbol in logo.jpg, excluding the word
+    # mark underneath it. A fixed percentage crop cannot do this reliably: it
+    # silently truncated the lower part of the shield including the USB
+    # connector. The symbol is instead located by scanning for content rows and
+    # stopping at the first gap that separates the symbol from the word mark.
+    param([System.Drawing.Bitmap]$Bitmap)
+
+    $step = 2
+    $isBackground = {
+        param($pixel)
+        $minimum = [math]::Min($pixel.R, [math]::Min($pixel.G, $pixel.B))
+        $maximum = [math]::Max($pixel.R, [math]::Max($pixel.G, $pixel.B))
+        return ($minimum -ge 205 -and ($maximum - $minimum) -le 32)
+    }
+
+    # Rows that carry a meaningful amount of artwork.
+    $contentRows = New-Object 'System.Collections.Generic.List[int]'
+    for ($y = 0; $y -lt $Bitmap.Height; $y += $step) {
+        $count = 0
+        for ($x = 0; $x -lt $Bitmap.Width; $x += $step) {
+            if (-not (& $isBackground $Bitmap.GetPixel($x, $y))) {
+                $count++
+                if ($count -gt 2) { break }
+            }
+        }
+        if ($count -gt 2) { [void]$contentRows.Add($y) }
+    }
+    if ($contentRows.Count -eq 0) { return $null }
+
+    # The first larger vertical gap separates the symbol from the word mark.
+    $gapThreshold = [math]::Max(4 * $step, [int]($Bitmap.Height * 0.015))
+    $symbolTop = $contentRows[0]
+    $symbolBottom = $contentRows[$contentRows.Count - 1]
+    for ($index = 1; $index -lt $contentRows.Count; $index++) {
+        if (($contentRows[$index] - $contentRows[$index - 1]) -ge $gapThreshold) {
+            $symbolBottom = $contentRows[$index - 1]
+            break
+        }
+    }
+
+    # Horizontal extent within the symbol rows only.
+    $left = $Bitmap.Width
+    $right = -1
+    for ($y = $symbolTop; $y -le $symbolBottom; $y += $step) {
+        for ($x = 0; $x -lt $Bitmap.Width; $x += $step) {
+            if (-not (& $isBackground $Bitmap.GetPixel($x, $y))) {
+                if ($x -lt $left) { $left = $x }
+                if ($x -gt $right) { $right = $x }
+            }
+        }
+    }
+    if ($right -lt $left) { return $null }
+
+    return [pscustomobject]@{
+        Left = $left; Top = $symbolTop; Right = $right; Bottom = $symbolBottom
+        Width = ($right - $left + 1); Height = ($symbolBottom - $symbolTop + 1)
+    }
+}
+
 function New-AppIcon {
     param([string]$SourcePath, [string]$DestinationPath)
 
@@ -67,12 +127,30 @@ function New-AppIcon {
     try {
         $sourceImage = [System.Drawing.Image]::FromStream($sourceStream)
         try {
-            # logo.jpg contains a word mark below the symbol. Crop the shield
-            # and USB symbol with a small safety margin so neither the word
-            # mark nor excess whitespace reduces legibility at icon sizes.
-            $cropSize = [math]::Min([int]($sourceImage.Width * 0.72), [int]($sourceImage.Height * 0.72))
-            $sourceX = [int](($sourceImage.Width - $cropSize) / 2)
-            $sourceRectangle = New-Object System.Drawing.Rectangle($sourceX, 0, $cropSize, $cropSize)
+            # logo.jpg contains a word mark below the symbol. Crop a square
+            # around the symbol itself, keeping a small margin on every side so
+            # the artwork never touches the icon edge.
+            $measureBitmap = New-Object System.Drawing.Bitmap($sourceImage)
+            try { $symbol = Get-LogoSymbolBounds -Bitmap $measureBitmap } finally { $measureBitmap.Dispose() }
+
+            if ($symbol) {
+                $margin = [math]::Max(8, [int]([math]::Max($symbol.Width, $symbol.Height) * 0.02))
+                $cropSize = [math]::Max($symbol.Width, $symbol.Height) + (2 * $margin)
+                # Anchor the bottom just below the symbol; growing upwards keeps
+                # the crop clear of the word mark.
+                $sourceY = ($symbol.Bottom + $margin) - $cropSize
+                $sourceX = [int](($symbol.Left + $symbol.Right) / 2) - [int]($cropSize / 2)
+                # Keep the rectangle inside the image.
+                $cropSize = [math]::Min($cropSize, [math]::Min($sourceImage.Width, $sourceImage.Height))
+                $sourceX = [math]::Max(0, [math]::Min($sourceX, $sourceImage.Width - $cropSize))
+                $sourceY = [math]::Max(0, [math]::Min($sourceY, $sourceImage.Height - $cropSize))
+            } else {
+                # Fall back to the previous fixed crop if detection fails.
+                $cropSize = [math]::Min([int]($sourceImage.Width * 0.72), [int]($sourceImage.Height * 0.72))
+                $sourceX = [int](($sourceImage.Width - $cropSize) / 2)
+                $sourceY = 0
+            }
+            $sourceRectangle = New-Object System.Drawing.Rectangle($sourceX, $sourceY, $cropSize, $cropSize)
             $iconFrames = New-Object System.Collections.Generic.List[byte[]]
 
             foreach ($size in @(16, 24, 32, 48, 64, 128, 256)) {
