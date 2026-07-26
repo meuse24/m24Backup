@@ -6,7 +6,9 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ## [Unreleased]
 
-### Geändert
+## [1.12.0] – 2026-07-26
+
+### Hinzugefügt
 
 - Während Sicherung, Wiederherstellung, Prüfung und Löschung zeigt die
   Ordnerauswahl ein langsam pulsierendes Anwendungslogo im freien Bereich
@@ -16,6 +18,25 @@ dokumentiert. Die Versionierung orientiert sich an
   vollständig sichtbar und wird bei sehr wenig Platz ausgeblendet, statt
   angeschnitten zu erscheinen. Die Animation benötigt keine zusätzlichen
   Bilddateien.
+
+### Behoben
+
+- Das Anwendungssymbol war unten und rechts angeschnitten. `app.ico` wird beim
+  Bauen aus `logo.jpg` zugeschnitten; der feste Zuschnitt von 72 % ab der
+  Oberkante entfernte die unteren 94 Bildpunkte des Motivs samt USB-Stecker und
+  ließ das Bild randlos an der Kante enden. Der Zuschnitt vermisst jetzt das
+  Motiv und hält auf allen Seiten Abstand. Das wirkt sich auf Fenster- und
+  Taskleistensymbol, Startbild und Aktivitätsanzeige gleichermaßen aus.
+- Das pulsierende Logo wurde bei niedrigem Fenster zusätzlich abgeschnitten. Das
+  Zeichenfeld hatte eine feste Größe und ragte aus seinem Bereich heraus, sobald
+  dieser kleiner war als das Feld. Größe und Lage werden jetzt aus dem freien
+  Bereich abgeleitet und bei jeder Layoutänderung nachgeführt; die Mindesthöhe
+  des Fensters wurde von 700 auf 750 Punkte angehoben, damit der Platz dafür
+  auch im kleinsten Fenster reicht.
+
+## [1.11.0] – 2026-07-25
+
+### Geändert
 
 - Der Hinweis auf ein internes Sicherungsziel erscheint nur noch vor der
   ersten Sicherung auf dieses Laufwerk. Liegt dort bereits eine Sicherung des
@@ -70,18 +91,6 @@ dokumentiert. Die Versionierung orientiert sich an
 
 ### Behoben
 
-- Das Anwendungssymbol war unten und rechts angeschnitten. `app.ico` wird beim
-  Bauen aus `logo.jpg` zugeschnitten; der feste Zuschnitt von 72 % ab der
-  Oberkante entfernte die unteren 94 Bildpunkte des Motivs samt USB-Stecker und
-  ließ das Bild randlos an der Kante enden. Der Zuschnitt vermisst jetzt das
-  Motiv und hält auf allen Seiten Abstand. Das wirkt sich auf Fenster- und
-  Taskleistensymbol, Startbild und Aktivitätsanzeige gleichermaßen aus.
-- Das pulsierende Logo wurde bei niedrigem Fenster zusätzlich abgeschnitten. Das
-  Zeichenfeld hatte eine feste Größe und ragte aus seinem Bereich heraus, sobald
-  dieser kleiner war als das Feld. Größe und Lage werden jetzt aus dem freien
-  Bereich abgeleitet und bei jeder Layoutänderung nachgeführt; die Mindesthöhe
-  des Fensters wurde von 700 auf 750 Punkte angehoben, damit der Platz dafür
-  auch im kleinsten Fenster reicht.
 - Die Wiederherstellung brach mit „Die Konfliktvorschau konnte nicht gelesen
   werden" ab, sobald das Backup ein Prüfsummenmanifest besaß, das seit der
   letzten Sicherung nicht geprüft worden war. Ursache waren typografische
@@ -102,6 +111,10 @@ dokumentiert. Die Versionierung orientiert sich an
 - Ein Abbruch während der Verzeichnisaufzählung einer Prüfsummenaktualisierung
   wird nun als Abbruch gemeldet, statt einen unvollständigen Bestand als
   gültiges Manifest zu schreiben.
+
+## [1.10.0] – 2026-07-23
+
+### Geändert
 
 - Der Wiederherstellungsmodus erkennt nun alle Sicherungen auf dem gewählten
   Laufwerk. Vollständige Sicherungen anderer Computer oder Benutzer können in
